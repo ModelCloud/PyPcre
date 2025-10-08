@@ -8,7 +8,8 @@ import unittest
 import pcre
 
 
-BACKEND_IS_FALLBACK = getattr(pcre._pcre2, "__name__", "") == "pcre._fallback"
+BACKEND = getattr(pcre, "cpcre2", getattr(pcre, "_pcre2", None))
+BACKEND_IS_FALLBACK = getattr(BACKEND, "__name__", "") == "pcre._fallback"
 
 
 class TestUTF8Coverage(unittest.TestCase):

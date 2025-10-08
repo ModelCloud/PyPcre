@@ -11,7 +11,7 @@ from collections import OrderedDict
 from threading import RLock
 from typing import Any, Callable, Tuple, TypeVar
 
-from . import _pcre2
+from . import cpcre2 as _pcre2
 
 
 T = TypeVar("T")

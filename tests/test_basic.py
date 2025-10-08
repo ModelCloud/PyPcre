@@ -10,7 +10,8 @@ import pcre
 from pcre import Flag
 
 
-BACKEND_IS_FALLBACK = getattr(pcre._pcre2, "__name__", "") == "pcre._fallback"
+BACKEND = getattr(pcre, "cpcre2", getattr(pcre, "_pcre2", None))
+BACKEND_IS_FALLBACK = getattr(BACKEND, "__name__", "") == "pcre._fallback"
 
 
 class TestPCRE2Basics(unittest.TestCase):
@@ -147,11 +148,11 @@ class TestPCRE2Basics(unittest.TestCase):
         self.assertTrue(hasattr(pcre, "Flag"))
         self.assertFalse(hasattr(pcre, "PCRE2_MULTILINE"))
         self.assertFalse(hasattr(pcre, "NO_UTF"))
-        self.assertEqual(int(Flag.MULTILINE), getattr(pcre._pcre2, "PCRE2_MULTILINE"))
+        self.assertEqual(int(Flag.MULTILINE), getattr(BACKEND, "PCRE2_MULTILINE"))
         combo = Flag.CASELESS | Flag.MULTILINE
         self.assertEqual(
             int(combo),
-            getattr(pcre._pcre2, "PCRE2_CASELESS") | getattr(pcre._pcre2, "PCRE2_MULTILINE"),
+            getattr(BACKEND, "PCRE2_CASELESS") | getattr(BACKEND, "PCRE2_MULTILINE"),
         )
 
 

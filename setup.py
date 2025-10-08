@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+
 from __future__ import annotations
 
 import os
@@ -11,7 +16,7 @@ from pathlib import Path
 from setuptools import Extension, setup
 
 
-MODULE_SOURCES = ["pcre/_pcre2module.c"]
+MODULE_SOURCES = ["pcre/cpcre2.c"]
 
 LIB_EXTENSIONS = [
     ".so",
@@ -283,7 +288,7 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
 
 
 EXTENSION = Extension(
-    name="pcre._pcre2",
+    name="pcre.cpcre2",
     sources=MODULE_SOURCES,
     **_collect_build_config(),
 )

@@ -12,7 +12,7 @@ from collections.abc import Generator, Iterable
 from re import _parser
 from typing import Any, List
 
-from . import _pcre2
+from . import cpcre2 as _pcre2
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
 from .flags import NO_UCP, NO_UTF, strip_py_only_flags
@@ -112,7 +112,7 @@ def _call_with_optional_end(method, subject: Any, pos: int, endpos: int | None, 
 
 
 class Pattern:
-    """High-level wrapper around the C-backed :class:`_pcre2.Pattern`."""
+    """High-level wrapper around the C-backed :class:`cpcre2.Pattern`."""
 
     __slots__ = ("_pattern", "_groups_hint")
 

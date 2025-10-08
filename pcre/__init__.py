@@ -6,7 +6,7 @@
 """High level Python bindings for PCRE2.
 
 This package exposes a Pythonic API on top of the low-level C extension found in
-``pcre._pcre2``. The wrapper keeps friction low compared to :mod:`re` while
+``pcre.cpcre2``. The wrapper keeps friction low compared to :mod:`re` while
 surfacing PCRE2-specific flags and behaviours.
 """
 
@@ -16,7 +16,7 @@ import re as _std_re
 from enum import IntFlag
 from typing import Any
 
-from . import _pcre2
+from . import cpcre2
 from .flags import PY_ONLY_FLAG_MEMBERS
 from .pcre import (
     Match,
@@ -35,14 +35,14 @@ from .pcre import (
 )
 
 
-__version__ = getattr(_pcre2, "__version__", "0.0")
+__version__ = getattr(cpcre2, "__version__", "0.0")
 
 _FLAG_MEMBERS: dict[str, int] = {}
 
-for _name in dir(_pcre2):
+for _name in dir(cpcre2):
     if not _name.startswith("PCRE2_"):
         continue
-    _value = getattr(_pcre2, _name)
+    _value = getattr(cpcre2, _name)
 
     if isinstance(_value, int) and _name != "PCRE2_CODE_UNIT_WIDTH":
         _FLAG_MEMBERS[_name.removeprefix("PCRE2_")] = _value

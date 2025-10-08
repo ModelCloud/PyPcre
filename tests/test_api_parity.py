@@ -11,6 +11,9 @@ import pytest
 from pcre import Flag
 
 
+BACKEND = getattr(pcre, "cpcre2", getattr(pcre, "_pcre2", None))
+
+
 def test_purge_aliases_clear_cache():
     assert pcre.purge is pcre.clear_cache
 
@@ -23,10 +26,10 @@ def test_error_aliases_and_escape():
     assert hasattr(pcre.Flag, "CASELESS")
     assert not hasattr(pcre, "PCRE2_CASELESS")
     assert not hasattr(pcre, "PCRE2_UTF")
-    assert int(pcre.Flag.CASELESS) == getattr(pcre._pcre2, "PCRE2_CASELESS")
-    assert int(pcre.Flag.UTF) == getattr(pcre._pcre2, "PCRE2_UTF")
+    assert int(pcre.Flag.CASELESS) == getattr(BACKEND, "PCRE2_CASELESS")
+    assert int(pcre.Flag.UTF) == getattr(BACKEND, "PCRE2_UTF")
     assert (pcre.Flag.CASELESS | pcre.Flag.UTF) == (
-            getattr(pcre._pcre2, "PCRE2_CASELESS") | getattr(pcre._pcre2, "PCRE2_UTF")
+            getattr(BACKEND, "PCRE2_CASELESS") | getattr(BACKEND, "PCRE2_UTF")
     )
     assert pcre.escape("a+b") == re.escape("a+b")
     assert pcre.escape(b"a+b") == re.escape(b"a+b")
