@@ -1,3 +1,10 @@
+<!--
+# SPDX-FileCopyrightText: 2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+-->
+
 # Pcre (Python Pcre2 Binding)
 
 Python bindings for the system PCRE2 library with a familiar `re`-style API.
