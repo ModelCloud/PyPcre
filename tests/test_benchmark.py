@@ -89,7 +89,7 @@ class TestRegexBenchmarks(unittest.TestCase):
             raise unittest.SkipTest("Iterations must be positive for meaningful benchmarks")
 
     def test_single_thread_patterns(self):
-        results = []
+        results_by_combo = collections.defaultdict(list)
         for engine_name, module, compile_fn in self.engines:
             module_ops = _build_module_operations(module)
             for pattern_text, subjects in PATTERN_CASES:
@@ -108,11 +108,9 @@ class TestRegexBenchmarks(unittest.TestCase):
                         elapsed = time.perf_counter() - start
                         self.assertEqual(call_count, expected_calls)
                         self.assertGreaterEqual(elapsed, 0.0)
-                        results.append(
+                        results_by_combo[(pattern_text, op_name)].append(
                             {
                                 "engine": engine_name,
-                                "pattern": pattern_text,
-                                "operation": op_name,
                                 "calls": expected_calls,
                                 "total_ms": elapsed * 1000,
                                 "per_call_ns": (elapsed / expected_calls) * 1e9,
@@ -130,31 +128,47 @@ class TestRegexBenchmarks(unittest.TestCase):
                         elapsed = time.perf_counter() - start
                         self.assertEqual(call_count, expected_calls)
                         self.assertGreaterEqual(elapsed, 0.0)
-                        results.append(
+                        results_by_combo[(pattern_text, op_name)].append(
                             {
                                 "engine": engine_name,
-                                "pattern": pattern_text,
-                                "operation": op_name,
                                 "calls": expected_calls,
                                 "total_ms": elapsed * 1000,
                                 "per_call_ns": (elapsed / expected_calls) * 1e9,
                             }
                         )
 
-        if results:
+        if results_by_combo:
             print("\nSingle-thread benchmark results:")
-            print(
-                tabulate(
-                    results,
-                    headers="keys",
-                    floatfmt=".3f",
-                    tablefmt="github",
+            for (pattern_text, op_name) in sorted(results_by_combo):
+                result_rows = sorted(
+                    results_by_combo[(pattern_text, op_name)],
+                    key=lambda row: row["total_ms"],
                 )
-            )
+                present_engines = {row["engine"] for row in result_rows}
+                for engine_name, _, _ in self.engines:
+                    if engine_name not in present_engines:
+                        result_rows.append(
+                            {
+                                "engine": engine_name,
+                                "calls": "n/a",
+                                "total_ms": "n/a",
+                                "per_call_ns": "n/a",
+                            }
+                        )
+                result_rows.sort(key=lambda row: row["total_ms"] if isinstance(row["total_ms"], (int, float)) else float("inf"))
+                print(f"\nPattern: {pattern_text} | Operation: {op_name}")
+                print(
+                    tabulate(
+                        result_rows,
+                        headers="keys",
+                        floatfmt=".3f",
+                        tablefmt="github",
+                    )
+                )
 
     def test_multi_threaded_match(self):
         pattern_text, subjects = PATTERN_CASES[0]
-        results = []
+        results_by_combo = collections.defaultdict(list)
         for engine_name, module, compile_fn in self.engines:
             if engine_name == "regex":
                 # The third-party regex engine is not guaranteed GIL=0 safe, so keep it single-threaded.
@@ -175,10 +189,9 @@ class TestRegexBenchmarks(unittest.TestCase):
                 self.assertEqual(len(thread_times), THREAD_COUNT)
                 for duration in thread_times:
                     self.assertGreaterEqual(duration, 0.0)
-                results.append(
+                results_by_combo[(pattern_text, op_name)].append(
                     {
                         "engine": engine_name,
-                        "operation": op_name,
                         "threads": THREAD_COUNT,
                         "min_ms": min(thread_times) * 1000,
                         "median_ms": median(thread_times) * 1000,
@@ -188,16 +201,37 @@ class TestRegexBenchmarks(unittest.TestCase):
                     }
                 )
 
-        if results:
+        if results_by_combo:
             print("\nMulti-thread benchmark results:")
-            print(
-                tabulate(
-                    results,
-                    headers="keys",
-                    floatfmt=".3f",
-                    tablefmt="github",
+            for (pattern_text, op_name) in sorted(results_by_combo):
+                result_rows = sorted(
+                    results_by_combo[(pattern_text, op_name)],
+                    key=lambda row: row["mean_ms"],
                 )
-            )
+                present_engines = {row["engine"] for row in result_rows}
+                for engine_name, _, _ in self.engines:
+                    if engine_name not in present_engines:
+                        result_rows.append(
+                            {
+                                "engine": engine_name,
+                                "threads": "n/a",
+                                "min_ms": "n/a",
+                                "median_ms": "n/a",
+                                "max_ms": "n/a",
+                                "mean_ms": "n/a",
+                                "total_ms": "n/a",
+                            }
+                        )
+                result_rows.sort(key=lambda row: row["mean_ms"] if isinstance(row["mean_ms"], (int, float)) else float("inf"))
+                print(f"\nPattern: {pattern_text} | Operation: {op_name}")
+                print(
+                    tabulate(
+                        result_rows,
+                        headers="keys",
+                        floatfmt=".3f",
+                        tablefmt="github",
+                    )
+                )
 
     def _run_thread_benchmark(self, operation, subjects):
         start_barrier = threading.Barrier(THREAD_COUNT + 1)
