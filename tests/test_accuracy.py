@@ -8,6 +8,7 @@ import unittest
 
 import pcre
 
+
 try:
     import pcre2 as external_pcre2
 except ImportError:  # pragma: no cover - optional dependency

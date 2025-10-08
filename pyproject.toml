@@ -31,4 +31,4 @@ keywords = ["regex", "pcre2", "bindings"]
 Homepage = "https://github.com/ModelCloud/pcre"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["."]

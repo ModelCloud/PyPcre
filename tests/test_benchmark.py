@@ -5,12 +5,13 @@
 
 import collections
 import os
+import re
 import threading
 import time
 import unittest
 
 import pcre
-import re
+
 
 try:
     import pcre2 as external_pcre2

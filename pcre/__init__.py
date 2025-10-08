@@ -12,10 +12,9 @@ surfacing PCRE2-specific flags and behaviours.
 
 from __future__ import annotations
 
+import re as _std_re
 from enum import IntFlag
 from typing import Any
-
-import re as _std_re
 
 from . import _pcre2
 from .flags import PY_ONLY_FLAG_MEMBERS
@@ -34,6 +33,7 @@ from .pcre import (
     sub,
     subn,
 )
+
 
 __version__ = getattr(_pcre2, "__version__", "0.0")
 

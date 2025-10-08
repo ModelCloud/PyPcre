@@ -6,9 +6,8 @@
 import re
 from enum import IntFlag
 
-import pytest
-
 import pcre
+import pytest
 from pcre import Flag
 
 
@@ -27,7 +26,7 @@ def test_error_aliases_and_escape():
     assert int(pcre.Flag.CASELESS) == getattr(pcre._pcre2, "PCRE2_CASELESS")
     assert int(pcre.Flag.UTF) == getattr(pcre._pcre2, "PCRE2_UTF")
     assert (pcre.Flag.CASELESS | pcre.Flag.UTF) == (
-        getattr(pcre._pcre2, "PCRE2_CASELESS") | getattr(pcre._pcre2, "PCRE2_UTF")
+            getattr(pcre._pcre2, "PCRE2_CASELESS") | getattr(pcre._pcre2, "PCRE2_UTF")
     )
     assert pcre.escape("a+b") == re.escape("a+b")
     assert pcre.escape(b"a+b") == re.escape(b"a+b")

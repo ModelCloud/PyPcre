@@ -10,7 +10,8 @@ from pathlib import Path
 
 from setuptools import Extension, setup
 
-MODULE_SOURCES = ["src/pcre/_pcre2module.c"]
+
+MODULE_SOURCES = ["pcre/_pcre2module.c"]
 
 LIB_EXTENSIONS = [
     ".so",

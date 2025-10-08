@@ -2,7 +2,6 @@ import types
 from collections import OrderedDict
 
 import pytest
-
 from pcre import cache as cache_mod
 from pcre import pcre as core
 from pcre.flags import strip_py_only_flags

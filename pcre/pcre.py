@@ -13,15 +13,16 @@ from re import _parser
 from typing import Any, List
 
 from . import _pcre2
-from .cache import cached_compile, clear_cache as _clear_cache
+from .cache import cached_compile
+from .cache import clear_cache as _clear_cache
 from .flags import NO_UCP, NO_UTF, strip_py_only_flags
 from .re_compat import (
     Match,
     TemplatePatternStub,
-    compute_next_pos,
-    count_capturing_groups,
     coerce_group_value,
     coerce_subject_slice,
+    compute_next_pos,
+    count_capturing_groups,
     is_bytes_like,
     join_parts,
     maybe_infer_group_count,
@@ -31,6 +32,7 @@ from .re_compat import (
     render_template,
     resolve_endpos,
 )
+
 
 _CPattern = _pcre2.Pattern
 PcreError = _pcre2.PcreError

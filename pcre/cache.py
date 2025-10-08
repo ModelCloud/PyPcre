@@ -13,6 +13,7 @@ from typing import Any, Callable, Tuple, TypeVar
 
 from . import _pcre2
 
+
 T = TypeVar("T")
 
 _MAX_PATTERN_CACHE = 2048

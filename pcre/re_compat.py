@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import operator
 import re as _std_re
-from collections.abc import Iterable
 from re import _parser
 from typing import Any, List
 
 from . import _pcre2
+
 
 _CRawMatch = _pcre2.Match
 

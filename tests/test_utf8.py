@@ -7,6 +7,7 @@ import unittest
 
 import pcre
 
+
 BACKEND_IS_FALLBACK = getattr(pcre._pcre2, "__name__", "") == "pcre._fallback"
 
 
