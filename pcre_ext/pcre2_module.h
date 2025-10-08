@@ -33,7 +33,9 @@ typedef struct {
     PyObject_HEAD
     PatternObject *pattern;
     PyObject *subject;
-    PyObject *subject_bytes;
+    PyObject *utf8_owner;
+    const char *utf8_data;
+    Py_ssize_t utf8_length;
     Py_ssize_t *ovector;
     uint32_t ovec_count;
     int subject_is_bytes;

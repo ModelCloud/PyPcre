@@ -273,6 +273,20 @@ class Pattern:
         subject = prepare_subject(subject)
         origin_pos = pos
         resolved_end = resolve_endpos(subject, endpos)
+        backend_iter = getattr(self._pattern, "finditer", None)
+        if backend_iter is not None:
+            compiled_end = resolved_end if endpos is not None else -1
+            try:
+                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+            except TypeError:
+                raw_iter = None
+            if raw_iter is not None:
+                for raw in raw_iter:
+                    match_obj = Match(self, raw, subject, origin_pos, resolved_end)
+                    self._update_group_hint(match_obj)
+                    yield match_obj
+                return
+
         search_end = resolved_end if endpos is not None else -1
         current = pos
         subject_length = len(subject)
