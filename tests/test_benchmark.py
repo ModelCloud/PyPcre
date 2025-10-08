@@ -19,6 +19,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     external_pcre2 = None
 
+try:
+    import regex as external_regex
+except ImportError:  # pragma: no cover - optional dependency
+    external_regex = None
+
 from tabulate import tabulate
 
 
@@ -78,6 +83,8 @@ class TestRegexBenchmarks(unittest.TestCase):
         ]
         if external_pcre2 is not None:
             cls.engines.append(("pcre2", external_pcre2, lambda pattern: external_pcre2.compile(pattern)))
+        if external_regex is not None:
+            cls.engines.append(("regex", external_regex, lambda pattern: external_regex.compile(pattern)))
         if SINGLE_ITERATIONS <= 0 or THREAD_ITERATIONS <= 0:
             raise unittest.SkipTest("Iterations must be positive for meaningful benchmarks")
 
@@ -149,6 +156,9 @@ class TestRegexBenchmarks(unittest.TestCase):
         pattern_text, subjects = PATTERN_CASES[0]
         results = []
         for engine_name, module, compile_fn in self.engines:
+            if engine_name == "regex":
+                # The third-party regex engine is not guaranteed GIL=0 safe, so keep it single-threaded.
+                continue
             compiled = compile_fn(pattern_text)
             compiled_ops = _build_compiled_operations(compiled)
             if "search" in compiled_ops:
