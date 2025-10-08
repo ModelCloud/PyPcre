@@ -35,6 +35,24 @@ def test_error_aliases_and_escape():
     assert pcre.escape(b"a+b") == re.escape(b"a+b")
 
 
+def test_specific_compile_error_exposes_dedicated_exception():
+    with pytest.raises(pcre.PcreErrorMissingClosingParenthesis) as info:
+        pcre.compile("(")
+
+    exc = info.value
+    assert isinstance(exc, pcre.PcreError)
+    assert exc.macro == "PCRE2_ERROR_MISSING_CLOSING_PARENTHESIS"
+    expected = getattr(BACKEND, "PCRE2_ERROR_MISSING_CLOSING_PARENTHESIS")
+    assert exc.code == expected
+    assert exc.error_code is pcre.PcreErrorCode.MISSING_CLOSING_PARENTHESIS
+
+
+def test_error_classes_and_enum_are_reexported():
+    assert hasattr(pcre, "PcreErrorJitStacklimit")
+    assert issubclass(pcre.PcreErrorJitStacklimit, pcre.PcreError)
+    assert pcre.PcreErrorCode.JIT_STACKLIMIT.value == getattr(BACKEND, "PCRE2_ERROR_JIT_STACKLIMIT")
+
+
 def test_compile_accepts_stdlib_regex_flags():
     compiled = pcre.compile(r"pattern", flags=re.RegexFlag.IGNORECASE | re.RegexFlag.DOTALL)
     assert isinstance(compiled, pcre.Pattern)

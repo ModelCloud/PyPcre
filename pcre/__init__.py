@@ -13,7 +13,7 @@ surfacing PCRE2-specific flags and behaviours.
 from __future__ import annotations
 
 import re as _std_re
-from enum import IntFlag
+from enum import IntEnum, IntFlag
 from typing import Any
 
 from . import cpcre2
@@ -41,14 +41,23 @@ from .pcre import (
 __version__ = getattr(cpcre2, "__version__", "0.0")
 
 _FLAG_MEMBERS: dict[str, int] = {}
+_ERROR_CODE_MEMBERS: dict[str, int] = {}
 
 for _name in dir(cpcre2):
     if not _name.startswith("PCRE2_"):
         continue
     _value = getattr(cpcre2, _name)
+    if not isinstance(_value, int):
+        continue
 
-    if isinstance(_value, int) and _name != "PCRE2_CODE_UNIT_WIDTH":
-        _FLAG_MEMBERS[_name.removeprefix("PCRE2_")] = _value
+    if _name == "PCRE2_CODE_UNIT_WIDTH":
+        continue
+
+    if _name.startswith("PCRE2_ERROR_"):
+        _ERROR_CODE_MEMBERS[_name.removeprefix("PCRE2_ERROR_")] = _value
+        continue
+
+    _FLAG_MEMBERS[_name.removeprefix("PCRE2_")] = _value
 
 _FLAG_MEMBERS.update(PY_ONLY_FLAG_MEMBERS)
 
@@ -58,6 +67,31 @@ if _FLAG_MEMBERS:
 else:  # pragma: no cover - defensive fallback that should never trigger
     class Flag(IntFlag):
         """Empty IntFlag placeholder when no PCRE2 constants are available."""
+
+
+if _ERROR_CODE_MEMBERS:
+    PcreErrorCode = IntEnum("PcreErrorCode", _ERROR_CODE_MEMBERS)
+    PcreErrorCode.__doc__ = "IntEnum exposing PCRE2 error identifiers."
+else:  # pragma: no cover - defensive fallback that should never trigger
+    class PcreErrorCode(IntEnum):
+        """Empty IntEnum placeholder when PCRE2 error constants are unavailable."""
+
+
+def _error_code_property(self) -> PcreErrorCode | None:
+    try:
+        return PcreErrorCode(self.code)
+    except (ValueError, TypeError):
+        return None
+
+
+PcreError.error_code = property(_error_code_property)
+
+
+_EXPORTED_ERROR_CLASSES: list[str] = []
+for _name in dir(cpcre2):
+    if _name.startswith("PcreError") and _name != "PcreError":
+        globals()[_name] = getattr(cpcre2, _name)
+        _EXPORTED_ERROR_CLASSES.append(_name)
 
 
 purge = clear_cache
@@ -75,6 +109,7 @@ __all__ = [
     "Pattern",
     "Match",
     "PcreError",
+    "PcreErrorCode",
     "clear_cache",
     "purge",
     "configure",
@@ -95,3 +130,5 @@ __all__ = [
     "Flag",
     "escape",
 ]
+
+__all__ += _EXPORTED_ERROR_CLASSES
