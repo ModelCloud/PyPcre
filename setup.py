@@ -16,7 +16,13 @@ from pathlib import Path
 from setuptools import Extension, setup
 
 
-MODULE_SOURCES = ["pcre/cpcre2.c"]
+MODULE_SOURCES = [
+    "pcre/pcre_ext/pcre2.c",
+    "pcre/pcre_ext/error.c",
+    "pcre/pcre_ext/cache.c",
+    "pcre/pcre_ext/flag.c",
+    "pcre/pcre_ext/util.c",
+]
 
 LIB_EXTENSIONS = [
     ".so",
