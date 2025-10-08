@@ -1,0 +1,511 @@
+import types
+from collections import OrderedDict
+
+import pytest
+
+from pcre import cache as cache_mod
+from pcre import pcre as core
+from pcre.flags import strip_py_only_flags
+
+
+class MethodRecorder:
+    def __init__(self, return_value):
+        self.return_value = return_value
+        self.calls = []
+
+    def __call__(self, subject, **kwargs):
+        self.calls.append({"subject": subject, **kwargs})
+        return self.return_value
+
+
+class SequencedSearch:
+    def __init__(self, results):
+        self._results = list(results)
+        self.calls = []
+
+    def __call__(self, subject, *, pos, endpos, options):
+        index = len(self.calls)
+        self.calls.append({"subject": subject, "pos": pos, "endpos": endpos, "options": options})
+        if index >= len(self._results):
+            return None
+        return self._results[index]
+
+
+class FakeMatch:
+    def __init__(self, span, groups=(), group0=None, named=None):
+        self._span = span
+        self._groups = tuple(groups)
+        if group0 is None and not self._groups:
+            raise ValueError("group0 must be supplied when no groups are present")
+        self._group0 = group0 if group0 is not None else self._groups[0]
+        self._named = dict(named or {})
+
+    def span(self, group=0):
+        if group == 0:
+            return self._span
+        index = group - 1
+        if 0 <= index < len(self._groups):
+            return self._span
+        raise IndexError(group)
+
+    def start(self, group=0):
+        return self.span(group)[0]
+
+    def end(self, group=0):
+        return self.span(group)[1]
+
+    def groups(self, default=None):
+        if not self._groups:
+            return ()
+        return tuple(value if value is not None else default for value in self._groups)
+
+    def group(self, *indices):
+        if not indices:
+            return self._group0
+        if len(indices) == 1:
+            index = indices[0]
+            if index == 0:
+                return self._group0
+            if isinstance(index, str):
+                return self._named.get(index)
+            return self._groups[index - 1]
+        return tuple(self.group(index) for index in indices)
+
+    def groupdict(self, default=None):
+        return {name: value if value is not None else default for name, value in self._named.items()}
+
+
+def test_compile_returns_existing_pattern_instance():
+    existing = core.Pattern.__new__(core.Pattern)
+    existing._pattern = object()
+
+    assert core.compile(existing) is existing
+
+
+def test_compile_with_existing_pattern_and_flags_raises():
+    existing = core.Pattern.__new__(core.Pattern)
+    existing._pattern = object()
+
+    with pytest.raises(ValueError):
+        core.compile(existing, flags=1)
+
+
+def test_compile_wraps_cpattern(monkeypatch):
+    class DummyCPattern:
+        def __init__(self):
+            self.pattern = "literal"
+            self.groupindex = {"name": 1}
+            self.flags = 42
+            self.match = MethodRecorder("match")
+            self.search = MethodRecorder("search")
+            self.fullmatch = MethodRecorder("fullmatch")
+
+    monkeypatch.setattr(core, "_CPattern", DummyCPattern)
+
+    compiled = core.compile(DummyCPattern())
+
+    assert isinstance(compiled, core.Pattern)
+    assert compiled.pattern == "literal"
+    assert compiled.groupindex == {"name": 1}
+    assert compiled.flags == 42
+
+
+def test_compile_uses_cached_compile(monkeypatch):
+    captured = {}
+
+    def fake_cached(pattern, flags, wrapper):
+        captured["args"] = (pattern, flags, wrapper)
+        fake_cpattern = types.SimpleNamespace(
+            pattern=pattern,
+            groupindex={},
+            flags=flags,
+            match=MethodRecorder("match"),
+            search=MethodRecorder("search"),
+            fullmatch=MethodRecorder("fullmatch"),
+        )
+        return wrapper(fake_cpattern)
+
+    monkeypatch.setattr(core, "cached_compile", fake_cached)
+
+    provided_flags = 7
+    expected_flags = strip_py_only_flags(core._apply_default_unicode_flags("expr", provided_flags))
+
+    result = core.compile("expr", flags=provided_flags)
+
+    assert captured["args"] == ("expr", expected_flags, core.Pattern)
+    assert isinstance(result, core.Pattern)
+    assert result.pattern == "expr"
+    assert result.flags == expected_flags
+
+
+def test_compile_accepts_iterable_flags(monkeypatch):
+    captured = {}
+
+    def fake_cached(pattern, flags, wrapper):
+        captured["flags"] = flags
+        fake_cpattern = types.SimpleNamespace(
+            pattern=pattern,
+            groupindex={},
+            flags=flags,
+            match=MethodRecorder("match"),
+            search=MethodRecorder("search"),
+            fullmatch=MethodRecorder("fullmatch"),
+        )
+        return wrapper(fake_cpattern)
+
+    monkeypatch.setattr(core, "cached_compile", fake_cached)
+
+    flag_one = 0x00000001
+    flag_two = 0x00000002
+    combined = flag_one | flag_two
+
+    provided_flags = (flag_one, flag_two, flag_two)
+    expected_flags = strip_py_only_flags(core._apply_default_unicode_flags("expr", combined))
+
+    result = core.compile("expr", flags=provided_flags)
+
+    assert captured["flags"] == expected_flags
+    assert isinstance(result, core.Pattern)
+    assert result.flags == expected_flags
+
+
+def test_compile_rejects_non_int_iterable_flags():
+    with pytest.raises(TypeError):
+        core.compile("expr", flags=("not", "ints"))
+
+
+def test_pattern_match_handles_optional_end():
+    match_method = MethodRecorder(FakeMatch((0, 3), group0="matched"))
+    fake_cpattern = types.SimpleNamespace(
+        pattern="pat",
+        groupindex={},
+        flags=0,
+        match=match_method,
+        search=MethodRecorder("search"),
+        fullmatch=MethodRecorder("full"),
+    )
+    pattern = core.Pattern(fake_cpattern)
+
+    result = pattern.match("subject")
+    assert result.group(0) == "matched"
+    first_call = match_method.calls[0]
+    assert first_call == {"subject": "subject", "pos": 0, "options": 0}
+
+    pattern.match("other", pos=3, endpos=8, options=5)
+    second_call = match_method.calls[1]
+    assert second_call["pos"] == 3
+    assert second_call["options"] == 5
+    assert second_call["endpos"] == 8
+
+
+def test_pattern_search_and_fullmatch_delegate():
+    search_method = MethodRecorder(FakeMatch((2, 4), group0="search-result"))
+    fullmatch_method = MethodRecorder(FakeMatch((1, 5), group0="full-result"))
+    fake_cpattern = types.SimpleNamespace(
+        pattern="pat",
+        groupindex={},
+        flags=0,
+        match=MethodRecorder("match"),
+        search=search_method,
+        fullmatch=fullmatch_method,
+    )
+    pattern = core.Pattern(fake_cpattern)
+
+    search_result = pattern.search("subject", pos=2, options=4)
+    assert search_result.group(0) == "search-result"
+    search_call = search_method.calls[0]
+    assert search_call == {"subject": "subject", "pos": 2, "options": 4}
+
+    full_result = pattern.fullmatch("subject", pos=1, endpos=5, options=6)
+    assert full_result.group(0) == "full-result"
+    full_call = fullmatch_method.calls[0]
+    assert full_call["endpos"] == 5
+    assert full_call["pos"] == 1
+    assert full_call["options"] == 6
+
+
+def test_pattern_finditer_advances_on_zero_width_matches():
+    zero_width = FakeMatch((0, 0), group0="")
+    consuming = FakeMatch((1, 3), group0="ab")
+    sequenced_search = SequencedSearch([zero_width, consuming])
+    fake_cpattern = types.SimpleNamespace(
+        pattern="pat",
+        groupindex={},
+        flags=0,
+        search=sequenced_search,
+    )
+    pattern = core.Pattern(fake_cpattern)
+
+    matches = list(pattern.finditer("abc", options=7))
+
+    assert [m.group(0) for m in matches] == ["", "ab"]
+    assert len(sequenced_search.calls) == 3
+    assert sequenced_search.calls[0]["pos"] == 0
+    assert sequenced_search.calls[1]["pos"] == 1
+    assert sequenced_search.calls[2]["pos"] == 3
+
+
+def test_pattern_finditer_respects_endpos_limit():
+    first = FakeMatch((0, 1), group0="a")
+    second = FakeMatch((1, 3), group0="bc")
+    sequenced_search = SequencedSearch([first, second])
+    fake_cpattern = types.SimpleNamespace(
+        pattern="pat",
+        groupindex={},
+        flags=0,
+        search=sequenced_search,
+    )
+    pattern = core.Pattern(fake_cpattern)
+
+    matches = list(pattern.finditer("abcdef", endpos=3))
+
+    assert [m.group(0) for m in matches] == ["a", "bc"]
+    assert len(sequenced_search.calls) == 2
+    for call in sequenced_search.calls:
+        assert call["endpos"] == 3
+
+
+def test_pattern_findall_normalises_results(monkeypatch):
+    calls = []
+
+    def fake_finditer(self, subject, *, pos, endpos, options):
+        calls.append((subject, pos, endpos, options))
+        yield FakeMatch((0, 3), group0="abc")
+        yield FakeMatch((3, 6), groups=("grp",))
+        yield FakeMatch((6, 9), groups=("a", "b"))
+
+    monkeypatch.setattr(core.Pattern, "finditer", fake_finditer)
+
+    pattern = core.Pattern.__new__(core.Pattern)
+    pattern._pattern = None
+
+    results = pattern.findall("subject", pos=2, endpos=8, options=5)
+
+    assert results == ["abc", "grp", ("a", "b")]
+    assert calls == [("subject", 2, 8, 5)]
+
+
+def test_module_match_delegates(monkeypatch):
+    seen = {}
+
+    class DummyPattern:
+        def __init__(self):
+            self.calls = []
+
+        def match(self, text):
+            self.calls.append(text)
+            return "match-result"
+
+    dummy = DummyPattern()
+
+    def fake_compile(pattern, flags=0):
+        seen["args"] = (pattern, flags)
+        return dummy
+
+    monkeypatch.setattr(core, "compile", fake_compile)
+
+    result = core.match("expr", "subject", flags=9)
+
+    assert seen["args"] == ("expr", 9)
+    assert dummy.calls == ["subject"]
+    assert result == "match-result"
+
+
+def test_module_search_delegates(monkeypatch):
+    seen = {}
+
+    class DummyPattern:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, text):
+            self.calls.append(text)
+            return "search-result"
+
+    dummy = DummyPattern()
+
+    def fake_compile(pattern, flags=0):
+        seen["args"] = (pattern, flags)
+        return dummy
+
+    monkeypatch.setattr(core, "compile", fake_compile)
+
+    result = core.search("expr", "subject", flags=3)
+
+    assert seen["args"] == ("expr", 3)
+    assert dummy.calls == ["subject"]
+    assert result == "search-result"
+
+
+def test_module_fullmatch_delegates(monkeypatch):
+    seen = {}
+
+    class DummyPattern:
+        def __init__(self):
+            self.calls = []
+
+        def fullmatch(self, text):
+            self.calls.append(text)
+            return "full-result"
+
+    dummy = DummyPattern()
+
+    def fake_compile(pattern, flags=0):
+        seen["args"] = (pattern, flags)
+        return dummy
+
+    monkeypatch.setattr(core, "compile", fake_compile)
+
+    result = core.fullmatch("expr", "subject", flags=11)
+
+    assert seen["args"] == ("expr", 11)
+    assert dummy.calls == ["subject"]
+    assert result == "full-result"
+
+
+def test_module_finditer_delegates(monkeypatch):
+    seen = {}
+
+    class DummyPattern:
+        def __init__(self):
+            self.calls = []
+
+        def finditer(self, text):
+            self.calls.append(text)
+            yield "first"
+            yield "second"
+
+    dummy = DummyPattern()
+
+    def fake_compile(pattern, flags=0):
+        seen["args"] = (pattern, flags)
+        return dummy
+
+    monkeypatch.setattr(core, "compile", fake_compile)
+
+    results = list(core.finditer("expr", "subject", flags=4))
+
+    assert seen["args"] == ("expr", 4)
+    assert dummy.calls == ["subject"]
+    assert results == ["first", "second"]
+
+
+def test_module_findall_delegates(monkeypatch):
+    seen = {}
+
+    class DummyPattern:
+        def __init__(self):
+            self.calls = []
+
+        def findall(self, text):
+            self.calls.append(text)
+            return ["a", "b"]
+
+    dummy = DummyPattern()
+
+    def fake_compile(pattern, flags=0):
+        seen["args"] = (pattern, flags)
+        return dummy
+
+    monkeypatch.setattr(core, "compile", fake_compile)
+
+    results = core.findall("expr", "subject", flags=6)
+
+    assert seen["args"] == ("expr", 6)
+    assert dummy.calls == ["subject"]
+    assert results == ["a", "b"]
+
+
+def test_module_clear_cache_invokes_helper(monkeypatch):
+    called = False
+
+    def fake_clear():
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(core, "_clear_cache", fake_clear)
+
+    core.clear_cache()
+
+    assert called is True
+
+
+def test_cached_compile_caches_hashable_patterns(monkeypatch):
+    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
+    compiled_calls = []
+
+    def fake_compile(pattern, *, flags=0):
+        compiled_calls.append((pattern, flags))
+        return f"compiled:{pattern}:{flags}"
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+
+    wrapped_calls = []
+
+    def wrapper(raw):
+        wrapped_calls.append(raw)
+        return f"wrapped:{raw}"
+
+    first = cache_mod.cached_compile("expr", 7, wrapper)
+    second = cache_mod.cached_compile("expr", 7, wrapper)
+
+    assert first is second
+    assert compiled_calls == [("expr", 7)]
+    assert wrapped_calls == ["compiled:expr:7"]
+
+
+def test_cached_compile_handles_unhashable(monkeypatch):
+    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
+    compiled_results = []
+
+    def fake_compile(pattern, *, flags=0):
+        result = f"compiled:{len(compiled_results)}"
+        compiled_results.append(result)
+        return result
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+
+    def wrapper(raw):
+        return f"wrapped:{raw}"
+
+    first = cache_mod.cached_compile(["list"], 0, wrapper)
+    second = cache_mod.cached_compile(["list"], 0, wrapper)
+
+    assert first != second
+    assert len(compiled_results) == 2
+
+
+def test_cached_compile_enforces_cache_limit(monkeypatch):
+    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
+    monkeypatch.setattr(cache_mod, "_MAX_PATTERN_CACHE", 1)
+    compile_calls = []
+
+    def fake_compile(pattern, *, flags=0):
+        compile_calls.append((pattern, flags))
+        return f"compiled:{pattern}:{flags}"
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+
+    def wrapper(raw):
+        return raw
+
+    first = cache_mod.cached_compile("a", 0, wrapper)
+    second = cache_mod.cached_compile("b", 0, wrapper)
+
+    assert list(cache_mod._PATTERN_CACHE.keys()) == [("b", 0)]
+
+    third = cache_mod.cached_compile("a", 0, wrapper)
+
+    assert first == "compiled:a:0"
+    assert second == "compiled:b:0"
+    assert third == "compiled:a:0"
+    assert compile_calls == [("a", 0), ("b", 0), ("a", 0)]
+
+
+def test_cache_clear_cache_empties_store(monkeypatch):
+    store = OrderedDict({("expr", 0): "value"})
+    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", store)
+
+    cache_mod.clear_cache()
+
+    assert store == OrderedDict()

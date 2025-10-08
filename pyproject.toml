@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcre"
+version = "0.1.0"
+description = "Modern, GIL-friendly Python bindings for PCRE2 with caching of compiled patterns."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+authors = [
+    { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
+]
+classifiers = [
+  "License :: OSI Approved :: BSD License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: C",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Text Processing :: Linguistic"
+]
+keywords = ["regex", "pcre2", "bindings"]
+
+[project.urls]
+Homepage = "https://github.com/ModelCloud/pcre"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
