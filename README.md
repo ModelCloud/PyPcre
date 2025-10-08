@@ -81,6 +81,26 @@ bytes.
   `re` module while letting you thread PCRE2 execution flags through
   individual calls.
 
+### JIT control
+
+Pcre’s JIT compiler is enabled by default for every compiled pattern. The
+wrapper exposes two complementary ways to adjust that behaviour:
+
+- Toggle the global default at runtime with `pcre.configure(jit=False)` to
+  turn JIT off (call `pcre.configure(jit=True)` to turn it back on).
+- Override the default per pattern using the Python-only flags `Flag.JIT`
+  and `Flag.NO_JIT`:
+
+  ```python
+  from pcre import compile, configure, Flag
+
+  configure(jit=False)              # disable JIT globally
+  baseline = compile(r"expr")      # JIT disabled
+
+  fast = compile(r"expr", flags=Flag.JIT)      # force-enable for this pattern
+  slow = compile(r"expr", flags=Flag.NO_JIT)   # force-disable for this pattern
+  ```
+
 ## Building
 
 The extension links against an existing PCRE2 installation (the `libpcre2-8`

@@ -15,7 +15,7 @@ from typing import Any, List
 from . import cpcre2 as _pcre2
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
-from .flags import NO_UCP, NO_UTF, strip_py_only_flags
+from .flags import JIT, NO_JIT, NO_UCP, NO_UTF, strip_py_only_flags
 from .re_compat import (
     Match,
     TemplatePatternStub,
@@ -38,6 +38,31 @@ _CPattern = _pcre2.Pattern
 PcreError = _pcre2.PcreError
 
 FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
+
+_DEFAULT_JIT = True
+
+
+def _resolve_jit_setting(jit: bool | None) -> bool:
+    if jit is None:
+        return _DEFAULT_JIT
+    return bool(jit)
+
+
+def _extract_jit_override(flags: int) -> bool | None:
+    override: bool | None = None
+    if flags & JIT:
+        override = True
+    if flags & NO_JIT:
+        if override is True:
+            raise ValueError("Flag.JIT and Flag.NO_JIT cannot be combined")
+        override = False
+    return override
+
+
+try:  # pragma: no cover - defensive fallback if backend lacks configure
+    _DEFAULT_JIT = bool(_pcre2.configure())
+except AttributeError:  # pragma: no cover - legacy backend without configure helper
+    _DEFAULT_JIT = True
 
 _STD_RE_FLAG_MAP: dict[_std_re.RegexFlag, int] = {
     _std_re.RegexFlag.IGNORECASE: _pcre2.PCRE2_CASELESS,
@@ -134,6 +159,10 @@ class Pattern:
     @property
     def flags(self) -> int:
         return self._pattern.flags
+
+    @property
+    def jit(self) -> bool:
+        return bool(self._pattern.jit)
 
     @property
     def groups(self) -> int:
@@ -350,21 +379,27 @@ class Pattern:
 
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     resolved_flags = _normalise_flags(flags)
+    jit_override = _extract_jit_override(resolved_flags)
+    resolved_jit = _resolve_jit_setting(jit_override)
 
     if isinstance(pattern, Pattern):
         if resolved_flags:
             raise ValueError("Cannot supply flags when using a Pattern instance.")
+        if jit_override is not None and resolved_jit != pattern.jit:
+            raise ValueError("Cannot override jit when using a Pattern instance.")
         return pattern
 
     if isinstance(pattern, _CPattern):
         if resolved_flags:
             raise ValueError("Cannot supply flags when using a compiled pattern instance.")
+        if jit_override is not None:
+            raise ValueError("Cannot supply jit when using a compiled pattern instance.")
         return Pattern(pattern)
 
     effective_flags = _apply_default_unicode_flags(pattern, resolved_flags)
     native_flags = strip_py_only_flags(effective_flags)
 
-    return cached_compile(pattern, native_flags, Pattern)
+    return cached_compile(pattern, native_flags, Pattern, jit=resolved_jit)
 
 
 def match(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
@@ -377,6 +412,12 @@ def search(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
 
 def fullmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
     return compile(pattern, flags=flags).fullmatch(string)
+
+
+def module_fullmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
+    """Compat helper for code expecting a distinct module-level fullmatch."""
+
+    return fullmatch(pattern, string, flags=flags)
 
 
 def finditer(pattern: Any, string: Any, flags: FlagInput = 0) -> Iterable[Match]:
@@ -395,8 +436,37 @@ def sub(pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput =
     return compile(pattern, flags=flags).sub(repl, string, count=count)
 
 
-def subn(pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput = 0) -> tuple[Any, int]:
+def subn(
+    pattern: Any,
+    repl: Any,
+    string: Any,
+    count: Any = 0,
+    flags: FlagInput = 0,
+) -> tuple[Any, int]:
     return compile(pattern, flags=flags).subn(repl, string, count=count)
+
+
+def configure(*, jit: bool | None = None) -> bool:
+    """Adjust global defaults for the high-level wrapper.
+
+    Returns the effective default JIT setting after applying any updates.
+    """
+
+    global _DEFAULT_JIT
+
+    if jit is None:
+        try:
+            _DEFAULT_JIT = bool(_pcre2.configure())
+        except AttributeError:  # pragma: no cover - legacy backend without helper
+            pass
+        return _DEFAULT_JIT
+
+    new_value = bool(jit)
+    try:
+        _DEFAULT_JIT = bool(_pcre2.configure(jit=new_value))
+    except AttributeError:  # pragma: no cover - legacy backend without helper
+        _DEFAULT_JIT = new_value
+    return _DEFAULT_JIT
 
 
 def clear_cache() -> None:

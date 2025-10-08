@@ -32,13 +32,17 @@ _EXTRA_BASE = _next_power_of_two(max(_NATIVE_FLAG_VALUES, default=0))
 
 NO_UTF: int = _EXTRA_BASE
 NO_UCP: int = _EXTRA_BASE << 1
+JIT: int = _EXTRA_BASE << 2
+NO_JIT: int = _EXTRA_BASE << 3
 
 PY_ONLY_FLAG_MEMBERS: Dict[str, int] = {
     "NO_UTF": NO_UTF,
     "NO_UCP": NO_UCP,
+    "JIT": JIT,
+    "NO_JIT": NO_JIT,
 }
 
-PY_ONLY_FLAG_MASK: int = NO_UTF | NO_UCP
+PY_ONLY_FLAG_MASK: int = NO_UTF | NO_UCP | JIT | NO_JIT
 
 
 def strip_py_only_flags(flags: int) -> int:

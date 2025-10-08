@@ -19,6 +19,7 @@ typedef struct {
     uint32_t compile_options;
     uint32_t capture_count;
     int pattern_is_bytes;
+    int jit_enabled;
 } PatternObject;
 
 typedef struct {
@@ -32,6 +33,24 @@ typedef struct {
 } MatchObject;
 
 static PyObject *PcreError = NULL;
+static int default_jit_enabled = 1;
+
+static int
+coerce_jit_argument(PyObject *value, int *out)
+{
+    if (value == NULL || value == Py_None) {
+        *out = default_jit_enabled;
+        return 0;
+    }
+
+    int truth = PyObject_IsTrue(value);
+    if (truth < 0) {
+        return -1;
+    }
+
+    *out = truth ? 1 : 0;
+    return 0;
+}
 
 /* Utility helpers */
 static void
@@ -551,6 +570,15 @@ Pattern_get_flags(PatternObject *self, void *closure)
 }
 
 static PyObject *
+Pattern_get_jit(PatternObject *self, void *closure)
+{
+    if (self->jit_enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
+static PyObject *
 Pattern_get_groupindex(PatternObject *self, void *closure)
 {
     Py_INCREF(self->groupindex);
@@ -658,17 +686,44 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
 
     const char *buffer = PyBytes_AS_STRING(subject_bytes);
-    int rc;
+    int rc = 0;
 
-    Py_BEGIN_ALLOW_THREADS
-    rc = pcre2_match(self->code,
-                     (PCRE2_SPTR)buffer,
-                     (PCRE2_SIZE)subject_length_bytes,
-                     (PCRE2_SIZE)byte_start,
-                     match_options,
-                     match_data,
-                     match_context);
-    Py_END_ALLOW_THREADS
+    if (self->jit_enabled) {
+        Py_BEGIN_ALLOW_THREADS
+        rc = pcre2_jit_match(self->code,
+                              (PCRE2_SPTR)buffer,
+                              (PCRE2_SIZE)subject_length_bytes,
+                              (PCRE2_SIZE)byte_start,
+                              match_options,
+                              match_data,
+                              match_context);
+        Py_END_ALLOW_THREADS
+
+        if (rc == PCRE2_ERROR_JIT_BADOPTION) {
+            self->jit_enabled = 0;
+        } else if (rc != PCRE2_ERROR_NOMATCH && rc < 0) {
+            PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
+            pcre2_match_data_free(match_data);
+            if (match_context != NULL) {
+                pcre2_match_context_free(match_context);
+            }
+            Py_DECREF(subject_bytes);
+            raise_pcre_error("jit_match", rc, error_offset);
+            return NULL;
+        }
+    }
+
+    if (!self->jit_enabled) {
+        Py_BEGIN_ALLOW_THREADS
+        rc = pcre2_match(self->code,
+                         (PCRE2_SPTR)buffer,
+                         (PCRE2_SIZE)subject_length_bytes,
+                         (PCRE2_SIZE)byte_start,
+                         match_options,
+                         match_data,
+                         match_context);
+        Py_END_ALLOW_THREADS
+    }
 
     if (rc == PCRE2_ERROR_NOMATCH) {
         pcre2_match_data_free(match_data);
@@ -777,6 +832,7 @@ static PyGetSetDef Pattern_getset[] = {
     {"pattern", (getter)Pattern_get_pattern, NULL, PyDoc_STR("The original pattern."), NULL},
     {"pattern_bytes", (getter)Pattern_get_pattern_bytes, NULL, PyDoc_STR("UTF-8 encoded pattern."), NULL},
     {"flags", (getter)Pattern_get_flags, NULL, PyDoc_STR("Compile-time options."), NULL},
+    {"jit", (getter)Pattern_get_jit, NULL, PyDoc_STR("Whether the pattern was JIT compiled."), NULL},
     {"groupindex", (getter)Pattern_get_groupindex, NULL, PyDoc_STR("Mapping of named capture groups."), NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
@@ -794,7 +850,7 @@ static PyTypeObject PatternType = {
 };
 
 static PatternObject *
-Pattern_create(PyObject *pattern_obj, uint32_t options)
+Pattern_create(PyObject *pattern_obj, uint32_t options, int jit)
 {
     PyObject *pattern_bytes = bytes_from_text(pattern_obj);
     if (pattern_bytes == NULL) {
@@ -833,6 +889,7 @@ Pattern_create(PyObject *pattern_obj, uint32_t options)
     pattern->pattern_bytes = pattern_bytes;
     pattern->pattern_is_bytes = is_bytes;
     pattern->compile_options = compile_options;
+    pattern->jit_enabled = 0;
 
     uint32_t capture_count = 0;
     if (pcre2_pattern_info(code, PCRE2_INFO_CAPTURECOUNT, &capture_count) != 0) {
@@ -846,20 +903,39 @@ Pattern_create(PyObject *pattern_obj, uint32_t options)
         return NULL;
     }
 
+    if (jit) {
+        int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
+        if (jit_rc == 0) {
+            pattern->jit_enabled = 1;
+        } else if (jit_rc == PCRE2_ERROR_JIT_BADOPTION) {
+            pattern->jit_enabled = 0;
+        } else {
+            Py_DECREF(pattern);
+            raise_pcre_error("jit_compile", jit_rc, 0);
+            return NULL;
+        }
+    }
+
     return pattern;
 }
 
 static PyObject *
 module_compile(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"pattern", "flags", NULL};
+    static char *kwlist[] = {"pattern", "flags", "jit", NULL};
     PyObject *pattern = NULL;
     unsigned long flags = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|k", kwlist, &pattern, &flags)) {
+    PyObject *jit_obj = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|k$O", kwlist, &pattern, &flags, &jit_obj)) {
         return NULL;
     }
 
-    return (PyObject *)Pattern_create(pattern, (uint32_t)flags);
+    int jit = 0;
+    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+        return NULL;
+    }
+
+    return (PyObject *)Pattern_create(pattern, (uint32_t)flags, jit);
 }
 
 static PyObject *
@@ -877,15 +953,21 @@ call_pattern_method(PatternObject *pattern, PyObject *callable, PyObject *subjec
 static PyObject *
 module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"pattern", "string", "flags", NULL};
+    static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
     PyObject *pattern_obj = NULL;
     PyObject *subject = NULL;
     unsigned long flags = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k", kwlist, &pattern_obj, &subject, &flags)) {
+    PyObject *jit_obj = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k$O", kwlist, &pattern_obj, &subject, &flags, &jit_obj)) {
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags);
+    int jit = 0;
+    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+        return NULL;
+    }
+
+    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -904,15 +986,21 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 static PyObject *
 module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"pattern", "string", "flags", NULL};
+    static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
     PyObject *pattern_obj = NULL;
     PyObject *subject = NULL;
     unsigned long flags = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k", kwlist, &pattern_obj, &subject, &flags)) {
+    PyObject *jit_obj = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k$O", kwlist, &pattern_obj, &subject, &flags, &jit_obj)) {
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags);
+    int jit = 0;
+    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+        return NULL;
+    }
+
+    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -931,15 +1019,21 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 static PyObject *
 module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"pattern", "string", "flags", NULL};
+    static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
     PyObject *pattern_obj = NULL;
     PyObject *subject = NULL;
     unsigned long flags = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k", kwlist, &pattern_obj, &subject, &flags)) {
+    PyObject *jit_obj = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k$O", kwlist, &pattern_obj, &subject, &flags, &jit_obj)) {
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags);
+    int jit = 0;
+    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+        return NULL;
+    }
+
+    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -955,11 +1049,35 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     return result;
 }
 
+static PyObject *
+module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
+{
+    static char *kwlist[] = {"jit", NULL};
+    PyObject *jit_obj = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", kwlist, &jit_obj)) {
+        return NULL;
+    }
+
+    if (jit_obj != Py_None) {
+        int jit = 0;
+        if (coerce_jit_argument(jit_obj, &jit) < 0) {
+            return NULL;
+        }
+        default_jit_enabled = jit;
+    }
+
+    if (default_jit_enabled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
 static PyMethodDef module_methods[] = {
     {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object.")},
     {"match", (PyCFunction)module_match, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the beginning of a string.")},
     {"search", (PyCFunction)module_search, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search a string for a pattern." )},
     {"fullmatch", (PyCFunction)module_fullmatch, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the entire string." )},
+    {"configure", (PyCFunction)module_configure, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Get or set module-wide defaults (currently only 'jit')." )},
     {NULL, NULL, 0, NULL},
 };
 

@@ -17,18 +17,24 @@ from . import cpcre2 as _pcre2
 T = TypeVar("T")
 
 _MAX_PATTERN_CACHE = 2048
-_PATTERN_CACHE: OrderedDict[Tuple[Any, int], T] = OrderedDict()
+_PATTERN_CACHE: OrderedDict[Tuple[Any, int, bool], T] = OrderedDict()
 _PATTERN_CACHE_LOCK = RLock()
 
 
-def cached_compile(pattern: Any, flags: int, wrapper: Callable[["_pcre2.Pattern"], T]) -> T:
+def cached_compile(
+    pattern: Any,
+    flags: int,
+    wrapper: Callable[["_pcre2.Pattern"], T],
+    *,
+    jit: bool,
+) -> T:
     """Compile *pattern* with *flags*, caching wrapper results when hashable."""
 
     try:
-        key = (pattern, flags)
+        key = (pattern, flags, bool(jit))
         hash(key)
     except TypeError:
-        return wrapper(_pcre2.compile(pattern, flags=flags))
+        return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
     with _PATTERN_CACHE_LOCK:
         cached = _PATTERN_CACHE.get(key)
@@ -36,7 +42,7 @@ def cached_compile(pattern: Any, flags: int, wrapper: Callable[["_pcre2.Pattern"
             _PATTERN_CACHE.move_to_end(key)
             return cached
 
-    compiled = wrapper(_pcre2.compile(pattern, flags=flags))
+    compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
     with _PATTERN_CACHE_LOCK:
         existing = _PATTERN_CACHE.get(key)

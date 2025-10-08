@@ -112,7 +112,7 @@ def test_compile_wraps_cpattern(monkeypatch):
 def test_compile_uses_cached_compile(monkeypatch):
     captured = {}
 
-    def fake_cached(pattern, flags, wrapper):
+    def fake_cached(pattern, flags, wrapper, *, jit):
         captured["args"] = (pattern, flags, wrapper)
         fake_cpattern = types.SimpleNamespace(
             pattern=pattern,
@@ -121,6 +121,7 @@ def test_compile_uses_cached_compile(monkeypatch):
             match=MethodRecorder("match"),
             search=MethodRecorder("search"),
             fullmatch=MethodRecorder("fullmatch"),
+            jit=jit,
         )
         return wrapper(fake_cpattern)
 
@@ -140,7 +141,7 @@ def test_compile_uses_cached_compile(monkeypatch):
 def test_compile_accepts_iterable_flags(monkeypatch):
     captured = {}
 
-    def fake_cached(pattern, flags, wrapper):
+    def fake_cached(pattern, flags, wrapper, *, jit):
         captured["flags"] = flags
         fake_cpattern = types.SimpleNamespace(
             pattern=pattern,
@@ -149,6 +150,7 @@ def test_compile_accepts_iterable_flags(monkeypatch):
             match=MethodRecorder("match"),
             search=MethodRecorder("search"),
             fullmatch=MethodRecorder("fullmatch"),
+            jit=jit,
         )
         return wrapper(fake_cpattern)
 
@@ -182,6 +184,7 @@ def test_pattern_match_handles_optional_end():
         match=match_method,
         search=MethodRecorder("search"),
         fullmatch=MethodRecorder("full"),
+        jit=False,
     )
     pattern = core.Pattern(fake_cpattern)
 
@@ -197,6 +200,9 @@ def test_pattern_match_handles_optional_end():
     assert second_call["endpos"] == 8
 
 
+def test_configure_updates_default_jit(monkeypatch):
+    calls = []
+
 def test_pattern_search_and_fullmatch_delegate():
     search_method = MethodRecorder(FakeMatch((2, 4), group0="search-result"))
     fullmatch_method = MethodRecorder(FakeMatch((1, 5), group0="full-result"))
@@ -207,6 +213,7 @@ def test_pattern_search_and_fullmatch_delegate():
         match=MethodRecorder("match"),
         search=search_method,
         fullmatch=fullmatch_method,
+        jit=False,
     )
     pattern = core.Pattern(fake_cpattern)
 
@@ -232,6 +239,7 @@ def test_pattern_finditer_advances_on_zero_width_matches():
         groupindex={},
         flags=0,
         search=sequenced_search,
+        jit=False,
     )
     pattern = core.Pattern(fake_cpattern)
 
@@ -253,6 +261,7 @@ def test_pattern_finditer_respects_endpos_limit():
         groupindex={},
         flags=0,
         search=sequenced_search,
+        jit=False,
     )
     pattern = core.Pattern(fake_cpattern)
 
@@ -433,9 +442,9 @@ def test_cached_compile_caches_hashable_patterns(monkeypatch):
     monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
     compiled_calls = []
 
-    def fake_compile(pattern, *, flags=0):
-        compiled_calls.append((pattern, flags))
-        return f"compiled:{pattern}:{flags}"
+    def fake_compile(pattern, *, flags=0, jit=True):
+        compiled_calls.append((pattern, flags, jit))
+        return f"compiled:{pattern}:{flags}:{jit}"
 
     monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
 
@@ -445,19 +454,19 @@ def test_cached_compile_caches_hashable_patterns(monkeypatch):
         wrapped_calls.append(raw)
         return f"wrapped:{raw}"
 
-    first = cache_mod.cached_compile("expr", 7, wrapper)
-    second = cache_mod.cached_compile("expr", 7, wrapper)
+    first = cache_mod.cached_compile("expr", 7, wrapper, jit=True)
+    second = cache_mod.cached_compile("expr", 7, wrapper, jit=True)
 
     assert first is second
-    assert compiled_calls == [("expr", 7)]
-    assert wrapped_calls == ["compiled:expr:7"]
+    assert compiled_calls == [("expr", 7, True)]
+    assert wrapped_calls == ["compiled:expr:7:True"]
 
 
 def test_cached_compile_handles_unhashable(monkeypatch):
     monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
     compiled_results = []
 
-    def fake_compile(pattern, *, flags=0):
+    def fake_compile(pattern, *, flags=0, jit=False):
         result = f"compiled:{len(compiled_results)}"
         compiled_results.append(result)
         return result
@@ -467,8 +476,8 @@ def test_cached_compile_handles_unhashable(monkeypatch):
     def wrapper(raw):
         return f"wrapped:{raw}"
 
-    first = cache_mod.cached_compile(["list"], 0, wrapper)
-    second = cache_mod.cached_compile(["list"], 0, wrapper)
+    first = cache_mod.cached_compile(["list"], 0, wrapper, jit=False)
+    second = cache_mod.cached_compile(["list"], 0, wrapper, jit=False)
 
     assert first != second
     assert len(compiled_results) == 2
@@ -479,30 +488,30 @@ def test_cached_compile_enforces_cache_limit(monkeypatch):
     monkeypatch.setattr(cache_mod, "_MAX_PATTERN_CACHE", 1)
     compile_calls = []
 
-    def fake_compile(pattern, *, flags=0):
-        compile_calls.append((pattern, flags))
-        return f"compiled:{pattern}:{flags}"
+    def fake_compile(pattern, *, flags=0, jit=False):
+        compile_calls.append((pattern, flags, jit))
+        return f"compiled:{pattern}:{flags}:{jit}"
 
     monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
 
     def wrapper(raw):
         return raw
 
-    first = cache_mod.cached_compile("a", 0, wrapper)
-    second = cache_mod.cached_compile("b", 0, wrapper)
+    first = cache_mod.cached_compile("a", 0, wrapper, jit=False)
+    second = cache_mod.cached_compile("b", 0, wrapper, jit=False)
 
-    assert list(cache_mod._PATTERN_CACHE.keys()) == [("b", 0)]
+    assert list(cache_mod._PATTERN_CACHE.keys()) == [("b", 0, False)]
 
-    third = cache_mod.cached_compile("a", 0, wrapper)
+    third = cache_mod.cached_compile("a", 0, wrapper, jit=False)
 
-    assert first == "compiled:a:0"
-    assert second == "compiled:b:0"
-    assert third == "compiled:a:0"
-    assert compile_calls == [("a", 0), ("b", 0), ("a", 0)]
+    assert first == "compiled:a:0:False"
+    assert second == "compiled:b:0:False"
+    assert third == "compiled:a:0:False"
+    assert compile_calls == [("a", 0, False), ("b", 0, False), ("a", 0, False)]
 
 
 def test_cache_clear_cache_empties_store(monkeypatch):
-    store = OrderedDict({("expr", 0): "value"})
+    store = OrderedDict({("expr", 0, True): "value"})
     monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", store)
 
     cache_mod.clear_cache()
