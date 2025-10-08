@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import unittest
+from statistics import mean, median
 
 import pcre
 
@@ -17,6 +18,8 @@ try:
     import pcre2 as external_pcre2
 except ImportError:  # pragma: no cover - optional dependency
     external_pcre2 = None
+
+from tabulate import tabulate
 
 
 RUN_BENCHMARKS = os.getenv("PCRE2_RUN_BENCHMARKS") == "1"
@@ -79,6 +82,7 @@ class TestRegexBenchmarks(unittest.TestCase):
             raise unittest.SkipTest("Iterations must be positive for meaningful benchmarks")
 
     def test_single_thread_patterns(self):
+        results = []
         for engine_name, module, compile_fn in self.engines:
             module_ops = _build_module_operations(module)
             for pattern_text, subjects in PATTERN_CASES:
@@ -97,6 +101,16 @@ class TestRegexBenchmarks(unittest.TestCase):
                         elapsed = time.perf_counter() - start
                         self.assertEqual(call_count, expected_calls)
                         self.assertGreaterEqual(elapsed, 0.0)
+                        results.append(
+                            {
+                                "engine": engine_name,
+                                "pattern": pattern_text,
+                                "operation": op_name,
+                                "calls": expected_calls,
+                                "total_ms": elapsed * 1000,
+                                "per_call_ns": (elapsed / expected_calls) * 1e9,
+                            }
+                        )
 
                 for op_name, operation in module_ops.items():
                     with self.subTest(engine=engine_name, pattern=pattern_text, operation=op_name):
@@ -109,9 +123,31 @@ class TestRegexBenchmarks(unittest.TestCase):
                         elapsed = time.perf_counter() - start
                         self.assertEqual(call_count, expected_calls)
                         self.assertGreaterEqual(elapsed, 0.0)
+                        results.append(
+                            {
+                                "engine": engine_name,
+                                "pattern": pattern_text,
+                                "operation": op_name,
+                                "calls": expected_calls,
+                                "total_ms": elapsed * 1000,
+                                "per_call_ns": (elapsed / expected_calls) * 1e9,
+                            }
+                        )
+
+        if results:
+            print("\nSingle-thread benchmark results:")
+            print(
+                tabulate(
+                    results,
+                    headers="keys",
+                    floatfmt=".3f",
+                    tablefmt="github",
+                )
+            )
 
     def test_multi_threaded_match(self):
         pattern_text, subjects = PATTERN_CASES[0]
+        results = []
         for engine_name, module, compile_fn in self.engines:
             compiled = compile_fn(pattern_text)
             compiled_ops = _build_compiled_operations(compiled)
@@ -125,10 +161,33 @@ class TestRegexBenchmarks(unittest.TestCase):
             subjects_cycle = subjects
 
             with self.subTest(engine=engine_name, operation=op_name):
-                times = self._run_thread_benchmark(operation, subjects_cycle)
-                self.assertEqual(len(times), THREAD_COUNT)
-                for duration in times:
+                thread_times, total_elapsed = self._run_thread_benchmark(operation, subjects_cycle)
+                self.assertEqual(len(thread_times), THREAD_COUNT)
+                for duration in thread_times:
                     self.assertGreaterEqual(duration, 0.0)
+                results.append(
+                    {
+                        "engine": engine_name,
+                        "operation": op_name,
+                        "threads": THREAD_COUNT,
+                        "min_ms": min(thread_times) * 1000,
+                        "median_ms": median(thread_times) * 1000,
+                        "max_ms": max(thread_times) * 1000,
+                        "mean_ms": mean(thread_times) * 1000,
+                        "total_ms": total_elapsed * 1000,
+                    }
+                )
+
+        if results:
+            print("\nMulti-thread benchmark results:")
+            print(
+                tabulate(
+                    results,
+                    headers="keys",
+                    floatfmt=".3f",
+                    tablefmt="github",
+                )
+            )
 
     def _run_thread_benchmark(self, operation, subjects):
         start_barrier = threading.Barrier(THREAD_COUNT + 1)
@@ -158,7 +217,7 @@ class TestRegexBenchmarks(unittest.TestCase):
             thread.join()
 
         self.assertGreaterEqual(total_elapsed, 0.0)
-        return durations
+        return durations, total_elapsed
 
 
 if __name__ == "__main__":
