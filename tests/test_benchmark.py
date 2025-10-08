@@ -29,7 +29,7 @@ from tabulate import tabulate
 
 RUN_BENCHMARKS = os.getenv("PCRE2_RUN_BENCHMARKS") == "1"
 THREAD_COUNT = int(os.getenv("PCRE2_BENCH_THREADS", "16"))
-SINGLE_ITERATIONS = int(os.getenv("PCRE2_BENCH_ITERS", "200"))
+SINGLE_ITERATIONS = int(os.getenv("PCRE2_BENCH_ITERS", "1000"))
 THREAD_ITERATIONS = int(os.getenv("PCRE2_BENCH_THREAD_ITERS", "40"))
 
 
