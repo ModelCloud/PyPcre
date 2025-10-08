@@ -16,7 +16,7 @@ from . import cpcre2 as _pcre2
 
 T = TypeVar("T")
 
-_MAX_PATTERN_CACHE = 2048
+_MAX_PATTERN_CACHE = 512
 _PATTERN_CACHE: OrderedDict[Tuple[Any, int, bool], T] = OrderedDict()
 _PATTERN_CACHE_LOCK = RLock()
 
@@ -56,9 +56,10 @@ def cached_compile(
 
 
 def clear_cache() -> None:
-    """Clear all cached compiled pattern wrappers and backend match data."""
+    """Clear cached compiled patterns plus backend match-data and JIT stacks."""
 
     with _PATTERN_CACHE_LOCK:
         _PATTERN_CACHE.clear()
 
     _pcre2.clear_match_data_cache()
+    _pcre2.clear_jit_stack_cache()

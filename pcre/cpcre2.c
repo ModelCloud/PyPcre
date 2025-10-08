@@ -47,6 +47,18 @@ static uint32_t match_data_cache_capacity = 128;
 static uint32_t match_data_cache_count = 0;
 static PyThread_type_lock match_data_cache_lock = NULL;
 
+typedef struct JitStackCacheEntry {
+    pcre2_jit_stack *jit_stack;
+    struct JitStackCacheEntry *next;
+} JitStackCacheEntry;
+
+static JitStackCacheEntry *jit_stack_cache_head = NULL;
+static uint32_t jit_stack_cache_capacity = 32;
+static uint32_t jit_stack_cache_count = 0;
+static PyThread_type_lock jit_stack_cache_lock = NULL;
+static size_t jit_stack_start_size = 64 * 1024;
+static size_t jit_stack_max_size = 1024 * 1024;
+
 static void
 match_data_cache_free_all_locked(void)
 {
@@ -57,6 +69,21 @@ match_data_cache_free_all_locked(void)
     while (node != NULL) {
         MatchDataCacheEntry *next = node->next;
         pcre2_match_data_free(node->match_data);
+        PyMem_Free(node);
+        node = next;
+    }
+}
+
+static void
+jit_stack_cache_free_all_locked(void)
+{
+    JitStackCacheEntry *node = jit_stack_cache_head;
+    jit_stack_cache_head = NULL;
+    jit_stack_cache_count = 0;
+
+    while (node != NULL) {
+        JitStackCacheEntry *next = node->next;
+        pcre2_jit_stack_free(node->jit_stack);
         PyMem_Free(node);
         node = next;
     }
@@ -673,6 +700,106 @@ match_data_cache_release(pcre2_match_data *match_data)
     }
 }
 
+static void
+jit_stack_cache_evict_tail_locked(void)
+{
+    if (jit_stack_cache_head == NULL) {
+        return;
+    }
+
+    JitStackCacheEntry *prev = NULL;
+    JitStackCacheEntry *node = jit_stack_cache_head;
+    while (node->next != NULL) {
+        prev = node;
+        node = node->next;
+    }
+
+    if (prev != NULL) {
+        prev->next = NULL;
+    } else {
+        jit_stack_cache_head = NULL;
+    }
+
+    if (jit_stack_cache_count > 0) {
+        jit_stack_cache_count--;
+    }
+
+    pcre2_jit_stack_free(node->jit_stack);
+    PyMem_Free(node);
+}
+
+static pcre2_jit_stack *
+jit_stack_cache_acquire(void)
+{
+    pcre2_jit_stack *stack = NULL;
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    if (jit_stack_cache_head != NULL) {
+        JitStackCacheEntry *entry = jit_stack_cache_head;
+        jit_stack_cache_head = entry->next;
+        if (jit_stack_cache_count > 0) {
+            jit_stack_cache_count--;
+        }
+        stack = entry->jit_stack;
+        PyMem_Free(entry);
+    }
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+
+    if (stack != NULL) {
+        return stack;
+    }
+
+    return pcre2_jit_stack_create(jit_stack_start_size, jit_stack_max_size, NULL);
+}
+
+static void
+jit_stack_cache_release(pcre2_jit_stack *jit_stack)
+{
+    if (jit_stack == NULL) {
+        return;
+    }
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    if (jit_stack_cache_capacity == 0) {
+        if (jit_stack_cache_lock != NULL) {
+            PyThread_release_lock(jit_stack_cache_lock);
+        }
+        pcre2_jit_stack_free(jit_stack);
+        return;
+    }
+
+    JitStackCacheEntry *entry = PyMem_Malloc(sizeof(*entry));
+    if (entry == NULL) {
+        if (jit_stack_cache_lock != NULL) {
+            PyThread_release_lock(jit_stack_cache_lock);
+        }
+        pcre2_jit_stack_free(jit_stack);
+        return;
+    }
+
+    entry->jit_stack = jit_stack;
+    entry->next = jit_stack_cache_head;
+    jit_stack_cache_head = entry;
+    jit_stack_cache_count++;
+
+    while (jit_stack_cache_count > jit_stack_cache_capacity) {
+        jit_stack_cache_evict_tail_locked();
+    }
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+}
+
 typedef enum {
     EXEC_MODE_MATCH,
     EXEC_MODE_SEARCH,
@@ -816,6 +943,8 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
 
     pcre2_match_context *match_context = NULL;
+    pcre2_jit_stack *jit_stack = NULL;
+    int using_jit_stack = 0;
     if (offset_limit != (PCRE2_SIZE)subject_length_bytes) {
         match_context = pcre2_match_context_create(NULL);
         if (match_context == NULL) {
@@ -838,6 +967,28 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     int rc = 0;
 
     if (self->jit_enabled) {
+        if (match_context == NULL) {
+            match_context = pcre2_match_context_create(NULL);
+            if (match_context == NULL) {
+                match_data_cache_release(match_data);
+                Py_DECREF(subject_bytes);
+                PyErr_NoMemory();
+                return NULL;
+            }
+        }
+
+        jit_stack = jit_stack_cache_acquire();
+        if (jit_stack == NULL) {
+            pcre2_match_context_free(match_context);
+            match_data_cache_release(match_data);
+            Py_DECREF(subject_bytes);
+            PyErr_NoMemory();
+            return NULL;
+        }
+
+        pcre2_jit_stack_assign(match_context, NULL, jit_stack);
+        using_jit_stack = 1;
+
         Py_BEGIN_ALLOW_THREADS
         rc = pcre2_jit_match(self->code,
                               (PCRE2_SPTR)buffer,
@@ -847,6 +998,12 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
                               match_data,
                               match_context);
         Py_END_ALLOW_THREADS
+
+        if (using_jit_stack) {
+            jit_stack_cache_release(jit_stack);
+            jit_stack = NULL;
+            using_jit_stack = 0;
+        }
 
         if (rc == PCRE2_ERROR_JIT_BADOPTION) {
             self->jit_enabled = 0;
@@ -1296,6 +1453,112 @@ module_get_match_data_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUS
     return PyLong_FromUnsignedLong(count);
 }
 
+static PyObject *
+module_get_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    return PyLong_FromUnsignedLong((unsigned long)jit_stack_cache_capacity);
+}
+
+static PyObject *
+module_set_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
+{
+    unsigned long size = 0;
+    if (!PyArg_ParseTuple(args, "k", &size)) {
+        return NULL;
+    }
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    jit_stack_cache_capacity = (uint32_t)size;
+
+    while (jit_stack_cache_count > jit_stack_cache_capacity) {
+        jit_stack_cache_evict_tail_locked();
+    }
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+module_clear_jit_stack_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    jit_stack_cache_free_all_locked();
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+module_get_jit_stack_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    unsigned long count = 0;
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    count = jit_stack_cache_count;
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+
+    return PyLong_FromUnsignedLong(count);
+}
+
+static PyObject *
+module_get_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    return Py_BuildValue("kk", (unsigned long)jit_stack_start_size, (unsigned long)jit_stack_max_size);
+}
+
+static PyObject *
+module_set_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *args)
+{
+    unsigned long start = 0;
+    unsigned long max = 0;
+
+    if (!PyArg_ParseTuple(args, "kk", &start, &max)) {
+        return NULL;
+    }
+
+    if (start == 0 || max == 0) {
+        PyErr_SetString(PyExc_ValueError, "start and max must be greater than zero");
+        return NULL;
+    }
+
+    if (start > max) {
+        PyErr_SetString(PyExc_ValueError, "start must be <= max");
+        return NULL;
+    }
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    jit_stack_start_size = (size_t)start;
+    jit_stack_max_size = (size_t)max;
+    jit_stack_cache_free_all_locked();
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef module_methods[] = {
     {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object.")},
     {"match", (PyCFunction)module_match, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the beginning of a string.")},
@@ -1306,6 +1569,12 @@ static PyMethodDef module_methods[] = {
     {"set_match_data_cache_size", (PyCFunction)module_set_match_data_cache_size, METH_VARARGS, PyDoc_STR("Set the capacity of the reusable match-data cache." )},
     {"clear_match_data_cache", (PyCFunction)module_clear_match_data_cache, METH_NOARGS, PyDoc_STR("Release all cached PCRE2 match-data buffers." )},
     {"get_match_data_cache_count", (PyCFunction)module_get_match_data_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached match-data buffers currently stored." )},
+    {"get_jit_stack_cache_size", (PyCFunction)module_get_jit_stack_cache_size, METH_NOARGS, PyDoc_STR("Return the capacity of the reusable JIT stack cache." )},
+    {"set_jit_stack_cache_size", (PyCFunction)module_set_jit_stack_cache_size, METH_VARARGS, PyDoc_STR("Set the capacity of the reusable JIT stack cache." )},
+    {"clear_jit_stack_cache", (PyCFunction)module_clear_jit_stack_cache, METH_NOARGS, PyDoc_STR("Release all cached PCRE2 JIT stacks." )},
+    {"get_jit_stack_cache_count", (PyCFunction)module_get_jit_stack_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached JIT stacks currently stored." )},
+    {"get_jit_stack_limits", (PyCFunction)module_get_jit_stack_limits, METH_NOARGS, PyDoc_STR("Return the configured (start, max) JIT stack sizes." )},
+    {"set_jit_stack_limits", (PyCFunction)module_set_jit_stack_limits, METH_VARARGS, PyDoc_STR("Set the (start, max) sizes for newly created JIT stacks." )},
     {NULL, NULL, 0, NULL},
 };
 
@@ -1320,7 +1589,8 @@ static struct PyModuleDef moduledef = {
 PyMODINIT_FUNC
 PyInit_cpcre2(void)
 {
-    int lock_created = 0;
+    int match_lock_created = 0;
+    int jit_lock_created = 0;
 
     if (PyType_Ready(&PatternType) < 0) {
         return NULL;
@@ -1349,7 +1619,16 @@ PyInit_cpcre2(void)
             PyErr_NoMemory();
             goto error;
         }
-        lock_created = 1;
+        match_lock_created = 1;
+    }
+
+    if (jit_stack_cache_lock == NULL) {
+        jit_stack_cache_lock = PyThread_allocate_lock();
+        if (jit_stack_cache_lock == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        jit_lock_created = 1;
     }
 
     Py_INCREF(&PatternType);
@@ -1409,7 +1688,11 @@ error:
     Py_XDECREF(PcreError);
     PcreError = NULL;
     Py_DECREF(module);
-    if (lock_created && match_data_cache_lock != NULL) {
+    if (jit_lock_created && jit_stack_cache_lock != NULL) {
+        PyThread_free_lock(jit_stack_cache_lock);
+        jit_stack_cache_lock = NULL;
+    }
+    if (match_lock_created && match_data_cache_lock != NULL) {
         PyThread_free_lock(match_data_cache_lock);
         match_data_cache_lock = NULL;
     }
