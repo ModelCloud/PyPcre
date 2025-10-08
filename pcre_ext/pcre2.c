@@ -806,6 +806,9 @@ Pattern_create_finditer(PatternObject *pattern,
         return NULL;
     }
 
+    pcre2_match_context *match_context = NULL;
+    pcre2_jit_stack *jit_stack = NULL;
+
     iter->pattern = NULL;
     iter->subject = NULL;
     iter->subject_is_bytes = 0;
@@ -920,9 +923,6 @@ Pattern_create_finditer(PatternObject *pattern,
         PyErr_NoMemory();
         goto error;
     }
-
-    pcre2_match_context *match_context = NULL;
-    pcre2_jit_stack *jit_stack = NULL;
 
     if (pattern->jit_enabled || (has_endpos && resolved_end_byte != iter->subject_length_bytes)) {
         match_context = pcre2_match_context_create(NULL);
@@ -1651,8 +1651,8 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
 
 static PyMethodDef module_methods[] = {
-    {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object.")},
-    {"match", (PyCFunction)module_match, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the beginning of a string.")},
+    {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object." )},
+    {"match", (PyCFunction)module_match, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the beginning of a string." )},
     {"search", (PyCFunction)module_search, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search a string for a pattern." )},
     {"fullmatch", (PyCFunction)module_fullmatch, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the entire string." )},
     {"configure", (PyCFunction)module_configure, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Get or set module-wide defaults (currently only 'jit')." )},
@@ -1675,6 +1675,9 @@ static struct PyModuleDef moduledef = {
     .m_doc = "Low-level bindings to the PCRE2 regular expression engine.",
     .m_size = -1,
     .m_methods = module_methods,
+#if defined(Py_MOD_GIL_SAFE_FLAG)
+    .m_flags = Py_MOD_GIL_SAFE_FLAG,
+#endif
 };
 
 PyMODINIT_FUNC
@@ -1726,6 +1729,12 @@ PyInit_cpcre2(void)
     if (PyModule_AddIntConstant(module, "PCRE2_CODE_UNIT_WIDTH", PCRE2_CODE_UNIT_WIDTH) < 0) {
         goto error;
     }
+
+#if defined(Py_GIL_DISABLED)
+    if (PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED) < 0) {
+        goto error;
+    }
+#endif
 
     return module;
 
