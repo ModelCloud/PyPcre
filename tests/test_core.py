@@ -485,7 +485,7 @@ def test_cached_compile_handles_unhashable(monkeypatch):
 
 def test_cached_compile_enforces_cache_limit(monkeypatch):
     monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
-    monkeypatch.setattr(cache_mod, "_MAX_PATTERN_CACHE", 1)
+    monkeypatch.setattr(cache_mod, "_CACHE_LIMIT", 1, raising=False)
     compile_calls = []
 
     def fake_compile(pattern, *, flags=0, jit=False):
@@ -517,3 +517,29 @@ def test_cache_clear_cache_empties_store(monkeypatch):
     cache_mod.clear_cache()
 
     assert store == OrderedDict()
+
+
+def test_set_cache_limit_zero_disables_cache(monkeypatch, request):
+    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
+    original_limit = cache_mod.get_cache_limit()
+    request.addfinalizer(lambda: cache_mod.set_cache_limit(original_limit))
+
+    compile_calls = []
+
+    def fake_compile(pattern, *, flags=0, jit=False):
+        result = f"compiled:{pattern}:{len(compile_calls)}"
+        compile_calls.append(result)
+        return result
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+
+    cache_mod.set_cache_limit(0)
+
+    def wrapper(raw):
+        return raw
+
+    first = cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+    second = cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+
+    assert first != second
+    assert len(compile_calls) == 2

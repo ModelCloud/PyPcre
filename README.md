@@ -55,8 +55,11 @@ exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 `pcre.compile()` caches the final `Pattern` wrapper for up to 2048
 unique `(pattern, flags)` pairs when the pattern object is hashable. This
 keeps repeated calls to top-level helpers efficient without any extra work
-from the caller. The cache can be emptied with `pcre.clear_cache()` if your
-application needs to release memory proactively.
+from the caller. Adjust the capacity with `pcre.set_cache_limit(n)`—pass
+`0` to disable caching completely or `None` for an unlimited cache—and
+check the current limit with `pcre.get_cache_limit()`. The cache can be
+emptied at any time with `pcre.clear_cache()` if your application needs to
+release memory proactively.
 
 Non-hashable patterns (for example, custom objects) bypass the cache and are
 still compiled immediately.

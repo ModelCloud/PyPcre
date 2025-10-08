@@ -18,6 +18,7 @@ from typing import Any
 
 from . import cpcre2
 from .flags import PY_ONLY_FLAG_MEMBERS
+from .cache import get_cache_limit, set_cache_limit
 from .pcre import (
     Match,
     Pattern,
@@ -77,6 +78,8 @@ __all__ = [
     "clear_cache",
     "purge",
     "configure",
+    "set_cache_limit",
+    "get_cache_limit",
     "compile",
     "match",
     "search",
