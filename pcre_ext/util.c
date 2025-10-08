@@ -4,6 +4,7 @@
 // Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 #include "pcre2_module.h"
+#include <string.h>
 
 PyObject *
 bytes_from_text(PyObject *obj)
@@ -56,8 +57,38 @@ utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset
 
     int kind = PyUnicode_KIND(unicode_obj);
     void *data = PyUnicode_DATA(unicode_obj);
-    Py_ssize_t offset = 0;
 
+    if (kind == PyUnicode_1BYTE_KIND) {
+        if (PyUnicode_IS_ASCII(unicode_obj)) {
+            *offset_out = index;
+            return 0;
+        }
+
+        const Py_UCS1 *start = (const Py_UCS1 *)data;
+        const Py_ssize_t chunk = (Py_ssize_t)sizeof(uint64_t);
+        const uint64_t high_bit_mask = 0x8080808080808080ULL;
+
+        Py_ssize_t non_ascii = 0;
+        Py_ssize_t fast_chunks = index / chunk;
+        const Py_UCS1 *ptr = start;
+
+        for (Py_ssize_t i = 0; i < fast_chunks; ++i) {
+            uint64_t block;
+            memcpy(&block, ptr, sizeof(uint64_t));
+            non_ascii += __builtin_popcountll(block & high_bit_mask);
+            ptr += chunk;
+        }
+
+        Py_ssize_t remainder = index - fast_chunks * chunk;
+        for (Py_ssize_t i = 0; i < remainder; ++i) {
+            non_ascii += (ptr[i] & 0x80) >> 7;
+        }
+
+        *offset_out = index + non_ascii;
+        return 0;
+    }
+
+    Py_ssize_t offset = 0;
     for (Py_ssize_t i = 0; i < index; ++i) {
         Py_UCS4 ch = PyUnicode_READ(kind, data, i);
         if (ch <= 0x7F) {

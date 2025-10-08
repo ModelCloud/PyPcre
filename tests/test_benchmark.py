@@ -33,6 +33,31 @@ SINGLE_ITERATIONS = int(os.getenv("PCRE2_BENCH_ITERS", "5000"))
 THREAD_ITERATIONS = int(os.getenv("PCRE2_BENCH_THREAD_ITERS", "40"))
 
 
+UNICODE_SAMPLE_LENGTH = 128
+UNICODE_VARIANT_BASES = {
+    "ascii": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+    "latin-1": "\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf\xd0\xd1\xd2\xd3\xd4\xd5\xd6\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf",
+    "2byte": "\u0100\u0102\u0104\u0106\u0108\u010a\u010c\u010e\u0110\u0112\u0114\u0116\u0118\u011a\u011c\u011e\u0120\u0122\u0124\u0126\u0128\u012a\u012c\u012e\u0130\u0134\u0136\u0139\u013b\u013d\u013f\u0141\u0143\u0145\u0147\u014a",
+    "3byte": "\u6f22\u5b57\u4eee\u540d\u4ea4\u932f\u7e41\u9ad4\u5b57\u6d4b\u8bd5\u7de8\u78bc\u8cc7\u6599",
+    "4byte": "\U0001f600\U0001f601\U0001f602\U0001f923\U0001f603\U0001f604\U0001f605\U0001f606\U0001f607\U0001f608\U0001f609\U0001f60a\U0001f60b\U0001f60c\U0001f60d\U0001f60e",
+}
+
+
+def _expand_unicode_variants():
+    subjects = {}
+    for label, base in UNICODE_VARIANT_BASES.items():
+        repeats = (UNICODE_SAMPLE_LENGTH // len(base)) + 1
+        primary = (base * repeats)[:UNICODE_SAMPLE_LENGTH]
+        rotation = min(len(primary), len(base))
+        rotated = primary[rotation:] + primary[:rotation]
+        mirrored = primary[::-1]
+        subjects[label] = [primary, rotated, mirrored]
+    return subjects
+
+
+UNICODE_VARIANT_SUBJECTS = _expand_unicode_variants()
+
+
 PATTERN_CASES = [
     (r"foo", ["foo bar foo", "prefix foo suffix", "no match here"]),
     (r"(?P<word>[A-Za-z]+)", ["Hello world", "Another Line", "lower CASE"]),
@@ -157,6 +182,85 @@ class TestRegexBenchmarks(unittest.TestCase):
                         )
                 result_rows.sort(key=lambda row: row["total_ms"] if isinstance(row["total_ms"], (int, float)) else float("inf"))
                 print(f"\nPattern: {pattern_text} | Operation: {op_name}")
+                print(
+                    tabulate(
+                        result_rows,
+                        headers="keys",
+                        floatfmt=".3f",
+                        tablefmt="github",
+                    )
+                )
+
+
+    def test_character_width_subjects(self):
+        pattern_text = r".+"
+        results_by_combo = collections.defaultdict(list)
+        for engine_name, module, compile_fn in self.engines:
+            module_ops = _build_module_operations(module)
+            compiled = compile_fn(pattern_text)
+            compiled_ops = _build_compiled_operations(compiled)
+            for variant_label, subjects in UNICODE_VARIANT_SUBJECTS.items():
+                expected_calls = SINGLE_ITERATIONS * len(subjects)
+                for op_name, operation in compiled_ops.items():
+                    with self.subTest(engine=engine_name, variant=variant_label, operation=op_name):
+                        call_count = 0
+                        start = time.perf_counter()
+                        for _ in range(SINGLE_ITERATIONS):
+                            for subject in subjects:
+                                operation(subject)
+                                call_count += 1
+                        elapsed = time.perf_counter() - start
+                        self.assertEqual(call_count, expected_calls)
+                        self.assertGreaterEqual(elapsed, 0.0)
+                        results_by_combo[(variant_label, op_name)].append(
+                            {
+                                "engine": engine_name,
+                                "calls": expected_calls,
+                                "total_ms": elapsed * 1000,
+                                "per_call_ns": (elapsed / expected_calls) * 1e9,
+                            }
+                        )
+                for op_name, operation in module_ops.items():
+                    with self.subTest(engine=engine_name, variant=variant_label, operation=op_name):
+                        call_count = 0
+                        start = time.perf_counter()
+                        for _ in range(SINGLE_ITERATIONS):
+                            for subject in subjects:
+                                operation(pattern_text, subject)
+                                call_count += 1
+                        elapsed = time.perf_counter() - start
+                        self.assertEqual(call_count, expected_calls)
+                        self.assertGreaterEqual(elapsed, 0.0)
+                        results_by_combo[(variant_label, op_name)].append(
+                            {
+                                "engine": engine_name,
+                                "calls": expected_calls,
+                                "total_ms": elapsed * 1000,
+                                "per_call_ns": (elapsed / expected_calls) * 1e9,
+                            }
+                        )
+        if results_by_combo:
+            print("\nUnicode width benchmark results:")
+            for (variant_label, op_name) in sorted(results_by_combo):
+                result_rows = sorted(
+                    results_by_combo[(variant_label, op_name)],
+                    key=lambda row: row["total_ms"],
+                )
+                present_engines = {row["engine"] for row in result_rows}
+                for engine_name, _, _ in self.engines:
+                    if engine_name not in present_engines:
+                        result_rows.append(
+                            {
+                                "engine": engine_name,
+                                "calls": "n/a",
+                                "total_ms": "n/a",
+                                "per_call_ns": "n/a",
+                            }
+                        )
+                result_rows.sort(
+                    key=lambda row: row["total_ms"] if isinstance(row["total_ms"], (int, float)) else float("inf")
+                )
+                print(f"\nVariant: {variant_label} | Operation: {op_name}")
                 print(
                     tabulate(
                         result_rows,

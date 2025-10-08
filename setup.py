@@ -10,10 +10,20 @@ import platform
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
 from setuptools import Extension, setup
+
+try:
+    from setuptools._distutils.ccompiler import CCompiler, new_compiler
+    from setuptools._distutils.errors import CCompilerError, DistutilsExecError
+    from setuptools._distutils.sysconfig import customize_compiler
+except ImportError:  # pragma: no cover - fallback for older Python environments
+    from distutils.ccompiler import CCompiler, new_compiler  # type: ignore
+    from distutils.errors import CCompilerError, DistutilsExecError  # type: ignore
+    from distutils.sysconfig import customize_compiler  # type: ignore
 
 
 MODULE_SOURCES = [
@@ -60,6 +70,86 @@ def _run_command(command: list[str]) -> str | None:
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or None
+
+
+_COMPILER_INITIALIZED = False
+_COMPILER_INSTANCE: CCompiler | None = None
+_COMPILER_FLAG_CACHE: dict[str, bool] = {}
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+
+
+def _is_truthy_env(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUTHY_VALUES
+
+
+def _get_test_compiler() -> CCompiler | None:
+    global _COMPILER_INITIALIZED, _COMPILER_INSTANCE
+    if _COMPILER_INITIALIZED:
+        return _COMPILER_INSTANCE
+    _COMPILER_INITIALIZED = True
+    try:
+        compiler = new_compiler()
+        customize_compiler(compiler)
+    except Exception:
+        _COMPILER_INSTANCE = None
+    else:
+        _COMPILER_INSTANCE = compiler
+    return _COMPILER_INSTANCE
+
+
+def _compiler_supports_flag(flag: str) -> bool:
+    cached = _COMPILER_FLAG_CACHE.get(flag)
+    if cached is not None:
+        return cached
+
+    compiler = _get_test_compiler()
+    if compiler is None:
+        _COMPILER_FLAG_CACHE[flag] = False
+        return False
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source = Path(tmpdir) / "flag_check.c"
+        source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        try:
+            compiler.compile(
+                [str(source)],
+                output_dir=tmpdir,
+                extra_postargs=[flag],
+            )
+        except (CCompilerError, DistutilsExecError, OSError):
+            _COMPILER_FLAG_CACHE[flag] = False
+        else:
+            _COMPILER_FLAG_CACHE[flag] = True
+    return _COMPILER_FLAG_CACHE[flag]
+
+
+def _augment_compile_flags(flags: list[str]) -> None:
+    if _is_truthy_env("PCRE2_DISABLE_OPT_FLAGS"):
+        return
+
+    disable_native = _is_truthy_env("PCRE2_DISABLE_NATIVE_FLAGS")
+    candidate_flags: list[tuple[str, bool]] = [
+        ("-O3", False),
+        ("-march=native", True),
+        ("-mtune=native", True),
+        ("-fomit-frame-pointer", False),
+        ("-funroll-loops", False),
+        ("-falign-loops=32", False),
+    ]
+
+    seen = set(flags)
+    for flag, requires_native in candidate_flags:
+        if requires_native and disable_native:
+            continue
+        if flag in seen:
+            continue
+        if not _compiler_supports_flag(flag):
+            continue
+        flags.append(flag)
+        seen.add(flag)
 
 
 def _homebrew_prefixes() -> list[Path]:
@@ -282,6 +372,9 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
 
     if "pcre2-8" not in libraries:
         libraries.append("pcre2-8")
+
+    _augment_compile_flags(extra_compile_args)
+    print(extra_compile_args)
 
     return {
         "include_dirs": include_dirs,
