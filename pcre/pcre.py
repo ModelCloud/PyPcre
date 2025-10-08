@@ -15,7 +15,22 @@ from typing import Any, List
 from . import cpcre2 as _pcre2
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
-from .flags import JIT, NO_JIT, NO_UCP, NO_UTF, strip_py_only_flags
+from .flags import (
+    JIT,
+    NO_JIT,
+    NO_THREADS,
+    NO_UCP,
+    NO_UTF,
+    THREADS,
+    strip_py_only_flags,
+)
+from .threads import (
+    configure_thread_pool,
+    ensure_thread_pool,
+    get_auto_threshold,
+    get_thread_default,
+    shutdown_thread_pool,
+)
 from .re_compat import (
     Match,
     TemplatePatternStub,
@@ -40,6 +55,11 @@ PcreError = _pcre2.PcreError
 FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 
 _DEFAULT_JIT = True
+
+
+_THREAD_MODE_DISABLED = "disabled"
+_THREAD_MODE_ENABLED = "enabled"
+_THREAD_MODE_AUTO = "auto"
 
 
 def _resolve_jit_setting(jit: bool | None) -> bool:
@@ -139,11 +159,12 @@ def _call_with_optional_end(method, subject: Any, pos: int, endpos: int | None, 
 class Pattern:
     """High-level wrapper around the C-backed :class:`cpcre2.Pattern`."""
 
-    __slots__ = ("_pattern", "_groups_hint")
+    __slots__ = ("_pattern", "_groups_hint", "_thread_mode")
 
     def __init__(self, pattern: _CPattern) -> None:
         self._pattern = pattern
         self._groups_hint = maybe_infer_group_count(pattern.pattern)
+        self._thread_mode = _THREAD_MODE_DISABLED
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -169,6 +190,23 @@ class Pattern:
         if self._groups_hint is None:
             self._groups_hint = count_capturing_groups(self.pattern)
         return self._groups_hint
+
+    @property
+    def thread_mode(self) -> str:
+        return self._thread_mode
+
+    @property
+    def use_threads(self) -> bool:
+        return self._thread_mode == _THREAD_MODE_ENABLED
+
+    def enable_threads(self) -> None:
+        self._thread_mode = _THREAD_MODE_ENABLED
+
+    def disable_threads(self) -> None:
+        self._thread_mode = _THREAD_MODE_DISABLED
+
+    def enable_auto_threads(self) -> None:
+        self._thread_mode = _THREAD_MODE_AUTO
 
     def _update_group_hint(self, match: Match) -> None:
         groups_count = len(match.groups())
@@ -377,29 +415,92 @@ class Pattern:
         return result, substitutions
 
 
+    def parallel_map(
+        self,
+        subjects: Iterable[Any],
+        *,
+        method: str = "search",
+        pos: int = 0,
+        endpos: int | None = None,
+        options: int = 0,
+        max_workers: int | None = None,
+    ) -> List[Any]:
+        if self._thread_mode == _THREAD_MODE_DISABLED:
+            raise RuntimeError(
+                "Pattern not enabled for threaded execution; compile with Flag.THREADS "
+                "or configure threading defaults."
+            )
+        return parallel_map(
+            self,
+            subjects,
+            method=method,
+            pos=pos,
+            endpos=endpos,
+            options=options,
+            max_workers=max_workers,
+        )
+
+
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     resolved_flags = _normalise_flags(flags)
-    jit_override = _extract_jit_override(resolved_flags)
+    threads_requested = bool(resolved_flags & THREADS)
+    no_threads_requested = bool(resolved_flags & NO_THREADS)
+    if threads_requested and no_threads_requested:
+        raise ValueError("Flag.THREADS and Flag.NO_THREADS cannot be combined")
+
+    resolved_flags_no_thread_markers = resolved_flags & ~(THREADS | NO_THREADS)
+    jit_override = _extract_jit_override(resolved_flags_no_thread_markers)
     resolved_jit = _resolve_jit_setting(jit_override)
 
+    if threads_requested:
+        thread_mode = _THREAD_MODE_ENABLED
+    elif no_threads_requested:
+        thread_mode = _THREAD_MODE_DISABLED
+    else:
+        thread_mode = _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+
     if isinstance(pattern, Pattern):
-        if resolved_flags:
+        if resolved_flags_no_thread_markers:
             raise ValueError("Cannot supply flags when using a Pattern instance.")
+        if threads_requested:
+            pattern.enable_threads()
+        elif no_threads_requested:
+            pattern.disable_threads()
         if jit_override is not None and resolved_jit != pattern.jit:
             raise ValueError("Cannot override jit when using a Pattern instance.")
         return pattern
 
     if isinstance(pattern, _CPattern):
-        if resolved_flags:
+        if resolved_flags_no_thread_markers:
             raise ValueError("Cannot supply flags when using a compiled pattern instance.")
         if jit_override is not None:
             raise ValueError("Cannot supply jit when using a compiled pattern instance.")
-        return Pattern(pattern)
+        wrapper = Pattern(pattern)
+        if threads_requested:
+            wrapper.enable_threads()
+        elif no_threads_requested:
+            wrapper.disable_threads()
+        else:
+            if thread_mode == _THREAD_MODE_AUTO:
+                wrapper.enable_auto_threads()
+            else:
+                wrapper.disable_threads()
+        return wrapper
 
-    effective_flags = _apply_default_unicode_flags(pattern, resolved_flags)
+    effective_flags = _apply_default_unicode_flags(pattern, resolved_flags_no_thread_markers)
     native_flags = strip_py_only_flags(effective_flags)
 
-    return cached_compile(pattern, native_flags, Pattern, jit=resolved_jit)
+    compiled = cached_compile(pattern, native_flags, Pattern, jit=resolved_jit)
+    if threads_requested:
+        compiled.enable_threads()
+    elif no_threads_requested:
+        compiled.disable_threads()
+    else:
+        if thread_mode == _THREAD_MODE_AUTO:
+            compiled.enable_auto_threads()
+        else:
+            compiled.disable_threads()
+    return compiled
 
 
 def match(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
@@ -444,6 +545,88 @@ def subn(
     flags: FlagInput = 0,
 ) -> tuple[Any, int]:
     return compile(pattern, flags=flags).subn(repl, string, count=count)
+
+
+_PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})
+
+
+def _subject_length(value: Any) -> int:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(value)
+    if isinstance(value, str):
+        return len(value)
+    raise TypeError(
+        "parallel_map subjects must be str or bytes-like objects when auto threading "
+        "is enabled"
+    )
+
+
+def _should_use_auto_threads(subjects: list[Any]) -> bool:
+    threshold = get_auto_threshold()
+    if threshold <= 0:
+        return True
+    max_length = 0
+    for subject in subjects:
+        length = _subject_length(subject)
+        if length > max_length:
+            max_length = length
+            if max_length >= threshold:
+                return True
+    return False
+
+
+def parallel_map(
+    pattern: Any,
+    subjects: Iterable[Any],
+    *,
+    method: str = "search",
+    flags: FlagInput = 0,
+    pos: int = 0,
+    endpos: int | None = None,
+    options: int = 0,
+    max_workers: int | None = None,
+) -> List[Any]:
+    """Apply *method* across *subjects* using the shared PCRE thread pool.
+
+    The order of *subjects* is preserved in the returned list. Supported executors are
+    limited to stateless pattern lookups—``match``, ``search``, ``fullmatch``, and
+    ``findall``—so that each task can run independently.
+    """
+
+    method_name = str(method)
+    if method_name not in _PARALLEL_EXEC_METHODS:
+        allowed = ", ".join(sorted(_PARALLEL_EXEC_METHODS))
+        raise ValueError(f"parallel_map only supports {allowed} methods, got {method_name!r}")
+
+    pattern_obj = compile(pattern, flags=flags)
+    try:
+        bound_method = getattr(pattern_obj, method_name)
+    except AttributeError as exc:  # pragma: no cover - defensive guard
+        raise ValueError(f"Pattern does not expose method {method_name!r}") from exc
+
+    materials = list(subjects)
+    if not materials:
+        return []
+
+    mode = pattern_obj.thread_mode
+    if mode == _THREAD_MODE_DISABLED:
+        raise RuntimeError(
+            "Pattern not enabled for threaded execution; use Flag.THREADS or configure "
+            "threading defaults."
+        )
+
+    if mode == _THREAD_MODE_AUTO and not _should_use_auto_threads(materials):
+        return [
+            bound_method(subject, pos=pos, endpos=endpos, options=options)
+            for subject in materials
+        ]
+
+    executor = ensure_thread_pool(max_workers)
+    futures = [
+        executor.submit(bound_method, subject, pos=pos, endpos=endpos, options=options)
+        for subject in materials
+    ]
+    return [future.result() for future in futures]
 
 
 def configure(*, jit: bool | None = None) -> bool:

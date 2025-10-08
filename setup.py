@@ -195,7 +195,7 @@ def _platform_prefixes() -> list[Path]:
                 prefixes.append(path)
 
     if sys.platform.startswith("linux"):
-        prefixes.extend(Path(p) for p in ("/usr", "/usr/local"))
+        prefixes.extend(Path(p) for p in ("/usr/local", "/usr"))
     elif sys.platform == "darwin":
         prefixes.extend(_homebrew_prefixes())
         prefixes.extend(Path(p) for p in ("/opt/homebrew", "/usr/local", "/usr"))
@@ -347,6 +347,21 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
     if env_lib:
         for path in env_lib.split(os.pathsep):
             _extend_unique(library_dirs, path)
+
+    env_lib_path = os.environ.get("PCRE2_LIBRARY_PATH")
+    if env_lib_path:
+        for raw_path in env_lib_path.split(os.pathsep):
+            candidate = raw_path.strip()
+            if not candidate:
+                continue
+            path = Path(candidate)
+            if path.is_file() or any(candidate.endswith(ext) for ext in LIB_EXTENSIONS):
+                _extend_unique(extra_link_args, str(path))
+                parent = str(path.parent)
+                if parent:
+                    _extend_unique(library_dirs, parent)
+            else:
+                _extend_unique(library_dirs, candidate)
 
     env_libs = os.environ.get("PCRE2_LIBRARIES")
     if env_libs:

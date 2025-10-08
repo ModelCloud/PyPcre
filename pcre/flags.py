@@ -36,15 +36,19 @@ NO_UTF: int = _EXTRA_BASE
 NO_UCP: int = _EXTRA_BASE << 1
 JIT: int = _EXTRA_BASE << 2
 NO_JIT: int = _EXTRA_BASE << 3
+THREADS: int = _EXTRA_BASE << 4
+NO_THREADS: int = _EXTRA_BASE << 5
 
 PY_ONLY_FLAG_MEMBERS: Dict[str, int] = {
     "NO_UTF": NO_UTF,
     "NO_UCP": NO_UCP,
     "JIT": JIT,
     "NO_JIT": NO_JIT,
+    "THREADS": THREADS,
+    "NO_THREADS": NO_THREADS,
 }
 
-PY_ONLY_FLAG_MASK: int = NO_UTF | NO_UCP | JIT | NO_JIT
+PY_ONLY_FLAG_MASK: int = NO_UTF | NO_UCP | JIT | NO_JIT | THREADS | NO_THREADS
 
 
 def strip_py_only_flags(flags: int) -> int:

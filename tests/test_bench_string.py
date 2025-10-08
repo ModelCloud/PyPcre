@@ -18,7 +18,10 @@ _SUBJECT_BUILDERS = {
     "4byte": lambda n: "\U0001f600" * n,
 }
 _LENGTHS = (5000, 20000)
-_DEFAULT_ITERATIONS = 5
+_BASE_ITERATIONS = 5  # legacy default used for averaging
+_REQUIRED_MULTIPLIER = 5
+_MIN_ITERATIONS = 50
+_DEFAULT_ITERATIONS = max(_MIN_ITERATIONS, _BASE_ITERATIONS * _REQUIRED_MULTIPLIER)
 
 
 def _run_benchmarks(iterations: int) -> Dict[str, Dict[int, Dict[str, float]]]:

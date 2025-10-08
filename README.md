@@ -91,6 +91,28 @@ bytes.
   `re` module while letting you thread PCRE2 execution flags through
   individual calls.
 
+### Threaded execution
+
+- `pcre.parallel_map()` fans out work across a shared thread pool for
+  `match`, `search`, `fullmatch`, and `findall`. The helper preserves the
+  order of the provided subjects and returns the same result objects you’d
+  normally receive from the `Pattern` methods.
+- Threading is **opt-in by default** when Python runs without the GIL
+  (e.g. CPython with `-X gil=0` or `PYTHON_GIL=0`). When the GIL is active the default falls
+  back to sequential execution to avoid needless overhead.
+- With auto threading enabled (`configure_threads(enabled=True)`), the pool
+  is only engaged when at least one subject is larger than the configured
+  threshold (60 kB by default). Smaller jobs run sequentially to avoid the
+  cost of thread hand-offs; adjust the boundary via
+  `configure_threads(threshold=...)`.
+- Use `Flag.THREADS` to force threaded execution for a specific pattern or
+  `Flag.NO_THREADS` to lock it to sequential mode regardless of global
+  settings.
+- `pcre.configure_thread_pool(max_workers=...)` controls the size of the
+  shared executor (capped to half the available CPUs); call it with
+  `preload=True` to spin the pool up eagerly, and `shutdown_thread_pool()`
+  to tear it down manually if needed.
+
 ### JIT control
 
 Pcre’s JIT compiler is enabled by default for every compiled pattern. The
@@ -125,6 +147,8 @@ or more of the following environment variables prior to invoking the build
 - `PCRE2_ROOT`
 - `PCRE2_INCLUDE_DIR`
 - `PCRE2_LIBRARY_DIR`
+- `PCRE2_LIBRARY_PATH` *(pathsep-separated directories or explicit library files to
+  prioritise when resolving `libpcre2-8`)*
 - `PCRE2_LIBRARIES`
 - `PCRE2_CFLAGS`
 - `PCRE2_LDFLAGS`
@@ -135,6 +159,11 @@ Without `pkg-config`, the build script scans common installation prefixes for
 Linux distributions (Debian, Ubuntu, Fedora/RHEL/CentOS, openSUSE, Alpine),
 FreeBSD, macOS (including Homebrew), and Solaris to locate the headers and
 libraries.
+
+If your system ships `libpcre2-8` under `/usr` but you also maintain a
+manually built copy under `/usr/local`, export `PCRE2_LIBRARY_PATH` (and, if
+needed, a matching `PCRE2_INCLUDE_DIR`) so the build links against the desired
+location.
 
 # Notes
 
