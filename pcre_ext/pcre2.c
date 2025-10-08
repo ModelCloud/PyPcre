@@ -6,6 +6,9 @@
 #include "pcre2_module.h"
 #include <stdio.h>
 #include <string.h>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 static int default_jit_enabled = 1;
 
@@ -330,29 +333,123 @@ static MatchObject *create_match_object(PatternObject *pattern,
                                         PCRE2_SIZE *ovector);
 
 static inline Py_ssize_t
-ascii_prefix_length(const char *data, Py_ssize_t max_len)
+ascii_prefix_length_scalar(const char *data, Py_ssize_t max_len)
 {
     Py_ssize_t offset = 0;
-    const Py_ssize_t step = (Py_ssize_t)sizeof(uint64_t);
-    const uint64_t high_mask = 0x8080808080808080ULL;
-
-    while (offset + step <= max_len) {
-        uint64_t chunk;
-        memcpy(&chunk, data + offset, sizeof(uint64_t));
-        if (chunk & high_mask) {
-            break;
-        }
-        offset += step;
-    }
-
     while (offset < max_len) {
         if ((data[offset] & 0x80) != 0) {
             break;
         }
         offset += 1;
     }
-
     return offset;
+}
+
+#if defined(__x86_64__) && defined(__GNUC__)
+
+static inline int
+ascii_vector_mode(void)
+{
+    static int cached = -1;
+    if (cached != -1) {
+        return cached;
+    }
+    cached = 0;
+#if defined(__has_builtin)
+#  if __has_builtin(__builtin_cpu_supports)
+#    define PCRE_HAVE_CPU_SUPPORTS 1
+#  endif
+#elif defined(__GNUC__)
+#  if (__GNUC__ > 4)
+#    define PCRE_HAVE_CPU_SUPPORTS 1
+#  endif
+#endif
+#if defined(PCRE_HAVE_CPU_SUPPORTS)
+    if (__builtin_cpu_supports("avx512bw")) {
+        cached = 3;
+    } else if (__builtin_cpu_supports("avx2")) {
+        cached = 2;
+    } else if (__builtin_cpu_supports("sse2")) {
+        cached = 1;
+    }
+#endif
+    return cached;
+}
+
+#if defined(__GNUC__)
+__attribute__((target("avx512bw")))
+static Py_ssize_t
+ascii_prefix_length_avx512(const char *data, Py_ssize_t max_len)
+{
+    Py_ssize_t offset = 0;
+    const Py_ssize_t step = 64;
+    while (offset + step <= max_len) {
+        __m512i chunk = _mm512_loadu_si512((const void *)(data + offset));
+        __mmask64 mask = _mm512_movepi8_mask(chunk);
+        if (mask != 0) {
+            unsigned long idx = __builtin_ctzll(mask);
+            return offset + (Py_ssize_t)idx;
+        }
+        offset += step;
+    }
+    return offset + ascii_prefix_length_scalar(data + offset, max_len - offset);
+}
+
+__attribute__((target("avx2")))
+static Py_ssize_t
+ascii_prefix_length_avx2(const char *data, Py_ssize_t max_len)
+{
+    Py_ssize_t offset = 0;
+    const Py_ssize_t step = 32;
+    while (offset + step <= max_len) {
+        __m256i chunk = _mm256_loadu_si256((const __m256i *)(data + offset));
+        unsigned int mask = (unsigned int)_mm256_movemask_epi8(chunk);
+        if (mask != 0) {
+            unsigned int idx = __builtin_ctz(mask);
+            return offset + (Py_ssize_t)idx;
+        }
+        offset += step;
+    }
+    return offset + ascii_prefix_length_scalar(data + offset, max_len - offset);
+}
+
+__attribute__((target("sse2")))
+static Py_ssize_t
+ascii_prefix_length_sse2(const char *data, Py_ssize_t max_len)
+{
+    Py_ssize_t offset = 0;
+    const Py_ssize_t step = 16;
+    while (offset + step <= max_len) {
+        __m128i chunk = _mm_loadu_si128((const __m128i *)(data + offset));
+        unsigned int mask = (unsigned int)_mm_movemask_epi8(chunk);
+        if (mask != 0) {
+            unsigned int idx = __builtin_ctz(mask);
+            return offset + (Py_ssize_t)idx;
+        }
+        offset += step;
+    }
+    return offset + ascii_prefix_length_scalar(data + offset, max_len - offset);
+}
+#endif
+
+#endif
+
+static inline Py_ssize_t
+ascii_prefix_length(const char *data, Py_ssize_t max_len)
+{
+#if defined(__x86_64__) && defined(__GNUC__)
+    switch (ascii_vector_mode()) {
+        case 3:
+            return ascii_prefix_length_avx512(data, max_len);
+        case 2:
+            return ascii_prefix_length_avx2(data, max_len);
+        case 1:
+            return ascii_prefix_length_sse2(data, max_len);
+        default:
+            break;
+    }
+#endif
+    return ascii_prefix_length_scalar(data, max_len);
 }
 
 static inline Py_ssize_t
@@ -1649,6 +1746,7 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     Py_RETURN_FALSE;
 }
 
+static PyObject *module_cpu_ascii_vector_mode(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 
 static PyMethodDef module_methods[] = {
     {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object." )},
@@ -1666,6 +1764,7 @@ static PyMethodDef module_methods[] = {
     {"get_jit_stack_cache_count", (PyCFunction)module_get_jit_stack_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached JIT stacks currently stored." )},
     {"get_jit_stack_limits", (PyCFunction)module_get_jit_stack_limits, METH_NOARGS, PyDoc_STR("Return the configured (start, max) JIT stack sizes." )},
     {"set_jit_stack_limits", (PyCFunction)module_set_jit_stack_limits, METH_VARARGS, PyDoc_STR("Set the (start, max) sizes for newly created JIT stacks." )},
+    {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
     {NULL, NULL, 0, NULL},
 };
 
@@ -1743,4 +1842,14 @@ error:
     pcre_error_teardown();
     Py_DECREF(module);
     return NULL;
+}
+
+static PyObject *
+module_cpu_ascii_vector_mode(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+#if defined(__x86_64__) && defined(__GNUC__)
+    return PyLong_FromLong(ascii_vector_mode());
+#else
+    return PyLong_FromLong(0);
+#endif
 }

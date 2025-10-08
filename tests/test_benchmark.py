@@ -102,14 +102,39 @@ def _build_module_operations(module):
 class TestRegexBenchmarks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        def _compile_pcre(pattern: str):
+            return pcre.compile(pattern)
+
+        def _compile_re(pattern: str):
+            try:
+                return re.compile(pattern)
+            except re.error:
+                return None
+
+        def _compile_pcre2(pattern: str):
+            if external_pcre2 is None:
+                return None
+            try:
+                return external_pcre2.compile(pattern, flags=getattr(external_pcre2, 'UTF', 0) | getattr(external_pcre2, 'UCP', 0))
+            except Exception:
+                return None
+
+        def _compile_regex(pattern: str):
+            if external_regex is None:
+                return None
+            try:
+                return external_regex.compile(pattern, flags=getattr(external_regex, 'UNICODE', 0) | getattr(external_regex, 'FULLCASE', 0))
+            except Exception:
+                return None
+
         cls.engines = [
-            ("re", re, lambda pattern: re.compile(pattern)),
-            ("pcre", pcre, lambda pattern: pcre.compile(pattern)),
+            ("re", re, _compile_re),
+            ("pcre", pcre, _compile_pcre),
         ]
         if external_pcre2 is not None:
-            cls.engines.append(("pcre2", external_pcre2, lambda pattern: external_pcre2.compile(pattern)))
+            cls.engines.append(("pcre2", external_pcre2, _compile_pcre2))
         if external_regex is not None:
-            cls.engines.append(("regex", external_regex, lambda pattern: external_regex.compile(pattern)))
+            cls.engines.append(("regex", external_regex, _compile_regex))
         if SINGLE_ITERATIONS <= 0 or THREAD_ITERATIONS <= 0:
             raise unittest.SkipTest("Iterations must be positive for meaningful benchmarks")
 
@@ -119,6 +144,8 @@ class TestRegexBenchmarks(unittest.TestCase):
             module_ops = _build_module_operations(module)
             for pattern_text, subjects in PATTERN_CASES:
                 compiled = compile_fn(pattern_text)
+                if compiled is None:
+                    continue
                 compiled_ops = _build_compiled_operations(compiled)
                 expected_calls = SINGLE_ITERATIONS * len(subjects)
 
@@ -198,6 +225,8 @@ class TestRegexBenchmarks(unittest.TestCase):
         for engine_name, module, compile_fn in self.engines:
             module_ops = _build_module_operations(module)
             compiled = compile_fn(pattern_text)
+            if compiled is None:
+                continue
             compiled_ops = _build_compiled_operations(compiled)
             for variant_label, subjects in UNICODE_VARIANT_SUBJECTS.items():
                 expected_calls = SINGLE_ITERATIONS * len(subjects)

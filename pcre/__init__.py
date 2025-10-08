@@ -44,6 +44,8 @@ from .pcre import (
 
 __version__ = getattr(cpcre2, "__version__", "0.0")
 
+_cpu_ascii_vector_mode = getattr(cpcre2, "_cpu_ascii_vector_mode", None)
+
 _FLAG_MEMBERS: dict[str, int] = {}
 _ERROR_CODE_MEMBERS: dict[str, int] = {}
 
@@ -140,3 +142,7 @@ __all__ = [
 ]
 
 __all__ += _EXPORTED_ERROR_CLASSES
+
+if _cpu_ascii_vector_mode is not None:
+    globals()["_cpu_ascii_vector_mode"] = _cpu_ascii_vector_mode
+    __all__.append("_cpu_ascii_vector_mode")
