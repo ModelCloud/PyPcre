@@ -318,8 +318,7 @@ typedef struct {
     Py_ssize_t byte_to_index_cached_index;
     Py_ssize_t index_to_byte_cached_index;
     Py_ssize_t index_to_byte_cached_byte;
-    int unicode_kind;
-    void *unicode_data;
+    int utf8_is_ascii;
 } FindIterObject;
 
 static MatchObject *create_match_object(PatternObject *pattern,
@@ -331,71 +330,216 @@ static MatchObject *create_match_object(PatternObject *pattern,
                                         PCRE2_SIZE *ovector);
 
 static inline Py_ssize_t
-unicode_codepoint_byte_count(Py_UCS4 ch)
+ascii_prefix_length(const char *data, Py_ssize_t max_len)
 {
-    if (ch <= 0x7F) {
-        return 1;
+    Py_ssize_t offset = 0;
+    const Py_ssize_t step = (Py_ssize_t)sizeof(uint64_t);
+    const uint64_t high_mask = 0x8080808080808080ULL;
+
+    while (offset + step <= max_len) {
+        uint64_t chunk;
+        memcpy(&chunk, data + offset, sizeof(uint64_t));
+        if (chunk & high_mask) {
+            break;
+        }
+        offset += step;
     }
-    if (ch <= 0x7FF) {
-        return 2;
+
+    while (offset < max_len) {
+        if ((data[offset] & 0x80) != 0) {
+            break;
+        }
+        offset += 1;
     }
-    if (ch <= 0xFFFF) {
-        return 3;
+
+    return offset;
+}
+
+static inline Py_ssize_t
+utf8_index_to_offset_fast(const char *data, Py_ssize_t data_len, Py_ssize_t index)
+{
+    if (index <= 0) {
+        return 0;
     }
-    return 4;
+
+    Py_ssize_t offset = 0;
+    while (index > 0 && offset < data_len) {
+        Py_ssize_t remaining_bytes = data_len - offset;
+        Py_ssize_t ascii_run = ascii_prefix_length(data + offset, remaining_bytes);
+        if (ascii_run > 0) {
+            if (ascii_run > index) {
+                ascii_run = index;
+            }
+            offset += ascii_run;
+            index -= ascii_run;
+            continue;
+        }
+
+        unsigned char lead = (unsigned char)data[offset];
+        Py_ssize_t char_bytes = 1;
+        if ((lead & 0xE0) == 0xC0) {
+            char_bytes = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            char_bytes = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            char_bytes = 4;
+        }
+
+        if (char_bytes > remaining_bytes) {
+            char_bytes = remaining_bytes;
+        }
+
+        offset += char_bytes;
+        index -= 1;
+    }
+
+    if (offset > data_len) {
+        offset = data_len;
+    }
+    return offset;
 }
 
 static Py_ssize_t
 finditer_byte_to_index(FindIterObject *self, Py_ssize_t target_byte)
 {
-    if (self->subject_is_bytes) {
-        if (target_byte < 0) {
-            return 0;
-        }
+    if (target_byte < 0) {
+        self->byte_to_index_cached_index = 0;
+        self->byte_to_index_cached_byte = 0;
+        return 0;
+    }
+
+    if (target_byte > self->subject_length_bytes) {
+        target_byte = self->subject_length_bytes;
+    }
+
+    if (self->subject_is_bytes || self->utf8_is_ascii) {
+        self->byte_to_index_cached_index = target_byte;
+        self->byte_to_index_cached_byte = target_byte;
         return target_byte;
+    }
+
+    if (target_byte <= self->byte_to_index_cached_byte) {
+        self->byte_to_index_cached_index = 0;
+        self->byte_to_index_cached_byte = 0;
     }
 
     Py_ssize_t index = self->byte_to_index_cached_index;
     Py_ssize_t byte_offset = self->byte_to_index_cached_byte;
+    const char *ptr = self->utf8_data + byte_offset;
 
-    while (byte_offset < target_byte && index < self->logical_length) {
-        Py_UCS4 ch = PyUnicode_READ(self->unicode_kind, self->unicode_data, index);
-        byte_offset += unicode_codepoint_byte_count(ch);
+    while (byte_offset < target_byte) {
+        Py_ssize_t remaining = target_byte - byte_offset;
+        unsigned char lead = (unsigned char)*ptr;
+
+        if (lead < 0x80) {
+            Py_ssize_t ascii_run = ascii_prefix_length(ptr, remaining);
+            if (ascii_run > 0) {
+                byte_offset += ascii_run;
+                index += ascii_run;
+                ptr += ascii_run;
+                continue;
+            }
+        }
+
+        Py_ssize_t char_bytes = 1;
+        if ((lead & 0xE0) == 0xC0) {
+            char_bytes = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            char_bytes = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            char_bytes = 4;
+        }
+
+        if (byte_offset + char_bytes > target_byte) {
+            byte_offset = target_byte;
+            break;
+        }
+
+        ptr += char_bytes;
+        byte_offset += char_bytes;
         index += 1;
     }
 
-    if (byte_offset < target_byte) {
-        index = self->logical_length;
-        byte_offset = self->subject_length_bytes;
+    self->byte_to_index_cached_byte = byte_offset;
+    if (byte_offset == self->subject_length_bytes) {
+        self->byte_to_index_cached_index = self->logical_length;
+        return self->logical_length;
     }
 
     self->byte_to_index_cached_index = index;
-    self->byte_to_index_cached_byte = byte_offset;
     return index;
 }
 
 static Py_ssize_t
 finditer_index_to_byte(FindIterObject *self, Py_ssize_t target_index)
 {
-    if (self->subject_is_bytes) {
-        if (target_index < 0) {
-            return 0;
-        }
+    if (target_index < 0) {
+        self->index_to_byte_cached_index = 0;
+        self->index_to_byte_cached_byte = 0;
+        return 0;
+    }
+
+    if (target_index > self->logical_length) {
+        target_index = self->logical_length;
+    }
+
+    if (self->subject_is_bytes || self->utf8_is_ascii) {
+        self->index_to_byte_cached_index = target_index;
+        self->index_to_byte_cached_byte = target_index;
         return target_index;
+    }
+
+    if (target_index <= self->index_to_byte_cached_index) {
+        self->index_to_byte_cached_index = 0;
+        self->index_to_byte_cached_byte = 0;
     }
 
     Py_ssize_t index = self->index_to_byte_cached_index;
     Py_ssize_t byte_offset = self->index_to_byte_cached_byte;
+    const char *ptr = self->utf8_data + byte_offset;
 
-    while (index < target_index && index < self->logical_length) {
-        Py_UCS4 ch = PyUnicode_READ(self->unicode_kind, self->unicode_data, index);
-        byte_offset += unicode_codepoint_byte_count(ch);
+    while (index < target_index) {
+        Py_ssize_t remaining_chars = target_index - index;
+        Py_ssize_t remaining_bytes = self->subject_length_bytes - byte_offset;
+        if (remaining_bytes <= 0) {
+            break;
+        }
+
+        unsigned char lead = (unsigned char)*ptr;
+
+        if (lead < 0x80) {
+            Py_ssize_t ascii_run = ascii_prefix_length(ptr, remaining_bytes);
+            if (ascii_run > 0) {
+                if (ascii_run >= remaining_chars) {
+                    byte_offset += remaining_chars;
+                    index += remaining_chars;
+                    ptr += remaining_chars;
+                    break;
+                }
+                byte_offset += ascii_run;
+                index += ascii_run;
+                ptr += ascii_run;
+                continue;
+            }
+        }
+
+        Py_ssize_t char_bytes = 1;
+        if ((lead & 0xE0) == 0xC0) {
+            char_bytes = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            char_bytes = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            char_bytes = 4;
+        }
+
+        if (remaining_bytes < char_bytes) {
+            byte_offset += remaining_bytes;
+            break;
+        }
+
+        ptr += char_bytes;
+        byte_offset += char_bytes;
         index += 1;
-    }
-
-    if (index < target_index) {
-        index = self->logical_length;
-        byte_offset = self->subject_length_bytes;
     }
 
     self->index_to_byte_cached_index = index;
@@ -683,8 +827,7 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->byte_to_index_cached_index = 0;
     iter->index_to_byte_cached_index = 0;
     iter->index_to_byte_cached_byte = 0;
-    iter->unicode_kind = 0;
-    iter->unicode_data = NULL;
+    iter->utf8_is_ascii = 0;
 
     Py_INCREF(pattern);
     iter->pattern = pattern;
@@ -711,11 +854,12 @@ Pattern_create_finditer(PatternObject *pattern,
         iter->subject_is_bytes = 0;
         iter->subject_length_bytes = utf8_length;
         iter->logical_length = PyUnicode_GET_LENGTH(subject_obj);
-        iter->unicode_kind = PyUnicode_KIND(subject_obj);
-        iter->unicode_data = PyUnicode_DATA(subject_obj);
         iter->utf8_data = utf8_data;
         Py_INCREF(subject_obj);
         iter->utf8_owner = subject_obj;
+        if (PyUnicode_IS_ASCII(subject_obj)) {
+            iter->utf8_is_ascii = 1;
+        }
     } else {
         PyErr_SetString(PyExc_TypeError, "subject must be str or bytes");
         goto error;
@@ -753,12 +897,10 @@ Pattern_create_finditer(PatternObject *pattern,
     if (iter->subject_is_bytes) {
         resolved_end_byte = resolved_end;
     } else {
-        if (utf8_index_to_offset(subject_obj, pos, &current_byte) < 0) {
-            goto error;
-        }
-        if (utf8_index_to_offset(subject_obj, resolved_end, &resolved_end_byte) < 0) {
-            goto error;
-        }
+        current_byte = pos == 0 ? 0 : utf8_index_to_offset_fast(iter->utf8_data, iter->subject_length_bytes, pos);
+        resolved_end_byte = resolved_end == iter->logical_length
+            ? iter->subject_length_bytes
+            : utf8_index_to_offset_fast(iter->utf8_data, iter->subject_length_bytes, resolved_end);
     }
 
     iter->current_pos = pos;
@@ -827,6 +969,9 @@ Pattern_create_finditer(PatternObject *pattern,
 
     iter->match_context = match_context;
     iter->jit_stack = jit_stack;
+    if (!iter->subject_is_bytes) {
+        iter->base_options |= PCRE2_NO_UTF_CHECK;
+    }
 
     return (PyObject *)iter;
 
@@ -939,6 +1084,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     Py_ssize_t subject_length_bytes = 0;
     Py_ssize_t logical_length = 0;
     int subject_is_bytes = PyBytes_Check(subject_obj);
+    int ascii_text = 0;
 
     if (subject_is_bytes) {
         Py_INCREF(subject_obj);
@@ -960,6 +1106,9 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         buffer = utf8_data;
         subject_length_bytes = utf8_length;
         logical_length = PyUnicode_GET_LENGTH(subject_obj);
+        if (PyUnicode_IS_ASCII(subject_obj)) {
+            ascii_text = 1;
+        }
     } else {
         PyErr_SetString(PyExc_TypeError, "expected str or bytes");
         return NULL;
@@ -988,21 +1137,30 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         }
     }
 
+    int treat_as_bytes = subject_is_bytes || ascii_text;
+
     Py_ssize_t byte_start = pos;
     Py_ssize_t byte_end = subject_length_bytes;
 
-    if (subject_is_bytes) {
+    if (treat_as_bytes) {
         byte_start = pos;
         if (adjusted_endpos >= 0) {
             byte_end = adjusted_endpos;
         }
     } else {
-        if (utf8_index_to_offset(subject_obj, pos, &byte_start) < 0) {
+        if (pos == 0) {
+            byte_start = 0;
+        } else if (pos == logical_length) {
+            byte_start = subject_length_bytes;
+        } else if (utf8_index_to_offset(subject_obj, pos, &byte_start) < 0) {
             Py_DECREF(utf8_owner);
             return NULL;
         }
+
         if (adjusted_endpos >= 0) {
-            if (utf8_index_to_offset(subject_obj, adjusted_endpos, &byte_end) < 0) {
+            if (adjusted_endpos == logical_length) {
+                byte_end = subject_length_bytes;
+            } else if (utf8_index_to_offset(subject_obj, adjusted_endpos, &byte_end) < 0) {
                 Py_DECREF(utf8_owner);
                 return NULL;
             }
@@ -1022,6 +1180,9 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         match_options |= PCRE2_ANCHORED;
     } else if (mode == EXEC_MODE_FULLMATCH) {
         match_options |= (PCRE2_ANCHORED | PCRE2_ENDANCHORED);
+    }
+    if (!subject_is_bytes) {
+        match_options |= PCRE2_NO_UTF_CHECK;
     }
 
     pcre2_match_data *match_data = match_data_cache_acquire(self);
