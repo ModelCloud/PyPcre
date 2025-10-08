@@ -470,6 +470,6 @@ def configure(*, jit: bool | None = None) -> bool:
 
 
 def clear_cache() -> None:
-    """Clear the compiled pattern cache used by :func:`compile`."""
+    """Clear the compiled pattern cache and release cached match-data buffers."""
 
     _clear_cache()

@@ -56,7 +56,9 @@ def cached_compile(
 
 
 def clear_cache() -> None:
-    """Clear all cached compiled pattern wrappers."""
+    """Clear all cached compiled pattern wrappers and backend match data."""
 
     with _PATTERN_CACHE_LOCK:
         _PATTERN_CACHE.clear()
+
+    _pcre2.clear_match_data_cache()

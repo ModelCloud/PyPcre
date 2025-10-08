@@ -6,6 +6,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <structmember.h>
+#include "pythread.h"
+#include <stdint.h>
 
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include "pcre2.h"
@@ -34,6 +36,31 @@ typedef struct {
 
 static PyObject *PcreError = NULL;
 static int default_jit_enabled = 1;
+typedef struct MatchDataCacheEntry {
+    pcre2_match_data *match_data;
+    uint32_t ovec_count;
+    struct MatchDataCacheEntry *next;
+} MatchDataCacheEntry;
+
+static MatchDataCacheEntry *match_data_cache_head = NULL;
+static uint32_t match_data_cache_capacity = 128;
+static uint32_t match_data_cache_count = 0;
+static PyThread_type_lock match_data_cache_lock = NULL;
+
+static void
+match_data_cache_free_all_locked(void)
+{
+    MatchDataCacheEntry *node = match_data_cache_head;
+    match_data_cache_head = NULL;
+    match_data_cache_count = 0;
+
+    while (node != NULL) {
+        MatchDataCacheEntry *next = node->next;
+        pcre2_match_data_free(node->match_data);
+        PyMem_Free(node);
+        node = next;
+    }
+}
 
 static int
 coerce_jit_argument(PyObject *value, int *out)
@@ -524,6 +551,128 @@ create_match_object(PatternObject *pattern,
     return match;
 }
 
+static void
+match_data_cache_evict_tail_locked(void)
+{
+    if (match_data_cache_head == NULL) {
+        return;
+    }
+
+    MatchDataCacheEntry *prev = NULL;
+    MatchDataCacheEntry *node = match_data_cache_head;
+    while (node->next != NULL) {
+        prev = node;
+        node = node->next;
+    }
+
+    if (prev != NULL) {
+        prev->next = NULL;
+    } else {
+        match_data_cache_head = NULL;
+    }
+
+    if (match_data_cache_count > 0) {
+        match_data_cache_count--;
+    }
+
+    pcre2_match_data_free(node->match_data);
+    PyMem_Free(node);
+}
+
+static pcre2_match_data *
+match_data_cache_acquire(PatternObject *self)
+{
+    uint32_t required_pairs = self->capture_count + 1;
+    if (required_pairs == 0) {
+        required_pairs = 1;
+    }
+
+    pcre2_match_data *cached = NULL;
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_acquire_lock(match_data_cache_lock, 1);
+    }
+
+    if (match_data_cache_capacity != 0) {
+        MatchDataCacheEntry **link = &match_data_cache_head;
+        MatchDataCacheEntry *entry = match_data_cache_head;
+        while (entry != NULL) {
+            if (entry->ovec_count >= required_pairs) {
+                *link = entry->next;
+                if (match_data_cache_count > 0) {
+                    match_data_cache_count--;
+                }
+                cached = entry->match_data;
+                PyMem_Free(entry);
+                break;
+            }
+            link = &entry->next;
+            entry = entry->next;
+        }
+
+        if (cached == NULL && match_data_cache_count >= match_data_cache_capacity) {
+            match_data_cache_evict_tail_locked();
+        }
+    }
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_release_lock(match_data_cache_lock);
+    }
+
+    if (cached != NULL) {
+        return cached;
+    }
+
+    pcre2_match_data *match_data = pcre2_match_data_create(required_pairs, NULL);
+    if (match_data != NULL) {
+        return match_data;
+    }
+    return pcre2_match_data_create_from_pattern(self->code, NULL);
+}
+
+static void
+match_data_cache_release(pcre2_match_data *match_data)
+{
+    if (match_data == NULL) {
+        return;
+    }
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_acquire_lock(match_data_cache_lock, 1);
+    }
+
+    if (match_data_cache_capacity == 0) {
+        if (match_data_cache_lock != NULL) {
+            PyThread_release_lock(match_data_cache_lock);
+        }
+        pcre2_match_data_free(match_data);
+        return;
+    }
+
+    MatchDataCacheEntry *entry = PyMem_Malloc(sizeof(*entry));
+    if (entry == NULL) {
+        if (match_data_cache_lock != NULL) {
+            PyThread_release_lock(match_data_cache_lock);
+        }
+        pcre2_match_data_free(match_data);
+        return;
+    }
+
+    entry->match_data = match_data;
+    entry->ovec_count = pcre2_get_ovector_count(match_data);
+    entry->next = match_data_cache_head;
+    match_data_cache_head = entry;
+    match_data_cache_count++;
+
+    while (match_data_cache_count > match_data_cache_capacity) {
+        match_data_cache_evict_tail_locked();
+    }
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_release_lock(match_data_cache_lock);
+    }
+}
+
 typedef enum {
     EXEC_MODE_MATCH,
     EXEC_MODE_SEARCH,
@@ -659,7 +808,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         match_options |= (PCRE2_ANCHORED | PCRE2_ENDANCHORED);
     }
 
-    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(self->code, NULL);
+    pcre2_match_data *match_data = match_data_cache_acquire(self);
     if (match_data == NULL) {
         Py_DECREF(subject_bytes);
         PyErr_NoMemory();
@@ -670,7 +819,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     if (offset_limit != (PCRE2_SIZE)subject_length_bytes) {
         match_context = pcre2_match_context_create(NULL);
         if (match_context == NULL) {
-            pcre2_match_data_free(match_data);
+            match_data_cache_release(match_data);
             Py_DECREF(subject_bytes);
             PyErr_NoMemory();
             return NULL;
@@ -678,7 +827,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         int ctx_rc = pcre2_set_offset_limit(match_context, offset_limit);
         if (ctx_rc < 0) {
             pcre2_match_context_free(match_context);
-            pcre2_match_data_free(match_data);
+            match_data_cache_release(match_data);
             Py_DECREF(subject_bytes);
             raise_pcre_error("set_offset_limit", ctx_rc, 0);
             return NULL;
@@ -703,7 +852,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             self->jit_enabled = 0;
         } else if (rc != PCRE2_ERROR_NOMATCH && rc < 0) {
             PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
-            pcre2_match_data_free(match_data);
+            match_data_cache_release(match_data);
             if (match_context != NULL) {
                 pcre2_match_context_free(match_context);
             }
@@ -726,7 +875,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
 
     if (rc == PCRE2_ERROR_NOMATCH) {
-        pcre2_match_data_free(match_data);
+        match_data_cache_release(match_data);
         if (match_context != NULL) {
             pcre2_match_context_free(match_context);
         }
@@ -736,7 +885,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 
     if (rc < 0) {
         PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
-        pcre2_match_data_free(match_data);
+        match_data_cache_release(match_data);
         if (match_context != NULL) {
             pcre2_match_context_free(match_context);
         }
@@ -745,10 +894,10 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         return NULL;
     }
 
-    uint32_t ovec_count = pcre2_get_ovector_count(match_data);
+    uint32_t available_ovector_pairs = pcre2_get_ovector_count(match_data);
     PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
-    if (ovector == NULL || ovec_count == 0) {
-        pcre2_match_data_free(match_data);
+    if (ovector == NULL || available_ovector_pairs == 0) {
+        match_data_cache_release(match_data);
         if (match_context != NULL) {
             pcre2_match_context_free(match_context);
         }
@@ -757,8 +906,18 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         return NULL;
     }
 
-    MatchObject *match = create_match_object(self, subject_obj, subject_bytes, ovec_count, ovector);
-    pcre2_match_data_free(match_data);
+    uint64_t expected_pairs = (uint64_t)self->capture_count + 1;
+    if (expected_pairs == 0 || expected_pairs > available_ovector_pairs) {
+        expected_pairs = available_ovector_pairs;
+    }
+
+    MatchObject *match = create_match_object(
+        self,
+        subject_obj,
+        subject_bytes,
+        (uint32_t)expected_pairs,
+        ovector);
+    match_data_cache_release(match_data);
     if (match_context != NULL) {
         pcre2_match_context_free(match_context);
     }
@@ -1072,12 +1231,81 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     Py_RETURN_FALSE;
 }
 
+static PyObject *
+module_get_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    return PyLong_FromUnsignedLong((unsigned long)match_data_cache_capacity);
+}
+
+static PyObject *
+module_set_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
+{
+    unsigned long size = 0;
+    if (!PyArg_ParseTuple(args, "k", &size)) {
+        return NULL;
+    }
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_acquire_lock(match_data_cache_lock, 1);
+    }
+
+    match_data_cache_capacity = (uint32_t)size;
+
+    while (match_data_cache_count > match_data_cache_capacity) {
+        match_data_cache_evict_tail_locked();
+    }
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_release_lock(match_data_cache_lock);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+module_clear_match_data_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    if (match_data_cache_lock != NULL) {
+        PyThread_acquire_lock(match_data_cache_lock, 1);
+    }
+
+    match_data_cache_free_all_locked();
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_release_lock(match_data_cache_lock);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+module_get_match_data_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    unsigned long count = 0;
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_acquire_lock(match_data_cache_lock, 1);
+    }
+
+    count = match_data_cache_count;
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_release_lock(match_data_cache_lock);
+    }
+
+    return PyLong_FromUnsignedLong(count);
+}
+
 static PyMethodDef module_methods[] = {
     {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object.")},
     {"match", (PyCFunction)module_match, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the beginning of a string.")},
     {"search", (PyCFunction)module_search, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search a string for a pattern." )},
     {"fullmatch", (PyCFunction)module_fullmatch, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the entire string." )},
     {"configure", (PyCFunction)module_configure, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Get or set module-wide defaults (currently only 'jit')." )},
+    {"get_match_data_cache_size", (PyCFunction)module_get_match_data_cache_size, METH_NOARGS, PyDoc_STR("Return the capacity of the reusable match-data cache." )},
+    {"set_match_data_cache_size", (PyCFunction)module_set_match_data_cache_size, METH_VARARGS, PyDoc_STR("Set the capacity of the reusable match-data cache." )},
+    {"clear_match_data_cache", (PyCFunction)module_clear_match_data_cache, METH_NOARGS, PyDoc_STR("Release all cached PCRE2 match-data buffers." )},
+    {"get_match_data_cache_count", (PyCFunction)module_get_match_data_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached match-data buffers currently stored." )},
     {NULL, NULL, 0, NULL},
 };
 
@@ -1092,6 +1320,8 @@ static struct PyModuleDef moduledef = {
 PyMODINIT_FUNC
 PyInit_cpcre2(void)
 {
+    int lock_created = 0;
+
     if (PyType_Ready(&PatternType) < 0) {
         return NULL;
     }
@@ -1111,6 +1341,15 @@ PyInit_cpcre2(void)
     if (PcreError == NULL) {
         Py_DECREF(module);
         return NULL;
+    }
+
+    if (match_data_cache_lock == NULL) {
+        match_data_cache_lock = PyThread_allocate_lock();
+        if (match_data_cache_lock == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        lock_created = 1;
     }
 
     Py_INCREF(&PatternType);
@@ -1170,5 +1409,9 @@ error:
     Py_XDECREF(PcreError);
     PcreError = NULL;
     Py_DECREF(module);
+    if (lock_created && match_data_cache_lock != NULL) {
+        PyThread_free_lock(match_data_cache_lock);
+        match_data_cache_lock = NULL;
+    }
     return NULL;
 }
