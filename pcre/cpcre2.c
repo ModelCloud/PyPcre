@@ -90,8 +90,11 @@ jit_stack_cache_free_all_locked(void)
 }
 
 static int
-coerce_jit_argument(PyObject *value, int *out)
+coerce_jit_argument(PyObject *value, int *out, int *is_explicit)
 {
+    if (is_explicit != NULL) {
+        *is_explicit = (value != NULL && value != Py_None);
+    }
     if (value == NULL || value == Py_None) {
         *out = default_jit_enabled;
         return 0;
@@ -1166,7 +1169,7 @@ static PyTypeObject PatternType = {
 };
 
 static PatternObject *
-Pattern_create(PyObject *pattern_obj, uint32_t options, int jit)
+Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explicit)
 {
     PyObject *pattern_bytes = bytes_from_text(pattern_obj);
     if (pattern_bytes == NULL) {
@@ -1225,6 +1228,10 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit)
             pattern->jit_enabled = 1;
         } else if (jit_rc == PCRE2_ERROR_JIT_BADOPTION) {
             pattern->jit_enabled = 0;
+#ifdef PCRE2_ERROR_JIT_UNSUPPORTED
+        } else if (!jit_explicit && jit_rc == PCRE2_ERROR_JIT_UNSUPPORTED) {
+            pattern->jit_enabled = 0;
+#endif
         } else {
             Py_DECREF(pattern);
             raise_pcre_error("jit_compile", jit_rc, 0);
@@ -1247,11 +1254,12 @@ module_compile(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     }
 
     int jit = 0;
-    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+    int jit_explicit = 0;
+    if (coerce_jit_argument(jit_obj, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
-    return (PyObject *)Pattern_create(pattern, (uint32_t)flags, jit);
+    return (PyObject *)Pattern_create(pattern, (uint32_t)flags, jit, jit_explicit);
 }
 
 static PyObject *
@@ -1279,11 +1287,12 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     }
 
     int jit = 0;
-    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+    int jit_explicit = 0;
+    if (coerce_jit_argument(jit_obj, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit);
+    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit, jit_explicit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -1312,11 +1321,12 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     }
 
     int jit = 0;
-    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+    int jit_explicit = 0;
+    if (coerce_jit_argument(jit_obj, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit);
+    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit, jit_explicit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -1345,11 +1355,12 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     }
 
     int jit = 0;
-    if (coerce_jit_argument(jit_obj, &jit) < 0) {
+    int jit_explicit = 0;
+    if (coerce_jit_argument(jit_obj, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit);
+    PatternObject *pattern = Pattern_create(pattern_obj, (uint32_t)flags, jit, jit_explicit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -1376,7 +1387,7 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
     if (jit_obj != Py_None) {
         int jit = 0;
-        if (coerce_jit_argument(jit_obj, &jit) < 0) {
+        if (coerce_jit_argument(jit_obj, &jit, NULL) < 0) {
             return NULL;
         }
         default_jit_enabled = jit;
