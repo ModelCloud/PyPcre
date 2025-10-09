@@ -90,7 +90,7 @@ jobs:
         with:
           copyback: false
           prepare: |
-            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip pcre2 gcc gmake pkgconf
+            env ASSUME_ALWAYS_YES=yes pkg install -y python py311-pip pcre2 gcc gmake pkgconf
           run: |
             python -V
             python -m venv venv
