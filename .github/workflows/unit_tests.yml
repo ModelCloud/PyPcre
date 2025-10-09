@@ -1,0 +1,148 @@
+name: Unit Tests
+
+defaults:
+  run:
+    shell: bash -le {0}
+
+on:
+  push:
+  repository_dispatch:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-workflow-unit-tests
+  cancel-in-progress: true
+
+jobs:
+  list-test-files:
+    runs-on: ubuntu-24.04
+    outputs:
+      test-files: ${{ steps.files.outputs.test-files }}
+
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v5
+
+      - name: List files
+        id: files
+        run: |
+          script="
+          import json
+          import os
+          import re
+
+          IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
+
+          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
+
+          print(f'{json.dumps(all_tests)}')
+          "
+
+          test_files=$(python3 -c "$script")
+          IFS='|' read -r test_files <<< "$test_files"
+
+          echo "test-files=$torch_test_files" >> "$GITHUB_OUTPUT"
+
+          echo "Test files: $test_files"
+
+  test:
+    needs:
+      - list-test-files
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+          cache: 'pip'
+
+      - name: install
+        run: pip install . pytest
+
+      - name: test_close.py
+        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+
+
+  freebsd:
+    needs:
+      - list-test-files
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: clean dir
+        run: rm -rf .git
+
+      - name: Test in FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          copyback: false
+          prepare: |
+            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip
+          run: |
+            python -V
+            python -m venv venv
+            . venv/bin/activate
+            pip install . pytest
+            pytest --durations=0 tests/${{ matrix.test_script }}.py
+
+  solaris:
+    needs:
+      - list-test-files
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: clean dir
+        run: rm -rf .git
+
+      - name: Test in Solaris
+        uses: vmactions/solaris-vm@v1
+        with:
+          copyback: false
+          run: |
+            python -V
+            python -m venv venv
+            source venv/bin/activate
+            pip install . pytest
+            pytest --durations=0 tests/${{ matrix.test_script }}.py
+
+  wsl:
+    needs:
+      - list-test-files
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: Vampire/setup-wsl@v6
+        with:
+          distribution: Ubuntu-24.04
+          additional-packages:
+            python3-pip
+            python3-venv
+
+      - name: test os
+        shell: wsl-bash -u root {0}
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install . pytest
+          pytest --durations=0 tests/${{ matrix.test_script }}.py
