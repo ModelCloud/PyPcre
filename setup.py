@@ -51,13 +51,13 @@ LIB_EXTENSIONS = [
     ".sl",
 ]
 
-LIBRARY_BASENAME = "libpcre2-16"
+LIBRARY_BASENAME = "libpcre2-8"
 
 
 def _run_pkg_config(*args: str) -> list[str]:
     try:
         result = subprocess.run(
-            ["pkg-config", *args, "libpcre2-16"],
+            ["pkg-config", *args, "libpcre2-8"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -71,7 +71,7 @@ def _run_pkg_config(*args: str) -> list[str]:
 def _run_pkg_config_var(argument: str) -> str | None:
     try:
         result = subprocess.run(
-            ["pkg-config", argument, "libpcre2-16"],
+            ["pkg-config", argument, "libpcre2-8"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -192,12 +192,12 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     def _has_built_library() -> bool:
         patterns = [
-            "libpcre2-16.so",
-            "libpcre2-16.so.*",
-            "libpcre2-16.a",
-            "libpcre2-16.dylib",
-            "libpcre2-16.lib",
-            "pcre2-16.dll",
+            "libpcre2-8.so",
+            "libpcre2-8.so.*",
+            "libpcre2-8.a",
+            "libpcre2-8.dylib",
+            "libpcre2-8.lib",
+            "pcre2-8.dll",
         ]
         for root in build_roots:
             if not root.exists():
@@ -253,7 +253,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     configure_command = [
                         str(autoconf_script),
                         "--enable-jit",
-                        "--enable-pcre2-16",
+                        "--enable-pcre2-8",
                         "--disable-tests",
                     ]
                     subprocess.run(configure_command, cwd=build_dir, env=env, check=True)
@@ -336,10 +336,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         f"**/{LIBRARY_BASENAME}.so",
         f"**/{LIBRARY_BASENAME}.so.*",
         f"**/{LIBRARY_BASENAME}.dylib",
-        "**/pcre2-16.lib",
-        "**/pcre2-16.dll",
-        "**/pcre2-16-static.lib",
-        "**/pcre2-16-static.dll",
+        "**/pcre2-8.lib",
+        "**/pcre2-8.dll",
+        "**/pcre2-8-static.lib",
+        "**/pcre2-8-static.dll",
     ]
 
     for root in search_roots:
@@ -351,7 +351,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     if not library_files:
         raise RuntimeError(
-            "PCRE2 build did not produce any libpcre2-16 artifacts; check the build output for errors"
+            "PCRE2 build did not produce any libpcre2-8 artifacts; check the build output for errors"
         )
 
     return (include_dirs, library_dirs, library_files)
@@ -630,7 +630,7 @@ def _find_library_with_ldconfig() -> list[str]:
     if not output:
         return []
     for line in output.splitlines():
-        if "libpcre2-16.so" not in line:
+        if "libpcre2-8.so" not in line:
             continue
         parts = line.strip().split(" => ")
         if len(parts) != 2:
@@ -807,16 +807,16 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
             linkable_files.append(path)
 
         if linkable_files:
-            libraries = [lib for lib in libraries if lib != "pcre2-16"]
+            libraries = [lib for lib in libraries if lib != "pcre2-8"]
             for path in linkable_files:
                 _extend_unique(extra_link_args, path)
                 parent = str(Path(path).parent)
                 if parent:
                     _extend_unique(library_dirs, parent)
-        elif "pcre2-16" not in libraries:
-            libraries.append("pcre2-16")
-    elif "pcre2-16" not in libraries:
-        libraries.append("pcre2-16")
+        elif "pcre2-8" not in libraries:
+            libraries.append("pcre2-8")
+    elif "pcre2-8" not in libraries:
+        libraries.append("pcre2-8")
 
     if sys.platform.startswith("linux") and "dl" not in libraries:
         libraries.append("dl")
