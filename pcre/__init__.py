@@ -26,7 +26,6 @@ from .pcre import (
     clear_cache,
     compile,
     configure,
-    configure_thread_pool,
     findall,
     finditer,
     fullmatch,
@@ -34,11 +33,12 @@ from .pcre import (
     module_fullmatch,
     parallel_map,
     search,
-    shutdown_thread_pool,
     split,
     sub,
     subn,
 )
+
+from .threads import configure_thread_pool, shutdown_thread_pool
 from .threads import configure_threads
 
 
