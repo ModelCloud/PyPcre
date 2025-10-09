@@ -62,6 +62,17 @@ jobs:
           python-version: 3.12
           cache: 'pip'
 
+      - name: install dependencies
+        run: |
+          echo "OS is ${{ runner.os }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install pcre2
+          elif [ "${{ runner.os }}" = "Linux" ]; then
+            apt update && apt install libpcre2-dev
+          else
+            echo "Unknown OS"
+          fi
+
       - name: install
         run: pip install . pytest
 
@@ -88,7 +99,7 @@ jobs:
         with:
           copyback: false
           prepare: |
-            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip
+            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip pcre2
           run: |
             python -V
             python -m venv venv
@@ -113,6 +124,8 @@ jobs:
       - name: Test in Solaris
         uses: vmactions/solaris-vm@v1
         with:
+          prepare: |
+            pkg install library/pcre2
           copyback: false
           run: |
             python -V
@@ -138,6 +151,7 @@ jobs:
           additional-packages:
             python3-pip
             python3-venv
+            libpcre2-dev
 
       - name: test os
         shell: wsl-bash -u root {0}
