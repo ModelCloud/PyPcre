@@ -44,6 +44,8 @@ LIB_EXTENSIONS = [
     ".sl",
 ]
 
+LIBRARY_BASENAME = "libpcre2-8"
+
 
 def _run_pkg_config(*args: str) -> list[str]:
     try:
@@ -57,6 +59,20 @@ def _run_pkg_config(*args: str) -> list[str]:
     except (FileNotFoundError, subprocess.CalledProcessError):
         return []
     return shlex.split(result.stdout.strip())
+
+
+def _run_pkg_config_var(argument: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["pkg-config", argument, "libpcre2-8"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
 
 
 def _run_command(command: list[str]) -> str | None:
@@ -263,11 +279,68 @@ def _header_exists(directory: Path) -> bool:
 
 
 def _library_exists(directory: Path) -> bool:
-    base = "libpcre2-8"
+    return _locate_library_file(directory) is not None
+
+
+def _locate_library_file(directory: Path) -> Path | None:
+    if not directory.exists():
+        return None
     for extension in LIB_EXTENSIONS:
-        if (directory / f"{base}{extension}").exists():
-            return True
-    return False
+        candidate = directory / f"{LIBRARY_BASENAME}{extension}"
+        if candidate.exists():
+            return candidate
+    for candidate in directory.glob(f"{LIBRARY_BASENAME}.so.*"):
+        if candidate.exists():
+            return candidate
+    fallback = directory / f"{LIBRARY_BASENAME}.dll"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def _find_library_with_pkg_config() -> list[str]:
+    library_files: list[str] = []
+    libfile = _run_pkg_config_var("--variable=libfile")
+    if libfile:
+        path = Path(libfile)
+        if path.exists():
+            library_files.append(str(path))
+    if not library_files:
+        libdir = _run_pkg_config_var("--variable=libdir")
+        if libdir:
+            candidate = _locate_library_file(Path(libdir))
+            if candidate is not None:
+                library_files.append(str(candidate))
+    return library_files
+
+
+def _find_library_with_ldconfig() -> list[str]:
+    if not sys.platform.startswith("linux"):
+        return []
+    output = _run_command(["ldconfig", "-p"])
+    if not output:
+        return []
+    for line in output.splitlines():
+        if "libpcre2-8.so" not in line:
+            continue
+        parts = line.strip().split(" => ")
+        if len(parts) != 2:
+            continue
+        path = Path(parts[1].strip())
+        if path.exists():
+            return [str(path)]
+    return []
+
+
+def _find_library_with_brew() -> list[str]:
+    if sys.platform != "darwin":
+        return []
+    library_files: list[str] = []
+    for prefix in _homebrew_prefixes():
+        candidate = _locate_library_file(prefix / "lib")
+        if candidate is not None:
+            library_files.append(str(candidate))
+    return library_files
 
 
 def _discover_include_dirs() -> list[str]:
@@ -318,6 +391,7 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
     extra_compile_args: list[str] = []
     extra_link_args: list[str] = []
     define_macros: list[tuple[str, str | None]] = []
+    library_files: list[str] = []
 
     cflags = _run_pkg_config("--cflags")
     libs = _run_pkg_config("--libs")
@@ -357,7 +431,7 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
                 continue
             path = Path(candidate)
             if path.is_file() or any(candidate.endswith(ext) for ext in LIB_EXTENSIONS):
-                _extend_unique(extra_link_args, str(path))
+                _extend_unique(library_files, str(path))
                 parent = str(path.parent)
                 if parent:
                     _extend_unique(library_dirs, parent)
@@ -368,6 +442,27 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
     if env_libs:
         for name in env_libs.split(os.pathsep):
             _extend_unique(libraries, name)
+
+    if not library_files:
+        for path in _find_library_with_pkg_config():
+            _extend_unique(library_files, path)
+
+    if not library_files:
+        directory_candidates = [Path(p) for p in library_dirs]
+        directory_candidates.extend(Path(p) for p in _discover_library_dirs())
+        for directory in directory_candidates:
+            located = _locate_library_file(directory)
+            if located is not None:
+                _extend_unique(library_files, str(located))
+                break
+
+    if not library_files:
+        for path in _find_library_with_ldconfig():
+            _extend_unique(library_files, path)
+
+    if not library_files:
+        for path in _find_library_with_brew():
+            _extend_unique(library_files, path)
 
     env_cflags = os.environ.get("PCRE2_CFLAGS")
     if env_cflags:
@@ -386,7 +481,14 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
     if not _has_library(library_dirs):
         library_dirs.extend(_discover_library_dirs())
 
-    if "pcre2-8" not in libraries:
+    if library_files:
+        libraries = [lib for lib in libraries if lib != "pcre2-8"]
+        for path in library_files:
+            _extend_unique(extra_link_args, path)
+            parent = str(Path(path).parent)
+            if parent:
+                _extend_unique(library_dirs, parent)
+    elif "pcre2-8" not in libraries:
         libraries.append("pcre2-8")
 
     if sys.platform.startswith("linux") and "dl" not in libraries:
