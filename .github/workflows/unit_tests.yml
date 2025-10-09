@@ -120,6 +120,20 @@ jobs:
             pkg install developer/gcc developer/build/gnu-make developer/build/pkg-config
           copyback: false
           run: |
+            echo "======== find libpcre =========="
+         
+            find /usr -name "libpcre2-8.so*" -exec file {} \;
+
+            echo "======================"
+
+            ls -l /usr/lib/64/libpcre2-8.so
+            
+            echo "======================"
+       
+            ls -l /usr/lib/amd64/libpcre2-8.so
+         
+            echo "======================"
+         
             python -V
             python -m venv venv
             source venv/bin/activate
