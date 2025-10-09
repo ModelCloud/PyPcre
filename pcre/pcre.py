@@ -16,6 +16,7 @@ from . import cpcre2 as _pcre2
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
 from .flags import (
+    COMPAT_REGEX,
     JIT,
     NO_JIT,
     NO_THREADS,
@@ -55,6 +56,7 @@ PcreError = _pcre2.PcreError
 FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 
 _DEFAULT_JIT = True
+_DEFAULT_COMPAT_REGEX = False
 
 
 _THREAD_MODE_DISABLED = "disabled"
@@ -94,6 +96,81 @@ _STD_RE_FLAG_MAP: dict[_std_re.RegexFlag, int] = {
 _STD_RE_FLAG_MASK = 0
 for _flag in _STD_RE_FLAG_MAP:
     _STD_RE_FLAG_MASK |= int(_flag)
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_hex_string(value: str) -> bool:
+    return bool(value) and all(char in _HEX_DIGITS for char in value)
+
+
+def _convert_regex_compat(pattern: str) -> str:
+    length = len(pattern)
+    if length < 2:
+        return pattern
+
+    pieces: list[str] = []
+    index = 0
+    modified = False
+
+    while index < length:
+        char = pattern[index]
+        if char == "\\" and index + 1 < length:
+            marker = pattern[index + 1]
+
+            if marker == "u":
+                brace_pos = index + 2
+                if brace_pos < length and pattern[brace_pos] == "{":
+                    cursor = brace_pos + 1
+                    while cursor < length and pattern[cursor] != "}":
+                        cursor += 1
+                    if cursor < length:
+                        payload = pattern[brace_pos + 1 : cursor]
+                        if _is_hex_string(payload):
+                            pieces.append("\\x{")
+                            pieces.append(payload)
+                            pieces.append("}")
+                            index = cursor + 1
+                            modified = True
+                            continue
+                else:
+                    payload = pattern[index + 2 : index + 6]
+                    if len(payload) == 4 and _is_hex_string(payload):
+                        pieces.append("\\x{")
+                        pieces.append(payload)
+                        pieces.append("}")
+                        index += 6
+                        modified = True
+                        continue
+
+            if marker == "U":
+                payload = pattern[index + 2 : index + 10]
+                if len(payload) == 8 and _is_hex_string(payload):
+                    pieces.append("\\x{")
+                    pieces.append(payload.lstrip("0") or "0")
+                    pieces.append("}")
+                    index += 10
+                    modified = True
+                    continue
+
+            pieces.append(char)
+            pieces.append(marker)
+            index += 2
+            continue
+
+        pieces.append(char)
+        index += 1
+
+    if not modified:
+        return pattern
+    return "".join(pieces)
+
+
+def _apply_regex_compat(pattern: Any, enabled: bool) -> Any:
+    if not enabled or not isinstance(pattern, str):
+        return pattern
+    return _convert_regex_compat(pattern)
 
 
 def _apply_default_unicode_flags(pattern: Any, flags: int) -> int:
@@ -459,12 +536,14 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     resolved_flags = _normalise_flags(flags)
     threads_requested = bool(resolved_flags & THREADS)
     no_threads_requested = bool(resolved_flags & NO_THREADS)
+    compat_requested = bool(resolved_flags & COMPAT_REGEX)
     if threads_requested and no_threads_requested:
         raise ValueError("Flag.THREADS and Flag.NO_THREADS cannot be combined")
 
-    resolved_flags_no_thread_markers = resolved_flags & ~(THREADS | NO_THREADS)
+    resolved_flags_no_thread_markers = resolved_flags & ~(THREADS | NO_THREADS | COMPAT_REGEX)
     jit_override = _extract_jit_override(resolved_flags_no_thread_markers)
     resolved_jit = _resolve_jit_setting(jit_override)
+    compat_enabled = bool(_DEFAULT_COMPAT_REGEX or compat_requested)
 
     if threads_requested:
         thread_mode = _THREAD_MODE_ENABLED
@@ -476,6 +555,10 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     if isinstance(pattern, Pattern):
         if resolved_flags_no_thread_markers:
             raise ValueError("Cannot supply flags when using a Pattern instance.")
+        if compat_requested:
+            raise ValueError(
+                "Cannot supply Flag.COMPAT_REGEX when using a Pattern instance."
+            )
         if threads_requested:
             pattern.enable_threads()
         elif no_threads_requested:
@@ -489,6 +572,10 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             raise ValueError("Cannot supply flags when using a compiled pattern instance.")
         if jit_override is not None:
             raise ValueError("Cannot supply jit when using a compiled pattern instance.")
+        if compat_requested:
+            raise ValueError(
+                "Cannot supply Flag.COMPAT_REGEX when using a compiled pattern instance."
+            )
         wrapper = Pattern(pattern)
         if threads_requested:
             wrapper.enable_threads()
@@ -501,10 +588,13 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
                 wrapper.disable_threads()
         return wrapper
 
-    effective_flags = _apply_default_unicode_flags(pattern, resolved_flags_no_thread_markers)
+    adjusted_pattern = _apply_regex_compat(pattern, compat_enabled)
+    effective_flags = _apply_default_unicode_flags(
+        adjusted_pattern, resolved_flags_no_thread_markers
+    )
     native_flags = strip_py_only_flags(effective_flags)
 
-    compiled = cached_compile(pattern, native_flags, Pattern, jit=resolved_jit)
+    compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=resolved_jit)
     if threads_requested:
         compiled.enable_threads()
     elif no_threads_requested:
@@ -643,13 +733,17 @@ def parallel_map(
     return [future.result() for future in futures]
 
 
-def configure(*, jit: bool | None = None) -> bool:
+def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> bool:
     """Adjust global defaults for the high-level wrapper.
 
-    Returns the effective default JIT setting after applying any updates.
+    Returns the effective default JIT setting after applying any updates. Supply
+    ``compat_regex`` to change the default behaviour for :data:`Flag.COMPAT_REGEX`.
     """
 
-    global _DEFAULT_JIT
+    global _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX
+
+    if compat_regex is not None:
+        _DEFAULT_COMPAT_REGEX = bool(compat_regex)
 
     if jit is None:
         try:

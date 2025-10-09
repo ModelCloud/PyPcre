@@ -16,7 +16,18 @@
 #if !defined(PCRE2_CODE_UNIT_WIDTH)
 #define PCRE2_CODE_UNIT_WIDTH 8
 #endif
-#include "pcre2.h"
+#if defined(__has_include)
+// Prefer the system-provided header when available for maximum accuracy.
+#   if __has_include(<pcre2.h>)
+#       include <pcre2.h>
+#   elif __has_include("pcre2.h")
+#       include "pcre2.h"
+#   else
+#       error "Missing required pcre2.h header"
+#   endif
+#else
+#   include "pcre2.h"
+#endif
 
 typedef struct {
     PyObject_HEAD

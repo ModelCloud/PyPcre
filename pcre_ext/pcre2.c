@@ -769,6 +769,9 @@ FindIter_iternext(FindIterObject *self)
     uint32_t options = self->base_options;
     int rc = 0;
     PCRE2_SIZE exec_length = (PCRE2_SIZE)self->subject_length_bytes;
+    uint32_t available_pairs = 0;
+    PCRE2_SIZE *ovector = NULL;
+    uint64_t expected_pairs = 0;
 
     if (self->has_endpos && self->resolved_end_byte < self->subject_length_bytes && !offset_limit_option_enabled()) {
         exec_length = (PCRE2_SIZE)self->resolved_end_byte;
@@ -843,14 +846,14 @@ FindIter_iternext(FindIterObject *self)
     }
 
 matched:
-    uint32_t available_pairs = pcre2_get_ovector_count(self->match_data);
-    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(self->match_data);
+    available_pairs = pcre2_get_ovector_count(self->match_data);
+    ovector = pcre2_get_ovector_pointer(self->match_data);
     if (ovector == NULL || available_pairs == 0) {
         PyErr_SetString(PyExc_RuntimeError, "PCRE2 returned empty match data");
         return NULL;
     }
 
-    uint64_t expected_pairs = (uint64_t)self->pattern->capture_count + 1;
+    expected_pairs = (uint64_t)self->pattern->capture_count + 1;
     if (expected_pairs == 0 || expected_pairs > available_pairs) {
         expected_pairs = available_pairs;
     }
