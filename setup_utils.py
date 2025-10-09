@@ -51,6 +51,18 @@ RUNTIME_LIBRARY_FILES: list[str] = []
 
 __all__ = ["MODULE_SOURCES", "collect_build_config", "RUNTIME_LIBRARY_FILES"]
 
+LIBRARY_SEARCH_PATTERNS = [
+    f"**/{LIBRARY_BASENAME}.lib",
+    f"**/{LIBRARY_BASENAME}.a",
+    f"**/{LIBRARY_BASENAME}.so",
+    f"**/{LIBRARY_BASENAME}.so.*",
+    f"**/{LIBRARY_BASENAME}.dylib",
+    "**/pcre2-8.lib",
+    "**/pcre2-8.dll",
+    "**/pcre2-8-static.lib",
+    "**/pcre2-8-static.dll",
+]
+
 
 def _run_pkg_config(*args: str) -> list[str]:
     try:
@@ -123,6 +135,56 @@ def _is_wsl_environment() -> bool:
     return "microsoft" in release.lower()
 
 
+def _clean_previous_build(destination: Path, build_dir: Path, build_roots: list[Path]) -> None:
+    if not destination.exists():
+        return
+
+    env = os.environ.copy()
+    cleaned = False
+
+    if build_dir.exists():
+        cmake_cache = build_dir / "CMakeCache.txt"
+        cmake_executable = shutil.which("cmake")
+        if cmake_cache.exists() and cmake_executable:
+            cmake_command = ["cmake", "--build", str(build_dir), "--target", "clean"]
+            if _is_windows_platform():
+                cmake_command.extend(["--config", "Release"])
+            try:
+                subprocess.run(cmake_command, cwd=destination, env=env, check=True)
+            except subprocess.CalledProcessError:
+                pass
+            else:
+                cleaned = True
+
+        makefile_exists = any((build_dir / name).exists() for name in ("Makefile", "makefile"))
+        if makefile_exists and shutil.which("make"):
+            for target in ("clean", "distclean"):
+                try:
+                    subprocess.run(["make", target], cwd=build_dir, env=env, check=True)
+                except subprocess.CalledProcessError:
+                    continue
+                else:
+                    cleaned = True
+                    break
+
+    if not cleaned:
+        for candidate in (build_dir, destination / ".libs", destination / "src" / ".libs"):
+            if candidate.is_dir():
+                shutil.rmtree(candidate, ignore_errors=True)
+
+    for root in build_roots:
+        if not root.exists():
+            continue
+        for pattern in LIBRARY_SEARCH_PATTERNS:
+            for path in root.glob(pattern):
+                try:
+                    path.unlink()
+                except IsADirectoryError:
+                    shutil.rmtree(path, ignore_errors=True)
+                except FileNotFoundError:
+                    continue
+
+
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if _is_windows_platform() and not _is_wsl_environment():
         os.environ["PCRE2_BUILD_FROM_SOURCE"] = "1"
@@ -132,6 +194,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     destination = PCRE_EXT_DIR / PCRE2_TAG
     git_dir = destination / ".git"
+    repo_already_present = destination.exists()
 
     if destination.exists() and not git_dir.is_dir():
         raise RuntimeError(
@@ -188,6 +251,9 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         build_dir / "MinSizeRel",
     ]
 
+    if repo_already_present:
+        _clean_previous_build(destination, build_dir, build_roots)
+
     def _has_built_library() -> bool:
         patterns = [
             "libpcre2-8.so",
@@ -234,9 +300,9 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     str(build_dir),
                 ]
                 if _is_windows_platform():
-                    build_command.extend(["--config", "Release", "--parallel", "4"])
+                    build_command.extend(["--config", "Release", "--parallel", "8"])
                 else:
-                    build_command.extend(["--", "-j4"])
+                    build_command.extend(["--", "-j8"])
                 subprocess.run(build_command, cwd=destination, env=env, check=True)
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
                 cmake_error = exc
@@ -332,22 +398,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         build_dir / "RelWithDebInfo",
         build_dir / "MinSizeRel",
     ]
-    search_patterns = [
-        f"**/{LIBRARY_BASENAME}.lib",
-        f"**/{LIBRARY_BASENAME}.a",
-        f"**/{LIBRARY_BASENAME}.so",
-        f"**/{LIBRARY_BASENAME}.so.*",
-        f"**/{LIBRARY_BASENAME}.dylib",
-        "**/pcre2-8.lib",
-        "**/pcre2-8.dll",
-        "**/pcre2-8-static.lib",
-        "**/pcre2-8-static.dll",
-    ]
-
     for root in search_roots:
         if not root.exists():
             continue
-        for pattern in search_patterns:
+        for pattern in LIBRARY_SEARCH_PATTERNS:
             for path in root.glob(pattern):
                 _add_library_file(path)
 
