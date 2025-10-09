@@ -57,6 +57,25 @@ exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 - `pcre.escape()` delegates directly to `re.escape` for byte and text
   patterns so escaping semantics remain identical.
 
+### `regex` package compatibility
+
+The [`regex`](https://pypi.org/project/regex/) package interprets both
+`\uXXXX`/`\u{...}` and `\UXXXXXXXX` escapes as UTF-8 code points, while
+PCRE2 expects hexadecimal escapes to use the `\x{...}` form. Enable
+`Flag.COMPAT_REGEX` to translate those escapes automatically when compiling
+patterns:
+
+```python
+from pcre import compile, Flag
+
+pattern = compile(r"\\u{1F600}", flags=Flag.COMPAT_REGEX)
+assert pattern.pattern == r"\\x{1F600}"
+```
+
+Set the default behaviour globally with `pcre.configure(compat_regex=True)`
+so that subsequent calls to `compile()` and the module-level helpers apply
+the conversion without repeating the flag.
+
 ### Automatic pattern caching
 
 `pcre.compile()` caches the final `Pattern` wrapper for up to 2048

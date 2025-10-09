@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,12 @@ except ImportError:  # pragma: no cover - fallback for older Python environments
     from distutils.ccompiler import CCompiler, new_compiler  # type: ignore
     from distutils.errors import CCompilerError, DistutilsExecError  # type: ignore
     from distutils.sysconfig import customize_compiler  # type: ignore
+
+
+ROOT_DIR = Path(__file__).resolve().parent
+PCRE_EXT_DIR = ROOT_DIR / "pcre_ext"
+PCRE2_REPO_URL = "https://github.com/PCRE2Project/pcre2.git"
+PCRE2_TAG = "pcre2-10.46"
 
 
 MODULE_SOURCES = [
@@ -100,6 +107,69 @@ def _is_truthy_env(name: str) -> bool:
     if value is None:
         return False
     return value.strip().lower() in _TRUTHY_VALUES
+
+
+def _is_windows_platform() -> bool:
+    return sys.platform.startswith("win") or os.name == "nt"
+
+
+def _is_wsl_environment() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        release = platform.release()
+    except Exception:
+        return False
+    return "microsoft" in release.lower()
+
+
+def _prepare_windows_pcre2_sources() -> Path | None:
+    if not _is_windows_platform() or _is_wsl_environment():
+        return None
+    if not _is_truthy_env("PCRE2_BUILD_FROM_SOURCE"):
+        return None
+
+    destination = PCRE_EXT_DIR / PCRE2_TAG
+    git_dir = destination / ".git"
+
+    if destination.exists() and not git_dir.is_dir():
+        raise RuntimeError(
+            f"Existing directory {destination} is not a git checkout; remove or rename it before building"
+        )
+
+    if not destination.exists():
+        command = [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            PCRE2_TAG,
+            PCRE2_REPO_URL,
+            str(destination),
+        ]
+        try:
+            subprocess.run(command, check=True)
+        except FileNotFoundError as exc:  # pragma: no cover - git missing on build host
+            raise RuntimeError("git is required to fetch PCRE2 sources when PCRE2_BUILD_FROM_SOURCE=1") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "Failed to clone PCRE2 source from official repository; see the output above for details"
+            ) from exc
+
+    header_source = destination / "src" / "pcre2.h.generic"
+    header_target = destination / "src" / "pcre2.h"
+    if header_source.exists() and not header_target.exists():
+        shutil.copy2(header_source, header_target)
+
+    include_target = PCRE_EXT_DIR / "pcre2.h"
+    if header_target.exists():
+        shutil.copy2(header_target, include_target)
+
+    include_dir = destination / "src"
+    return include_dir if include_dir.is_dir() else None
 
 
 def _get_test_compiler() -> CCompiler | None:
@@ -446,6 +516,10 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
     extra_link_args: list[str] = []
     define_macros: list[tuple[str, str | None]] = []
     library_files: list[str] = []
+
+    windows_include_dir = _prepare_windows_pcre2_sources()
+    if windows_include_dir is not None:
+        _extend_unique(include_dirs, str(windows_include_dir))
 
     cflags = _run_pkg_config("--cflags")
     libs = _run_pkg_config("--libs")
