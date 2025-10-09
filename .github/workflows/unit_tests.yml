@@ -78,7 +78,7 @@ jobs:
           pip install pytest tabulate
           pip install -v -e .
 
-      - name: test_close.py
+      - name: test ${{ matrix.test_script }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
 
