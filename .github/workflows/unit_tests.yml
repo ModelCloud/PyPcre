@@ -117,7 +117,7 @@ jobs:
         uses: vmactions/solaris-vm@v1
         with:
           prepare: |
-            pkg install library/pcre2 developer/gcc developer/build/gnu-make developer/pkg-config
+            pkg install library/pcre2 developer/gcc developer/build/gnu-make developer/build/pkg-config
           copyback: false
           run: |
             python -V
