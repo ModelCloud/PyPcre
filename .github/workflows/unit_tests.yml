@@ -9,9 +9,9 @@ on:
   repository_dispatch:
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.ref }}-workflow-unit-tests
-  cancel-in-progress: true
+#concurrency:
+#  group: ${{ github.ref }}-workflow-unit-tests
+#  cancel-in-progress: true
 
 jobs:
   list-test-files:
@@ -41,7 +41,7 @@ jobs:
           test_files=$(python3 -c "$script")
           IFS='|' read -r test_files <<< "$test_files"
 
-          echo "test-files=$torch_test_files" >> "$GITHUB_OUTPUT"
+          echo "test-files=$test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
 
@@ -53,7 +53,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -62,10 +62,23 @@ jobs:
           python-version: 3.12
           cache: 'pip'
 
-      - name: install
-        run: pip install . pytest
+      - name: install dependencies
+        run: |
+          echo "OS is ${{ runner.os }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install pcre2
+          elif [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt update && sudo apt install libpcre2-dev
+          else
+            echo "Unknown OS"
+          fi
 
-      - name: test_close.py
+      - name: install
+        run: |
+          pip install pytest tabulate
+          pip install -v -e .
+
+      - name: test ${{ matrix.test_script }}
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
 
 
@@ -76,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -88,12 +101,13 @@ jobs:
         with:
           copyback: false
           prepare: |
-            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip
+            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip pcre2
           run: |
             python -V
             python -m venv venv
             . venv/bin/activate
-            pip install . pytest
+            pip install pytest tabulate
+            pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   solaris:
@@ -103,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -113,12 +127,15 @@ jobs:
       - name: Test in Solaris
         uses: vmactions/solaris-vm@v1
         with:
+          prepare: |
+            pkg install library/pcre2
           copyback: false
           run: |
             python -V
             python -m venv venv
             source venv/bin/activate
-            pip install . pytest
+            pip install pytest tabulate
+            pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   wsl:
@@ -128,7 +145,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -138,11 +155,13 @@ jobs:
           additional-packages:
             python3-pip
             python3-venv
+            libpcre2-dev
 
       - name: test os
         shell: wsl-bash -u root {0}
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install . pytest
+          pip install pytest tabulate
+          pip install -v -e .
           pytest --durations=0 tests/${{ matrix.test_script }}.py
