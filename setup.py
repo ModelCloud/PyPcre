@@ -117,6 +117,56 @@ def _get_test_compiler() -> CCompiler | None:
     return _COMPILER_INSTANCE
 
 
+def _extract_macos_architectures(command: list[str] | tuple[str, ...] | None) -> list[str]:
+    if not isinstance(command, (list, tuple)):
+        return []
+    arches: list[str] = []
+    iterator = iter(command)
+    for token in iterator:
+        if token != "-arch":
+            continue
+        arch = next(iterator, "")
+        if arch:
+            arches.append(arch)
+    return arches
+
+
+def _macos_compiler_architectures(compiler: CCompiler | None) -> set[str]:
+    arches: set[str] = set()
+    if compiler is not None:
+        for attr in ("compiler", "compiler_so", "compiler_cxx", "linker_so"):
+            arches.update(_extract_macos_architectures(getattr(compiler, attr, None)))
+    archflags = os.environ.get("ARCHFLAGS")
+    if archflags:
+        arches.update(_extract_macos_architectures(tuple(shlex.split(archflags))))
+    for env_name in ("CFLAGS", "CPPFLAGS"):
+        value = os.environ.get(env_name)
+        if value:
+            arches.update(_extract_macos_architectures(tuple(shlex.split(value))))
+    return {arch for arch in arches if arch}
+
+
+def _is_x86_architecture(arch: str) -> bool:
+    normalized = arch.lower()
+    return normalized in {"x86_64", "x86_64h", "i386", "i486", "i586", "i686", "amd64"}
+
+
+def _should_disable_native_flags_for_macos(compiler: CCompiler | None) -> bool:
+    if sys.platform != "darwin":
+        return False
+    arches = _macos_compiler_architectures(compiler)
+    if not arches:
+        machine = platform.machine()
+        if machine:
+            arches.add(machine)
+    if not arches:
+        return False
+    if len(arches) > 1:
+        return True
+    arch = next(iter(arches))
+    return not _is_x86_architecture(arch)
+
+
 def _compiler_supports_flag(flag: str) -> bool:
     cached = _COMPILER_FLAG_CACHE.get(flag)
     if cached is not None:
@@ -148,6 +198,10 @@ def _augment_compile_flags(flags: list[str]) -> None:
         return
 
     disable_native = _is_truthy_env("PCRE2_DISABLE_NATIVE_FLAGS")
+    compiler = _get_test_compiler()
+    if not disable_native and _should_disable_native_flags_for_macos(compiler):
+        # Apple universal builds (arm64 + x86_64) and arm64-only builds reject x86 specific flags.
+        disable_native = True
     candidate_flags: list[tuple[str, bool]] = [
         ("-O3", False),
         ("-march=native", True),
