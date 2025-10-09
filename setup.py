@@ -51,13 +51,13 @@ LIB_EXTENSIONS = [
     ".sl",
 ]
 
-LIBRARY_BASENAME = "libpcre2-8"
+LIBRARY_BASENAME = "libpcre2-16"
 
 
 def _run_pkg_config(*args: str) -> list[str]:
     try:
         result = subprocess.run(
-            ["pkg-config", *args, "libpcre2-8"],
+            ["pkg-config", *args, "libpcre2-16"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -71,7 +71,7 @@ def _run_pkg_config(*args: str) -> list[str]:
 def _run_pkg_config_var(argument: str) -> str | None:
     try:
         result = subprocess.run(
-            ["pkg-config", argument, "libpcre2-8"],
+            ["pkg-config", argument, "libpcre2-16"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -192,12 +192,12 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     def _has_built_library() -> bool:
         patterns = [
-            "libpcre2-8.so",
-            "libpcre2-8.so.*",
-            "libpcre2-8.a",
-            "libpcre2-8.dylib",
-            "libpcre2-8.lib",
-            "pcre2-8.dll",
+            "libpcre2-16.so",
+            "libpcre2-16.so.*",
+            "libpcre2-16.a",
+            "libpcre2-16.dylib",
+            "libpcre2-16.lib",
+            "pcre2-16.dll",
         ]
         for root in build_roots:
             if not root.exists():
@@ -209,37 +209,74 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     if not _has_built_library():
         env = os.environ.copy()
-        try:
-            cmake_args = [
-                "cmake",
-                "-S",
-                str(destination),
-                "-B",
-                str(build_dir),
-                "-DPCRE2_SUPPORT_JIT=ON",
-                "-DPCRE2_BUILD_TESTS=OFF",
-                "-DBUILD_SHARED_LIBS=ON",
-            ]
-            if not _is_windows_platform():
-                cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
-            subprocess.run(cmake_args, cwd=destination, env=env, check=True)
+        build_succeeded = False
+        cmake_error: Exception | None = None
 
-            build_command = [
-                "cmake",
-                "--build",
-                str(build_dir),
-            ]
-            if _is_windows_platform():
-                build_command.extend(["--config", "Release"])
-            subprocess.run(build_command, cwd=destination, env=env, check=True)
-        except FileNotFoundError as exc:
+        if shutil.which("cmake"):
+            try:
+                cmake_args = [
+                    "cmake",
+                    "-S",
+                    str(destination),
+                    "-B",
+                    str(build_dir),
+                    "-DPCRE2_SUPPORT_JIT=ON",
+                    "-DPCRE2_BUILD_PCRE2_16=ON",
+                    "-DPCRE2_BUILD_TESTS=OFF",
+                    "-DBUILD_SHARED_LIBS=ON",
+                ]
+                if not _is_windows_platform():
+                    cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
+                subprocess.run(cmake_args, cwd=destination, env=env, check=True)
+
+                build_command = [
+                    "cmake",
+                    "--build",
+                    str(build_dir),
+                ]
+                if _is_windows_platform():
+                    build_command.extend(["--config", "Release"])
+                build_command.extend(["--", "-j4"])
+                subprocess.run(build_command, cwd=destination, env=env, check=True)
+            except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                cmake_error = exc
+            else:
+                build_succeeded = True
+
+        if not build_succeeded:
+            autoconf_script = destination / "configure"
+            autoconf_ready = autoconf_script.exists() and not _is_windows_platform()
+
+            if autoconf_ready:
+                build_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    configure_command = [
+                        str(autoconf_script),
+                        "--enable-jit",
+                        "--enable-pcre2-16",
+                        "--disable-tests",
+                    ]
+                    subprocess.run(configure_command, cwd=build_dir, env=env, check=True)
+                    subprocess.run(["make", "-j4"], cwd=build_dir, env=env, check=True)
+                except FileNotFoundError as exc:
+                    raise RuntimeError(
+                        "Building PCRE2 from source via Autoconf requires the GNU build toolchain (configure/make) to be available on PATH"
+                    ) from exc
+                except subprocess.CalledProcessError as exc:
+                    raise RuntimeError(
+                        "Failed to build PCRE2 from source using Autoconf; see the output above for details"
+                    ) from exc
+                else:
+                    build_succeeded = True
+            elif cmake_error is not None and isinstance(cmake_error, subprocess.CalledProcessError):
+                raise RuntimeError(
+                    "Failed to build PCRE2 from source; see the output above for details"
+                ) from cmake_error
+
+        if not build_succeeded:
             raise RuntimeError(
-                "Building PCRE2 from source requires cmake and compiler toolchain to be available on PATH"
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                "Failed to build PCRE2 from source; see the output above for details"
-            ) from exc
+                "PCRE2 build tooling was not found. Install CMake or Autoconf (configure/make) to build from source."
+            )
 
     header_source = destination / "src" / "pcre2.h.generic"
     header_target = destination / "src" / "pcre2.h"
@@ -299,10 +336,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         f"**/{LIBRARY_BASENAME}.so",
         f"**/{LIBRARY_BASENAME}.so.*",
         f"**/{LIBRARY_BASENAME}.dylib",
-        "**/pcre2-8.lib",
-        "**/pcre2-8.dll",
-        "**/pcre2-8-static.lib",
-        "**/pcre2-8-static.dll",
+        "**/pcre2-16.lib",
+        "**/pcre2-16.dll",
+        "**/pcre2-16-static.lib",
+        "**/pcre2-16-static.dll",
     ]
 
     for root in search_roots:
@@ -314,7 +351,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     if not library_files:
         raise RuntimeError(
-            "PCRE2 build did not produce any libpcre2-8 artifacts; check the build output for errors"
+            "PCRE2 build did not produce any libpcre2-16 artifacts; check the build output for errors"
         )
 
     return (include_dirs, library_dirs, library_files)
@@ -593,7 +630,7 @@ def _find_library_with_ldconfig() -> list[str]:
     if not output:
         return []
     for line in output.splitlines():
-        if "libpcre2-8.so" not in line:
+        if "libpcre2-16.so" not in line:
             continue
         parts = line.strip().split(" => ")
         if len(parts) != 2:
@@ -770,16 +807,16 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
             linkable_files.append(path)
 
         if linkable_files:
-            libraries = [lib for lib in libraries if lib != "pcre2-8"]
+            libraries = [lib for lib in libraries if lib != "pcre2-16"]
             for path in linkable_files:
                 _extend_unique(extra_link_args, path)
                 parent = str(Path(path).parent)
                 if parent:
                     _extend_unique(library_dirs, parent)
-        elif "pcre2-8" not in libraries:
-            libraries.append("pcre2-8")
-    elif "pcre2-8" not in libraries:
-        libraries.append("pcre2-8")
+        elif "pcre2-16" not in libraries:
+            libraries.append("pcre2-16")
+    elif "pcre2-16" not in libraries:
+        libraries.append("pcre2-16")
 
     if sys.platform.startswith("linux") and "dl" not in libraries:
         libraries.append("dl")

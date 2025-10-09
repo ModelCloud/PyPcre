@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 #if !defined(PCRE2_CODE_UNIT_WIDTH)
-#define PCRE2_CODE_UNIT_WIDTH 8
+#define PCRE2_CODE_UNIT_WIDTH 16
 #endif
 #if defined(__has_include)
 // Prefer the system-provided header when available for maximum accuracy.
