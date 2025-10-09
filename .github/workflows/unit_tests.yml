@@ -62,17 +62,6 @@ jobs:
           python-version: 3.12
           cache: 'pip'
 
-      - name: install dependencies
-        run: |
-          echo "OS is ${{ runner.os }}"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            brew install pcre2
-          elif [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt update && sudo apt install libpcre2-dev
-          else
-            echo "Unknown OS"
-          fi
-
       - name: install
         run: |
           pip install pytest tabulate
