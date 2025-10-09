@@ -175,11 +175,19 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             "Failed to update PCRE2 git submodules; see the output above for details"
         ) from exc
 
+    build_dir = destination / "build"
     build_roots = [
         destination,
         destination / ".libs",
         destination / "src",
         destination / "src" / ".libs",
+        build_dir,
+        build_dir / "lib",
+        build_dir / "bin",
+        build_dir / "Release",
+        build_dir / "Debug",
+        build_dir / "RelWithDebInfo",
+        build_dir / "MinSizeRel",
     ]
 
     def _has_built_library() -> bool:
@@ -200,19 +208,33 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         return False
 
     if not _has_built_library():
-        configure_script = destination / "configure"
-        if not configure_script.exists():
-            raise RuntimeError(
-                "PCRE2 configure script not found; ensure the repository is prepared for autotools before building"
-            )
-
         env = os.environ.copy()
         try:
-            subprocess.run(["./configure", "--enable-jit"], cwd=destination, env=env, check=True)
-            subprocess.run(["make", "-j4"], cwd=destination, env=env, check=True)
+            cmake_args = [
+                "cmake",
+                "-S",
+                str(destination),
+                "-B",
+                str(build_dir),
+                "-DPCRE2_SUPPORT_JIT=ON",
+                "-DPCRE2_BUILD_TESTS=OFF",
+                "-DBUILD_SHARED_LIBS=ON",
+            ]
+            if not _is_windows_platform():
+                cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
+            subprocess.run(cmake_args, cwd=destination, env=env, check=True)
+
+            build_command = [
+                "cmake",
+                "--build",
+                str(build_dir),
+            ]
+            if _is_windows_platform():
+                build_command.extend(["--config", "Release"])
+            subprocess.run(build_command, cwd=destination, env=env, check=True)
         except FileNotFoundError as exc:
             raise RuntimeError(
-                "Building PCRE2 from source requires build tools (e.g. make, sh) to be available on PATH"
+                "Building PCRE2 from source requires cmake and compiler toolchain to be available on PATH"
             ) from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
@@ -258,7 +280,19 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     include_dir = destination / "src"
     _add_include(include_dir)
 
-    search_roots = [destination, destination / "src"]
+    search_roots = [
+        destination,
+        destination / "src",
+        destination / ".libs",
+        destination / "src" / ".libs",
+        build_dir,
+        build_dir / "lib",
+        build_dir / "bin",
+        build_dir / "Release",
+        build_dir / "Debug",
+        build_dir / "RelWithDebInfo",
+        build_dir / "MinSizeRel",
+    ]
     search_patterns = [
         f"**/{LIBRARY_BASENAME}.lib",
         f"**/{LIBRARY_BASENAME}.a",
@@ -277,6 +311,11 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         for pattern in search_patterns:
             for path in root.glob(pattern):
                 _add_library_file(path)
+
+    if not library_files:
+        raise RuntimeError(
+            "PCRE2 build did not produce any libpcre2-8 artifacts; check the build output for errors"
+        )
 
     return (include_dirs, library_dirs, library_files)
 
