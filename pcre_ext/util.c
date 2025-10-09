@@ -5,6 +5,24 @@
 
 #include "pcre2_module.h"
 #include <string.h>
+#include <stdint.h>
+
+#if defined(_MSC_VER)
+static inline unsigned int
+popcountll(uint64_t value)
+{
+    value -= (value >> 1) & 0x5555555555555555ULL;
+    value = (value & 0x3333333333333333ULL) + ((value >> 2) & 0x3333333333333333ULL);
+    value = (value + (value >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
+    return (unsigned int)((value * 0x0101010101010101ULL) >> 56);
+}
+#else
+static inline unsigned int
+popcountll(uint64_t value)
+{
+    return (unsigned int)__builtin_popcountll(value);
+}
+#endif
 
 PyObject *
 bytes_from_text(PyObject *obj)
@@ -75,7 +93,7 @@ utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset
         for (Py_ssize_t i = 0; i < fast_chunks; ++i) {
             uint64_t block;
             memcpy(&block, ptr, sizeof(uint64_t));
-            non_ascii += __builtin_popcountll(block & high_bit_mask);
+            non_ascii += popcountll(block & high_bit_mask);
             ptr += chunk;
         }
 
