@@ -38,7 +38,7 @@ match_data_cache_free_all_locked(void)
     while (node != NULL) {
         MatchDataCacheEntry *next = node->next;
         pcre2_match_data_free(node->match_data);
-        PyMem_Free(node);
+        pcre_free(node);
         node = next;
     }
 }
@@ -53,7 +53,7 @@ jit_stack_cache_free_all_locked(void)
     while (node != NULL) {
         JitStackCacheEntry *next = node->next;
         pcre2_jit_stack_free(node->jit_stack);
-        PyMem_Free(node);
+        pcre_free(node);
         node = next;
     }
 }
@@ -143,7 +143,7 @@ match_data_cache_evict_tail_locked(void)
     }
 
     pcre2_match_data_free(node->match_data);
-    PyMem_Free(node);
+    pcre_free(node);
 }
 
 pcre2_match_data *
@@ -170,7 +170,7 @@ match_data_cache_acquire(PatternObject *self)
                     match_data_cache_count--;
                 }
                 cached = entry->match_data;
-                PyMem_Free(entry);
+                pcre_free(entry);
                 break;
             }
             link = &entry->next;
@@ -216,7 +216,7 @@ match_data_cache_release(pcre2_match_data *match_data)
         return;
     }
 
-    MatchDataCacheEntry *entry = PyMem_Malloc(sizeof(*entry));
+    MatchDataCacheEntry *entry = pcre_malloc(sizeof(*entry));
     if (entry == NULL) {
         if (match_data_cache_lock != NULL) {
             PyThread_release_lock(match_data_cache_lock);
@@ -265,7 +265,7 @@ jit_stack_cache_evict_tail_locked(void)
     }
 
     pcre2_jit_stack_free(node->jit_stack);
-    PyMem_Free(node);
+    pcre_free(node);
 }
 
 pcre2_jit_stack *
@@ -286,7 +286,7 @@ jit_stack_cache_acquire(void)
             jit_stack_cache_count--;
         }
         stack = entry->jit_stack;
-        PyMem_Free(entry);
+        pcre_free(entry);
     }
 
     start_size = jit_stack_start_size;
@@ -322,7 +322,7 @@ jit_stack_cache_release(pcre2_jit_stack *jit_stack)
         return;
     }
 
-    JitStackCacheEntry *entry = PyMem_Malloc(sizeof(*entry));
+    JitStackCacheEntry *entry = pcre_malloc(sizeof(*entry));
     if (entry == NULL) {
         if (jit_stack_cache_lock != NULL) {
             PyThread_release_lock(jit_stack_cache_lock);
