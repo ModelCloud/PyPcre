@@ -221,7 +221,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     "-B",
                     str(build_dir),
                     "-DPCRE2_SUPPORT_JIT=ON",
-                    "-DPCRE2_BUILD_PCRE2_16=ON",
+                    "-DPCRE2_BUILD_PCRE2_8=ON",
                     "-DPCRE2_BUILD_TESTS=OFF",
                     "-DBUILD_SHARED_LIBS=ON",
                 ]
