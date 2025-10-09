@@ -53,7 +53,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -76,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -103,7 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -128,7 +128,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
