@@ -15,14 +15,10 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-try:
-    from setuptools._distutils.ccompiler import CCompiler, new_compiler
-    from setuptools._distutils.errors import CCompilerError, DistutilsExecError
-    from setuptools._distutils.sysconfig import customize_compiler
-except ImportError:  # pragma: no cover - fallback for older Python environments
-    from distutils.ccompiler import CCompiler, new_compiler  # type: ignore
-    from distutils.errors import CCompilerError, DistutilsExecError  # type: ignore
-    from distutils.sysconfig import customize_compiler  # type: ignore
+
+from setuptools._distutils.ccompiler import CCompiler, new_compiler
+from setuptools._distutils.errors import CCompilerError, DistutilsExecError
+from setuptools._distutils.sysconfig import customize_compiler
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -51,7 +47,9 @@ LIB_EXTENSIONS = [
 
 LIBRARY_BASENAME = "libpcre2-8"
 
-__all__ = ["MODULE_SOURCES", "collect_build_config"]
+RUNTIME_LIBRARY_FILES: list[str] = []
+
+__all__ = ["MODULE_SOURCES", "collect_build_config", "RUNTIME_LIBRARY_FILES"]
 
 
 def _run_pkg_config(*args: str) -> list[str]:
@@ -221,9 +219,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     "-B",
                     str(build_dir),
                     "-DPCRE2_SUPPORT_JIT=ON",
-                    "-DPCRE2_BUILD_PCRE2_16=ON",
+                    "-DPCRE2_BUILD_PCRE2_8=ON",
                     "-DPCRE2_BUILD_TESTS=OFF",
-                    "-DBUILD_SHARED_LIBS=ON",
+                    "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
+                    "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
                 ]
                 if not _is_windows_platform():
                     cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
@@ -235,8 +234,9 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     str(build_dir),
                 ]
                 if _is_windows_platform():
-                    build_command.extend(["--config", "Release"])
-                build_command.extend(["--", "-j4"])
+                    build_command.extend(["--config", "Release", "--parallel", "4"])
+                else:
+                    build_command.extend(["--", "-j4"])
                 subprocess.run(build_command, cwd=destination, env=env, check=True)
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
                 cmake_error = exc
@@ -255,6 +255,8 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                         "--enable-jit",
                         "--enable-pcre2-8",
                         "--disable-tests",
+                        "--enable-static",
+                        "--disable-shared",
                     ]
                     subprocess.run(configure_command, cwd=build_dir, env=env, check=True)
                     subprocess.run(["make", "-j4"], cwd=build_dir, env=env, check=True)
@@ -450,6 +452,9 @@ def _compiler_supports_flag(flag: str) -> bool:
 
 def _augment_compile_flags(flags: list[str]) -> None:
     if _is_truthy_env("PCRE2_DISABLE_OPT_FLAGS"):
+        return
+
+    if _is_windows_platform():
         return
 
     disable_native = _is_truthy_env("PCRE2_DISABLE_NATIVE_FLAGS")
@@ -789,7 +794,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if env_ldflags:
         extra_link_args.extend(shlex.split(env_ldflags))
 
-    if not any(flag.startswith("-std=") for flag in extra_compile_args):
+    if not _is_windows_platform() and not any(flag.startswith("-std=") for flag in extra_compile_args):
         extra_compile_args.append("-std=c99")
 
     if not _has_header(include_dirs):
@@ -798,7 +803,15 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if not _has_library(library_dirs):
         library_dirs.extend(_discover_library_dirs())
 
+    global RUNTIME_LIBRARY_FILES
+    runtime_libraries: list[str] = []
+
     if library_files:
+        for runtime_path in library_files:
+            lower_name = runtime_path.lower()
+            if lower_name.endswith(".dll") or lower_name.endswith(".dylib") or ".so" in Path(runtime_path).name:
+                _extend_unique(runtime_libraries, runtime_path)
+
         linkable_files: list[str] = []
         for path in library_files:
             suffix = Path(path).suffix.lower()
@@ -821,7 +834,17 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if sys.platform.startswith("linux") and "dl" not in libraries:
         libraries.append("dl")
 
+    if _is_windows_platform():
+        has_runtime_dll = any(path.lower().endswith(".dll") for path in runtime_libraries)
+        force_static_env = _is_truthy_env("PCRE2_FORCE_STATIC")
+        if (force_static_env or (library_files and not has_runtime_dll)) and not any(
+            macro[0] == "PCRE2_STATIC" for macro in define_macros
+        ):
+            define_macros.append(("PCRE2_STATIC", "1"))
+
     _augment_compile_flags(extra_compile_args)
+
+    RUNTIME_LIBRARY_FILES = runtime_libraries
 
     return {
         "include_dirs": include_dirs,

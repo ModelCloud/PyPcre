@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pcre
+import pcre_ext_c
 import pytest
 
 
-BACKEND = getattr(pcre, "cpcre2", getattr(pcre, "_pcre2", None))
+BACKEND = pcre_ext_c
 
 
 def _error_class_by_macro() -> dict[str, type[pcre.PcreError]]:

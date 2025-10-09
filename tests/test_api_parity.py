@@ -7,11 +7,12 @@ import re
 from enum import IntFlag
 
 import pcre
+import pcre_ext_c
 import pytest
 from pcre import Flag
 
 
-BACKEND = getattr(pcre, "cpcre2", getattr(pcre, "_pcre2", None))
+BACKEND = pcre_ext_c
 
 
 def test_purge_aliases_clear_cache():

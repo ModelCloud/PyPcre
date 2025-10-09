@@ -12,18 +12,18 @@ from typing import Dict
 
 
 try:
-    from pcre import cpcre2
+    import pcre_ext_c
 except ImportError:
     # Allow direct execution without installing the package by injecting the project root.
     project_root = Path(__file__).resolve().parents[1]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
-    module = sys.modules.get("pcre")
+    module = sys.modules.get("pcre_ext_c")
     if module is not None:
         module_file = getattr(module, "__file__", "") or ""
         if not module_file.startswith(str(project_root)):
-            sys.modules.pop("pcre", None)
-    from pcre import cpcre2
+            sys.modules.pop("pcre_ext_c", None)
+    import pcre_ext_c
 
 _SUBJECT_BUILDERS = {
     "ascii": lambda n: "a" * n,
@@ -39,7 +39,7 @@ _DEFAULT_ITERATIONS = max(_MIN_ITERATIONS, _BASE_ITERATIONS * _REQUIRED_MULTIPLI
 
 
 def _run_benchmarks(iterations: int) -> Dict[str, Dict[int, Dict[str, float]]]:
-    pattern = cpcre2.compile(r".")
+    pattern = pcre_ext_c.compile(r".")
     results: Dict[str, Dict[int, Dict[str, float]]] = {}
 
     for label, builder in _SUBJECT_BUILDERS.items():

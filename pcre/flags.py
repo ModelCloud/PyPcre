@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from . import cpcre2 as _pcre2
+import pcre_ext_c as _pcre2
 
 
 def _collect_native_flag_values() -> list[int]:

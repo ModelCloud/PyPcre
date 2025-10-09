@@ -9,6 +9,7 @@ import threading
 from typing import Any, List, Tuple
 
 import pcre
+import pcre_ext_c
 from pcre.cache import _PATTERN_CACHE
 
 
@@ -21,12 +22,12 @@ _PATTERN_SUBJECTS: List[Tuple[Any, Any]] = [
 
 
 def test_clear_cache_threaded_flushes_all_caches() -> None:
-    original_match_cache_size = pcre.cpcre2.get_match_data_cache_size()
-    original_jit_cache_size = pcre.cpcre2.get_jit_stack_cache_size()
-    original_jit_limits = pcre.cpcre2.get_jit_stack_limits()
+    original_match_cache_size = pcre_ext_c.get_match_data_cache_size()
+    original_jit_cache_size = pcre_ext_c.get_jit_stack_cache_size()
+    original_jit_limits = pcre_ext_c.get_jit_stack_limits()
     pcre.clear_cache()
-    pcre.cpcre2.set_match_data_cache_size(16)
-    pcre.cpcre2.set_jit_stack_cache_size(8)
+    pcre_ext_c.set_match_data_cache_size(16)
+    pcre_ext_c.set_jit_stack_cache_size(8)
 
     cases = [(pattern, subject, pcre.findall(pattern, subject)) for pattern, subject in _PATTERN_SUBJECTS]
 
@@ -63,14 +64,14 @@ def test_clear_cache_threaded_flushes_all_caches() -> None:
             raise AssertionError("workers failed during warm-up") from exc
 
         assert len(_PATTERN_CACHE) >= len(cases)
-        assert pcre.cpcre2.get_match_data_cache_count() > 0
-        assert pcre.cpcre2.get_jit_stack_cache_count() > 0
+        assert pcre_ext_c.get_match_data_cache_count() > 0
+        assert pcre_ext_c.get_jit_stack_cache_count() > 0
 
         pcre.clear_cache()
 
         assert len(_PATTERN_CACHE) == 0
-        assert pcre.cpcre2.get_match_data_cache_count() == 0
-        assert pcre.cpcre2.get_jit_stack_cache_count() == 0
+        assert pcre_ext_c.get_match_data_cache_count() == 0
+        assert pcre_ext_c.get_jit_stack_cache_count() == 0
 
         resume_event.set()
 
@@ -80,9 +81,9 @@ def test_clear_cache_threaded_flushes_all_caches() -> None:
         resume_event.set()
         for thread in threads:
             thread.join(timeout=1)
-        pcre.cpcre2.set_match_data_cache_size(original_match_cache_size)
-        pcre.cpcre2.set_jit_stack_cache_size(original_jit_cache_size)
-        pcre.cpcre2.set_jit_stack_limits(*original_jit_limits)
+        pcre_ext_c.set_match_data_cache_size(original_match_cache_size)
+        pcre_ext_c.set_jit_stack_cache_size(original_jit_cache_size)
+        pcre_ext_c.set_jit_stack_limits(*original_jit_limits)
         pcre.clear_cache()
 
     assert not errors
