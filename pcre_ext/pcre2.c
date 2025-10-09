@@ -10,6 +10,26 @@
 #include <immintrin.h>
 #endif
 
+static inline int
+is_hex_digit(unsigned char value)
+{
+    return (value >= '0' && value <= '9') ||
+           (value >= 'a' && value <= 'f') ||
+           (value >= 'A' && value <= 'F');
+}
+
+static inline unsigned int
+hex_value(unsigned char value)
+{
+    if (value >= '0' && value <= '9') {
+        return (unsigned int)(value - '0');
+    }
+    if (value >= 'a' && value <= 'f') {
+        return (unsigned int)(value - 'a' + 10);
+    }
+    return (unsigned int)(value - 'A' + 10);
+}
+
 #define STRINGIFY_DETAIL(value) #value
 #define STRINGIFY(value) STRINGIFY_DETAIL(value)
 
@@ -1896,6 +1916,96 @@ static PyObject *module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *
 static PyObject *module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static void initialize_pcre2_version(void);
 
+static PyObject *
+module_translate_unicode_escapes(PyObject *Py_UNUSED(module), PyObject *arg)
+{
+    if (!PyUnicode_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "pattern must be str");
+        return NULL;
+    }
+
+    Py_ssize_t byte_length = 0;
+    const char *src = PyUnicode_AsUTF8AndSize(arg, &byte_length);
+    if (src == NULL) {
+        return NULL;
+    }
+
+    if (byte_length < 2) {
+        return Py_NewRef(arg);
+    }
+
+    if (byte_length > (PY_SSIZE_T_MAX - 1) / 2) {
+        PyErr_SetString(PyExc_OverflowError, "pattern too large to translate");
+        return NULL;
+    }
+
+    Py_ssize_t capacity = (byte_length * 2) + 1;
+    char *buffer = PyMem_Malloc((size_t)capacity);
+    if (buffer == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    const char *p = src;
+    const char *end = src + byte_length;
+    char *out = buffer;
+    int modified = 0;
+
+    while (p < end) {
+        if (p + 1 < end && p[0] == '\\' && (p[1] == 'u' || p[1] == 'U')) {
+            int is_upper = (p[1] == 'U');
+            int hex_len = is_upper ? 8 : 4;
+            if (p + 2 + hex_len <= end) {
+                unsigned int codepoint = 0;
+                int valid = 1;
+                for (int offset = 0; offset < hex_len; ++offset) {
+                    unsigned char digit = (unsigned char)p[2 + offset];
+                    if (!is_hex_digit(digit)) {
+                        valid = 0;
+                        break;
+                    }
+                    codepoint = (codepoint << 4) | hex_value(digit);
+                }
+                if (valid) {
+                    if (codepoint > 0x10FFFFu) {
+                        PyMem_Free(buffer);
+                        PyErr_Format(
+                            PcreError,
+                            "Unicode escape \\%c%.*s exceeds 0x10FFFF",
+                            p[1],
+                            hex_len,
+                            p + 2
+                        );
+                        return NULL;
+                    }
+
+                    *out++ = '\\';
+                    *out++ = 'x';
+                    *out++ = '{';
+                    memcpy(out, p + 2, (size_t)hex_len);
+                    out += hex_len;
+                    *out++ = '}';
+                    p += 2 + hex_len;
+                    modified = 1;
+                    continue;
+                }
+            }
+        }
+
+        *out++ = *p++;
+    }
+
+    if (!modified) {
+        PyMem_Free(buffer);
+        return Py_NewRef(arg);
+    }
+
+    Py_ssize_t result_length = out - buffer;
+    PyObject *result = PyUnicode_DecodeUTF8(buffer, result_length, "strict");
+    PyMem_Free(buffer);
+    return result;
+}
+
 static PyMethodDef module_methods[] = {
     {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object." )},
     {"match", (PyCFunction)module_match, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the beginning of a string." )},
@@ -1915,6 +2025,7 @@ static PyMethodDef module_methods[] = {
     {"get_library_version", (PyCFunction)module_get_pcre2_version, METH_NOARGS, PyDoc_STR("Return the PCRE2 library version string." )},
     {"get_allocator", (PyCFunction)module_memory_allocator, METH_NOARGS, PyDoc_STR("Return the name of the active heap allocator (tcmalloc/jemalloc/malloc)." )},
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
+    {"translate_unicode_escapes", (PyCFunction)module_translate_unicode_escapes, METH_O, PyDoc_STR("Translate literal \\uXXXX/\\UXXXXXXXX escapes to PCRE2-compatible \\x{...} sequences." )},
     {NULL, NULL, 0, NULL},
 };
 

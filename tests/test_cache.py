@@ -11,6 +11,7 @@ from typing import Any, List, Tuple
 import pcre
 from pcre.cache import _PATTERN_CACHE
 
+
 _PATTERN_SUBJECTS: List[Tuple[Any, Any]] = [
     (r"(foo)(bar)", "foobar foo foobar"),
     (r"(?P<word>\\w+)", "Hello world from Python"),

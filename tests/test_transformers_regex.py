@@ -1,8 +1,10 @@
+import json
 import os
 import unittest
-import regex
-import json
+
 import pcre
+import regex
+
 
 class TestTransformersRegex(unittest.TestCase):
 
