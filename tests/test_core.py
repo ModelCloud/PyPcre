@@ -3,6 +3,7 @@ from collections import OrderedDict
 
 import pytest
 from pcre import cache as cache_mod
+from pcre import Flag
 from pcre import pcre as core
 from pcre.flags import strip_py_only_flags
 
@@ -168,6 +169,87 @@ def test_compile_accepts_iterable_flags(monkeypatch):
     assert captured["flags"] == expected_flags
     assert isinstance(result, core.Pattern)
     assert result.flags == expected_flags
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("\\u0041", "\\x{0041}"),
+        ("\\u{1F600}", "\\x{1F600}"),
+        ("\\U0001F600", "\\x{1F600}"),
+    ],
+)
+def test_compile_converts_regex_compat_sequences(pattern, expected, monkeypatch):
+    captured = {}
+
+    def fake_cached(pattern_value, flags, wrapper, *, jit):
+        captured["pattern"] = pattern_value
+        fake_cpattern = types.SimpleNamespace(
+            pattern=pattern_value,
+            groupindex={},
+            flags=flags,
+            match=MethodRecorder("match"),
+            search=MethodRecorder("search"),
+            fullmatch=MethodRecorder("fullmatch"),
+            jit=jit,
+        )
+        return wrapper(fake_cpattern)
+
+    monkeypatch.setattr(core, "cached_compile", fake_cached)
+
+    compiled = core.compile(pattern, flags=Flag.COMPAT_REGEX)
+
+    assert captured["pattern"] == expected
+    assert compiled.pattern == expected
+
+
+def test_compile_uses_global_regex_compat(monkeypatch):
+    captured = {}
+
+    def fake_cached(pattern_value, flags, wrapper, *, jit):
+        captured["pattern"] = pattern_value
+        fake_cpattern = types.SimpleNamespace(
+            pattern=pattern_value,
+            groupindex={},
+            flags=flags,
+            match=MethodRecorder("match"),
+            search=MethodRecorder("search"),
+            fullmatch=MethodRecorder("fullmatch"),
+            jit=jit,
+        )
+        return wrapper(fake_cpattern)
+
+    monkeypatch.setattr(core, "cached_compile", fake_cached)
+    monkeypatch.setattr(core, "_DEFAULT_COMPAT_REGEX", True)
+
+    compiled = core.compile("\\u0041")
+
+    assert captured["pattern"] == "\\x{0041}"
+    assert compiled.pattern == "\\x{0041}"
+
+
+def test_configure_updates_regex_compat_default(monkeypatch):
+    calls = []
+
+    def fake_backend_configure(**kwargs):
+        calls.append(kwargs)
+        return kwargs.get("jit", True)
+
+    backend = types.SimpleNamespace(configure=fake_backend_configure)
+
+    monkeypatch.setattr(core, "_pcre2", backend)
+    monkeypatch.setattr(core, "_DEFAULT_JIT", False)
+    monkeypatch.setattr(core, "_DEFAULT_COMPAT_REGEX", False)
+
+    result = core.configure(compat_regex=True)
+    assert result is True
+    assert core._DEFAULT_COMPAT_REGEX is True
+
+    result = core.configure(compat_regex=False)
+    assert result is True
+    assert core._DEFAULT_COMPAT_REGEX is False
+
+    assert calls == [{}, {}]
 
 
 def test_compile_rejects_non_int_iterable_flags():
