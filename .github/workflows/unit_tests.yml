@@ -72,6 +72,7 @@ jobs:
 
 
   freebsd:
+    if: false  # Skip FreeBSD tests (unsupported currently)
     needs:
       - list-test-files
     runs-on: ubuntu-latest
@@ -100,6 +101,7 @@ jobs:
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   solaris:
+    if: false  # Skip solaris tests (unsupported currently)
     needs:
       - list-test-files
     runs-on: ubuntu-latest
