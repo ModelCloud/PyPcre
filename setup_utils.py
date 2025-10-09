@@ -221,7 +221,8 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     "-DPCRE2_SUPPORT_JIT=ON",
                     "-DPCRE2_BUILD_PCRE2_8=ON",
                     "-DPCRE2_BUILD_TESTS=OFF",
-                    "-DBUILD_SHARED_LIBS=ON",
+                    "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
+                    "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
                 ]
                 if not _is_windows_platform():
                     cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
