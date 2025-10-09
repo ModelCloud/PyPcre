@@ -832,6 +832,14 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if sys.platform.startswith("linux") and "dl" not in libraries:
         libraries.append("dl")
 
+    if _is_windows_platform():
+        has_runtime_dll = any(path.lower().endswith(".dll") for path in runtime_libraries)
+        force_static_env = _is_truthy_env("PCRE2_FORCE_STATIC")
+        if (force_static_env or (library_files and not has_runtime_dll)) and not any(
+            macro[0] == "PCRE2_STATIC" for macro in define_macros
+        ):
+            define_macros.append(("PCRE2_STATIC", "1"))
+
     _augment_compile_flags(extra_compile_args)
 
     RUNTIME_LIBRARY_FILES = runtime_libraries
