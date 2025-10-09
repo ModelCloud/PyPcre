@@ -1,3 +1,4 @@
+import os
 import unittest
 import regex
 import json
@@ -7,7 +8,10 @@ class TestTransformersRegex(unittest.TestCase):
     def test_transformers_regex(self):
         json_list = []
 
-        with open("transformers_regex_usages.jsonl", "r", encoding="utf-8") as f:
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        jsonl_path = os.path.join(BASE_DIR, "transformers_regex_usages.jsonl")
+
+        with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
