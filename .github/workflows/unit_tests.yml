@@ -41,7 +41,7 @@ jobs:
           test_files=$(python3 -c "$script")
           IFS='|' read -r test_files <<< "$test_files"
 
-          echo "test-files=$torch_test_files" >> "$GITHUB_OUTPUT"
+          echo "test-files=$test_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
 
