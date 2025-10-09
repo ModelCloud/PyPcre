@@ -25,7 +25,7 @@ _THREAD_AUTO_THRESHOLD: int = 60_000
 
 def _max_threads() -> int:
     cpu_total = os.cpu_count() or 1
-    return max(1, cpu_total // 2)
+    return max(1, cpu_total // 4)
 
 
 def _determine_worker_count(value: int | None) -> int:
