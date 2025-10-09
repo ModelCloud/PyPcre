@@ -8,9 +8,9 @@ requires = ["setuptools>=70", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pcre"
+name = "PyPcre"
 version = "0.1.0"
-description = "Modern, GIL-friendly Python bindings for PCRE2 with caching of compiled patterns."
+description = "Modern, GIL-friendly, Fast Python bindings for PCRE2 with auto caching and JIT of compiled patterns."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
