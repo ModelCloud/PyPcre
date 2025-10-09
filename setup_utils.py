@@ -235,8 +235,9 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     str(build_dir),
                 ]
                 if _is_windows_platform():
-                    build_command.extend(["--config", "Release"])
-                build_command.extend(["--", "-j4"])
+                    build_command.extend(["--config", "Release", "--parallel", "4"])
+                else:
+                    build_command.extend(["--", "-j4"])
                 subprocess.run(build_command, cwd=destination, env=env, check=True)
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
                 cmake_error = exc
