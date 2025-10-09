@@ -120,19 +120,9 @@ jobs:
             pkg install developer/gcc developer/build/gnu-make developer/build/pkg-config
           copyback: false
           run: |
-            echo "======== find libpcre =========="
-         
-            find /usr -name "libpcre2-8.so*" -exec file {} \;
-
-            echo "======================"
-
-            ls -l /usr/lib/64/libpcre2-8.so
-            
-            echo "======================"
-       
-            ls -l /usr/lib/amd64/libpcre2-8.so
-         
-            echo "======================"
+            export LDFLAGS="-L/usr/lib/amd64 -L/usr/lib/64"
+            export CFLAGS="-m64"
+            export LD_LIBRARY_PATH=/usr/lib/amd64:$LD_LIBRARY_PATH
          
             python -V
             python -m venv venv
