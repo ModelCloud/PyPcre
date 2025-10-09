@@ -74,7 +74,9 @@ jobs:
           fi
 
       - name: install
-        run: pip install . pytest
+        run: |
+          pip install pytest
+          pip install -v -e .
 
       - name: test_close.py
         run: pytest --durations=0 tests/${{ matrix.test_script }}.py
@@ -104,7 +106,8 @@ jobs:
             python -V
             python -m venv venv
             . venv/bin/activate
-            pip install . pytest
+            pip install pytest
+            pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   solaris:
@@ -131,7 +134,8 @@ jobs:
             python -V
             python -m venv venv
             source venv/bin/activate
-            pip install . pytest
+            pip install pytest
+            pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   wsl:
@@ -158,5 +162,6 @@ jobs:
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install . pytest
+          pip install pytest
+          pip install -v -e .
           pytest --durations=0 tests/${{ matrix.test_script }}.py
