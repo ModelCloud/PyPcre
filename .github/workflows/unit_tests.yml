@@ -75,7 +75,7 @@ jobs:
 
       - name: install
         run: |
-          pip install pytest
+          pip install pytest tabulate
           pip install -v -e .
 
       - name: test_close.py
@@ -106,7 +106,7 @@ jobs:
             python -V
             python -m venv venv
             . venv/bin/activate
-            pip install pytest
+            pip install pytest tabulate
             pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
@@ -134,7 +134,7 @@ jobs:
             python -V
             python -m venv venv
             source venv/bin/activate
-            pip install pytest
+            pip install pytest tabulate
             pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
@@ -162,6 +162,6 @@ jobs:
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install pytest
+          pip install pytest tabulate
           pip install -v -e .
           pytest --durations=0 tests/${{ matrix.test_script }}.py
