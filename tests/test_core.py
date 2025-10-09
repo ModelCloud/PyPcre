@@ -175,8 +175,7 @@ def test_compile_accepts_iterable_flags(monkeypatch):
     ("pattern", "expected"),
     [
         ("\\u0041", "\\x{0041}"),
-        ("\\u{1F600}", "\\x{1F600}"),
-        ("\\U0001F600", "\\x{1F600}"),
+        ("\\U0001F600", "\\x{0001F600}"),
     ],
 )
 def test_compile_converts_regex_compat_sequences(pattern, expected, monkeypatch):
@@ -197,10 +196,42 @@ def test_compile_converts_regex_compat_sequences(pattern, expected, monkeypatch)
 
     monkeypatch.setattr(core, "cached_compile", fake_cached)
 
-    compiled = core.compile(pattern, flags=Flag.COMPAT_REGEX)
+    compiled = core.compile(pattern, flags=Flag.COMPAT_UNICODE_ESCAPE)
 
     assert captured["pattern"] == expected
     assert compiled.pattern == expected
+
+
+def test_compile_leaves_brace_style_unicode_escape(monkeypatch):
+    captured = {}
+
+    def fake_cached(pattern_value, flags, wrapper, *, jit):
+        captured["pattern"] = pattern_value
+        fake_cpattern = types.SimpleNamespace(
+            pattern=pattern_value,
+            groupindex={},
+            flags=flags,
+            match=MethodRecorder("match"),
+            search=MethodRecorder("search"),
+            fullmatch=MethodRecorder("fullmatch"),
+            jit=jit,
+        )
+        return wrapper(fake_cpattern)
+
+    monkeypatch.setattr(core, "cached_compile", fake_cached)
+
+    compiled = core.compile("\\u{1F600}", flags=Flag.COMPAT_UNICODE_ESCAPE)
+
+    assert captured["pattern"] == "\\u{1F600}"
+    assert compiled.pattern == "\\u{1F600}"
+
+
+def test_compile_rejects_out_of_range_unicode_escape():
+    with pytest.raises(core.PcreError) as excinfo:
+        core.compile("\\U00110000", flags=Flag.COMPAT_UNICODE_ESCAPE)
+
+    message = str(excinfo.value)
+    assert "exceeds 0x10FFFF" in message
 
 
 def test_compile_uses_global_regex_compat(monkeypatch):

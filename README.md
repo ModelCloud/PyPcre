@@ -59,17 +59,16 @@ exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 
 ### `regex` package compatibility
 
-The [`regex`](https://pypi.org/project/regex/) package interprets both
-`\uXXXX`/`\u{...}` and `\UXXXXXXXX` escapes as UTF-8 code points, while
-PCRE2 expects hexadecimal escapes to use the `\x{...}` form. Enable
-`Flag.COMPAT_REGEX` to translate those escapes automatically when compiling
-patterns:
+The [`regex`](https://pypi.org/project/regex/) package interprets
+`\uXXXX` and `\UXXXXXXXX` escapes as UTF-8 code points, while PCRE2 expects
+hexadecimal escapes to use the `\x{...}` form. Enable `Flag.COMPAT_UNICODE_ESCAPE` to
+translate those escapes automatically when compiling patterns:
 
 ```python
 from pcre import compile, Flag
 
-pattern = compile(r"\\u{1F600}", flags=Flag.COMPAT_REGEX)
-assert pattern.pattern == r"\\x{1F600}"
+pattern = compile(r"\\U0001F600", flags=Flag.COMPAT_UNICODE_ESCAPE)
+assert pattern.pattern == r"\\x{0001F600}"
 ```
 
 Set the default behaviour globally with `pcre.configure(compat_regex=True)`

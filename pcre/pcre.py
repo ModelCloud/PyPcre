@@ -16,7 +16,7 @@ from . import cpcre2 as _pcre2
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
 from .flags import (
-    COMPAT_REGEX,
+    COMPAT_UNICODE_ESCAPE,
     JIT,
     NO_JIT,
     NO_THREADS,
@@ -96,73 +96,8 @@ for _flag in _STD_RE_FLAG_MAP:
     _STD_RE_FLAG_MASK |= int(_flag)
 
 
-_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
-
-
-def _is_hex_string(value: str) -> bool:
-    return bool(value) and all(char in _HEX_DIGITS for char in value)
-
-
 def _convert_regex_compat(pattern: str) -> str:
-    length = len(pattern)
-    if length < 2:
-        return pattern
-
-    pieces: list[str] = []
-    index = 0
-    modified = False
-
-    while index < length:
-        char = pattern[index]
-        if char == "\\" and index + 1 < length:
-            marker = pattern[index + 1]
-
-            if marker == "u":
-                brace_pos = index + 2
-                if brace_pos < length and pattern[brace_pos] == "{":
-                    cursor = brace_pos + 1
-                    while cursor < length and pattern[cursor] != "}":
-                        cursor += 1
-                    if cursor < length:
-                        payload = pattern[brace_pos + 1 : cursor]
-                        if _is_hex_string(payload):
-                            pieces.append("\\x{")
-                            pieces.append(payload)
-                            pieces.append("}")
-                            index = cursor + 1
-                            modified = True
-                            continue
-                else:
-                    payload = pattern[index + 2 : index + 6]
-                    if len(payload) == 4 and _is_hex_string(payload):
-                        pieces.append("\\x{")
-                        pieces.append(payload)
-                        pieces.append("}")
-                        index += 6
-                        modified = True
-                        continue
-
-            if marker == "U":
-                payload = pattern[index + 2 : index + 10]
-                if len(payload) == 8 and _is_hex_string(payload):
-                    pieces.append("\\x{")
-                    pieces.append(payload.lstrip("0") or "0")
-                    pieces.append("}")
-                    index += 10
-                    modified = True
-                    continue
-
-            pieces.append(char)
-            pieces.append(marker)
-            index += 2
-            continue
-
-        pieces.append(char)
-        index += 1
-
-    if not modified:
-        return pattern
-    return "".join(pieces)
+    return _pcre2.translate_unicode_escapes(pattern)
 
 
 def _apply_regex_compat(pattern: Any, enabled: bool) -> Any:
@@ -534,11 +469,11 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     resolved_flags = _normalise_flags(flags)
     threads_requested = bool(resolved_flags & THREADS)
     no_threads_requested = bool(resolved_flags & NO_THREADS)
-    compat_requested = bool(resolved_flags & COMPAT_REGEX)
+    compat_requested = bool(resolved_flags & COMPAT_UNICODE_ESCAPE)
     if threads_requested and no_threads_requested:
         raise ValueError("Flag.THREADS and Flag.NO_THREADS cannot be combined")
 
-    resolved_flags_no_thread_markers = resolved_flags & ~(THREADS | NO_THREADS | COMPAT_REGEX)
+    resolved_flags_no_thread_markers = resolved_flags & ~(THREADS | NO_THREADS | COMPAT_UNICODE_ESCAPE)
     jit_override = _extract_jit_override(resolved_flags_no_thread_markers)
     resolved_jit = _resolve_jit_setting(jit_override)
     compat_enabled = bool(_DEFAULT_COMPAT_REGEX or compat_requested)
@@ -555,7 +490,7 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             raise ValueError("Cannot supply flags when using a Pattern instance.")
         if compat_requested:
             raise ValueError(
-                "Cannot supply Flag.COMPAT_REGEX when using a Pattern instance."
+                "Cannot supply Flag.COMPAT_UNICODE_ESCAPE when using a Pattern instance."
             )
         if threads_requested:
             pattern.enable_threads()
@@ -572,7 +507,7 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             raise ValueError("Cannot supply jit when using a compiled pattern instance.")
         if compat_requested:
             raise ValueError(
-                "Cannot supply Flag.COMPAT_REGEX when using a compiled pattern instance."
+                "Cannot supply Flag.COMPAT_UNICODE_ESCAPE when using a compiled pattern instance."
             )
         wrapper = Pattern(pattern)
         if threads_requested:
@@ -735,7 +670,7 @@ def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> b
     """Adjust global defaults for the high-level wrapper.
 
     Returns the effective default JIT setting after applying any updates. Supply
-    ``compat_regex`` to change the default behaviour for :data:`Flag.COMPAT_REGEX`.
+    ``compat_regex`` to change the default behaviour for :data:`Flag.COMPAT_UNICODE_ESCAPE`.
     """
 
     global _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX
