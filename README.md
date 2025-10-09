@@ -5,14 +5,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 -->
 
-# Pcre (Python Pcre2 Binding)
+# PyPcre (Python Pcre2 Binding)
 
 Python bindings for the system PCRE2 library with a familiar `re`-style API.
 
 ## Installation
 
 ```bash
-pip install pcre
+pip install PyPcre
 ```
 
 The package links against the `libpcre2-8` variant already available on your
