@@ -762,12 +762,22 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
         library_dirs.extend(_discover_library_dirs())
 
     if library_files:
-        libraries = [lib for lib in libraries if lib != "pcre2-8"]
+        linkable_files: list[str] = []
         for path in library_files:
-            _extend_unique(extra_link_args, path)
-            parent = str(Path(path).parent)
-            if parent:
-                _extend_unique(library_dirs, parent)
+            suffix = Path(path).suffix.lower()
+            if suffix == ".dll":
+                continue
+            linkable_files.append(path)
+
+        if linkable_files:
+            libraries = [lib for lib in libraries if lib != "pcre2-8"]
+            for path in linkable_files:
+                _extend_unique(extra_link_args, path)
+                parent = str(Path(path).parent)
+                if parent:
+                    _extend_unique(library_dirs, parent)
+        elif "pcre2-8" not in libraries:
+            libraries.append("pcre2-8")
     elif "pcre2-8" not in libraries:
         libraries.append("pcre2-8")
 
