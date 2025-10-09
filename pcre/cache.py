@@ -8,18 +8,26 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from threading import RLock
-from typing import Any, Callable, Tuple, TypeVar
+from threading import local
+from typing import Any, Callable, Tuple, TypeVar, cast
 
 import pcre_ext_c as _pcre2
 
 
 T = TypeVar("T")
 
-_DEFAULT_CACHE_LIMIT = 128
-_CACHE_LIMIT: int | None = _DEFAULT_CACHE_LIMIT
-_PATTERN_CACHE: OrderedDict[Tuple[Any, int, bool], T] = OrderedDict()
-_PATTERN_CACHE_LOCK = RLock()
+_DEFAULT_CACHE_LIMIT = 16
+
+
+class _CacheState(local):
+    """Thread-local cache state holding the cache store and limit."""
+
+    def __init__(self) -> None:
+        self.cache_limit: int | None = _DEFAULT_CACHE_LIMIT
+        self.pattern_cache: OrderedDict[Tuple[Any, int, bool], Any] = OrderedDict()
+
+
+_THREAD_LOCAL = _CacheState()
 
 
 def cached_compile(
@@ -31,7 +39,7 @@ def cached_compile(
 ) -> T:
     """Compile *pattern* with *flags*, caching wrapper results when hashable."""
 
-    cache_limit = _CACHE_LIMIT
+    cache_limit = _THREAD_LOCAL.cache_limit
     if cache_limit == 0:
         return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
@@ -41,35 +49,34 @@ def cached_compile(
     except TypeError:
         return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
-    with _PATTERN_CACHE_LOCK:
-        cached = _PATTERN_CACHE.get(key)
-        if cached is not None:
-            _PATTERN_CACHE.move_to_end(key)
-            return cached
+    cache = _THREAD_LOCAL.pattern_cache
+    cached = cache.get(key)
+    if cached is not None:
+        cache.move_to_end(key)
+        return cast(T, cached)
 
     compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
-    with _PATTERN_CACHE_LOCK:
-        if _CACHE_LIMIT == 0:
-            return compiled
-        existing = _PATTERN_CACHE.get(key)
-        if existing is not None:
-            _PATTERN_CACHE.move_to_end(key)
-            return existing
-        _PATTERN_CACHE[key] = compiled
-        if (_CACHE_LIMIT is not None) and len(_PATTERN_CACHE) > _CACHE_LIMIT:
-            _PATTERN_CACHE.popitem(last=False)
+    cache_limit = _THREAD_LOCAL.cache_limit
+    if cache_limit == 0:
         return compiled
+
+    cache = _THREAD_LOCAL.pattern_cache
+    existing = cache.get(key)
+    if existing is not None:
+        cache.move_to_end(key)
+        return cast(T, existing)
+
+    cache[key] = compiled
+    if (cache_limit is not None) and len(cache) > cache_limit:
+        cache.popitem(last=False)
+    return compiled
 
 
 def clear_cache() -> None:
-    """Clear cached compiled patterns plus backend match-data and JIT stacks."""
+    """Clear the cached compiled patterns for the current thread."""
 
-    with _PATTERN_CACHE_LOCK:
-        _PATTERN_CACHE.clear()
-
-    _pcre2.clear_match_data_cache()
-    _pcre2.clear_jit_stack_cache()
+    _THREAD_LOCAL.pattern_cache.clear()
 
 
 def set_cache_limit(limit: int | None) -> None:
@@ -77,8 +84,6 @@ def set_cache_limit(limit: int | None) -> None:
 
     Passing ``None`` removes the limit. ``0`` disables caching entirely.
     """
-
-    global _CACHE_LIMIT
 
     if limit is None:
         new_limit: int | None = None
@@ -90,16 +95,17 @@ def set_cache_limit(limit: int | None) -> None:
         if new_limit < 0:
             raise ValueError("cache limit must be >= 0 or None")
 
-    with _PATTERN_CACHE_LOCK:
-        _CACHE_LIMIT = new_limit
-        if new_limit == 0:
-            _PATTERN_CACHE.clear()
-        elif new_limit is not None:
-            while len(_PATTERN_CACHE) > new_limit:
-                _PATTERN_CACHE.popitem(last=False)
+    _THREAD_LOCAL.cache_limit = new_limit
+
+    cache = _THREAD_LOCAL.pattern_cache
+    if new_limit == 0:
+        cache.clear()
+    elif new_limit is not None:
+        while len(cache) > new_limit:
+            cache.popitem(last=False)
 
 
 def get_cache_limit() -> int | None:
     """Return the current cache limit (``None`` means unlimited)."""
 
-    return _CACHE_LIMIT
+    return _THREAD_LOCAL.cache_limit

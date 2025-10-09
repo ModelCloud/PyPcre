@@ -6,84 +6,174 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, List, Tuple
+from collections import OrderedDict
+from typing import Any, Dict, List
 
-import pcre
-import pcre_ext_c
-from pcre.cache import _PATTERN_CACHE
+import pytest
 
-
-_PATTERN_SUBJECTS: List[Tuple[Any, Any]] = [
-    (r"(foo)(bar)", "foobar foo foobar"),
-    (r"(?P<word>\\w+)", "Hello world from Python"),
-    (r"(?:[A-Za-z]+-)*[A-Za-z]+", "well-known phrases"),
-    (r"[A-Za-z]{2,3}", "ab cd efg hij"),
-]
+import pcre.cache as cache_mod
 
 
-def test_clear_cache_threaded_flushes_all_caches() -> None:
-    original_match_cache_size = pcre_ext_c.get_match_data_cache_size()
-    original_jit_cache_size = pcre_ext_c.get_jit_stack_cache_size()
-    original_jit_limits = pcre_ext_c.get_jit_stack_limits()
-    pcre.clear_cache()
-    pcre_ext_c.set_match_data_cache_size(16)
-    pcre_ext_c.set_jit_stack_cache_size(8)
+def _fresh_thread_cache() -> OrderedDict[Any, Any]:
+    store: OrderedDict[Any, Any] = OrderedDict()
+    cache_mod._THREAD_LOCAL.pattern_cache = store
+    return store
 
-    cases = [(pattern, subject, pcre.findall(pattern, subject)) for pattern, subject in _PATTERN_SUBJECTS]
 
-    num_threads = 4
-    warmup_barrier = threading.Barrier(num_threads + 1)
-    resume_event = threading.Event()
-    errors: List[BaseException] = []
-    errors_lock = threading.Lock()
+def test_cached_compile_thread_local_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    compile_calls: List[str] = []
+
+    def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> str:
+        compile_calls.append(f"{threading.current_thread().name}:{pattern}:{flags}:{jit}")
+        return f"compiled:{len(compile_calls)}"
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+
+    main_store = _fresh_thread_cache()
+
+    def wrapper(raw: str) -> str:
+        return f"wrapped:{raw}"
+
+    main_result = cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+    assert main_result == "wrapped:compiled:1"
+    assert list(main_store.keys()) == [("expr", 0, False)]
+
+    barrier = threading.Barrier(2)
+    worker_store_keys: List[Any] = []
+    worker_results: List[str] = []
+    worker_errors: List[BaseException] = []
 
     def worker() -> None:
         try:
-            for pattern, subject, expected in cases:
-                assert pcre.findall(pattern, subject) == expected
-            warmup_barrier.wait()
-            if not resume_event.wait(timeout=5):
-                raise AssertionError("resume signal not received")
-            for _ in range(25):
-                for pattern, subject, expected in cases:
-                    assert pcre.findall(pattern, subject) == expected
-        except BaseException as exc:  # pragma: no cover - surfaced via main thread assertions
-            with errors_lock:
-                errors.append(exc)
+            _fresh_thread_cache()
+            barrier.wait(timeout=5)
+            result = cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+            worker_results.append(result)
+            worker_store_keys.extend(cache_mod._THREAD_LOCAL.pattern_cache.keys())
+        except BaseException as exc:  # pragma: no cover - surfaced in main thread
+            worker_errors.append(exc)
             raise
 
-    threads = [threading.Thread(target=worker, name=f"cache-test-{i}") for i in range(num_threads)]
+    thread = threading.Thread(target=worker, name="cache-worker")
+    thread.start()
 
     try:
-        for thread in threads:
-            thread.start()
-
-        try:
-            warmup_barrier.wait(timeout=5)
-        except threading.BrokenBarrierError as exc:  # pragma: no cover - indicates worker failure
-            raise AssertionError("workers failed during warm-up") from exc
-
-        assert len(_PATTERN_CACHE) >= len(cases)
-        assert pcre_ext_c.get_match_data_cache_count() > 0
-        assert pcre_ext_c.get_jit_stack_cache_count() > 0
-
-        pcre.clear_cache()
-
-        assert len(_PATTERN_CACHE) == 0
-        assert pcre_ext_c.get_match_data_cache_count() == 0
-        assert pcre_ext_c.get_jit_stack_cache_count() == 0
-
-        resume_event.set()
-
-        for thread in threads:
-            thread.join()
+        barrier.wait(timeout=5)
     finally:
-        resume_event.set()
-        for thread in threads:
-            thread.join(timeout=1)
-        pcre_ext_c.set_match_data_cache_size(original_match_cache_size)
-        pcre_ext_c.set_jit_stack_cache_size(original_jit_cache_size)
-        pcre_ext_c.set_jit_stack_limits(*original_jit_limits)
-        pcre.clear_cache()
+        thread.join(timeout=5)
 
-    assert not errors
+    if thread.is_alive():
+        raise AssertionError("worker thread did not finish")
+
+    assert not worker_errors
+    assert worker_results == ["wrapped:compiled:2"]
+    assert worker_store_keys == [("expr", 0, False)]
+    assert compile_calls == [
+        "MainThread:expr:0:False",
+        "cache-worker:expr:0:False",
+    ]
+    assert list(main_store.keys()) == [("expr", 0, False)]  # untouched by worker
+
+
+def test_clear_cache_only_resets_current_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    compile_calls: List[str] = []
+
+    def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> str:
+        compile_calls.append(f"{threading.current_thread().name}:{pattern}:{flags}:{jit}")
+        return f"compiled:{len(compile_calls)}"
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+
+    main_store = _fresh_thread_cache()
+
+    def wrapper(raw: str) -> str:
+        return raw
+
+    cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+    assert len(main_store) == 1
+
+    worker_ready = threading.Event()
+    resume_event = threading.Event()
+    worker_state: Dict[str, Any] = {}
+    worker_errors: List[BaseException] = []
+
+    def worker() -> None:
+        try:
+            _fresh_thread_cache()
+            first = cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+            worker_state["first_result"] = first
+            worker_state["initial_len"] = len(cache_mod._THREAD_LOCAL.pattern_cache)
+            worker_ready.set()
+            if not resume_event.wait(timeout=5):
+                raise AssertionError("resume signal not received")
+            second = cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+            worker_state["second_result"] = second
+            worker_state["final_len"] = len(cache_mod._THREAD_LOCAL.pattern_cache)
+        except BaseException as exc:  # pragma: no cover - surfaced in main thread
+            worker_errors.append(exc)
+            raise
+
+    thread = threading.Thread(target=worker, name="cache-worker")
+    thread.start()
+
+    try:
+        if not worker_ready.wait(timeout=5):
+            raise AssertionError("worker failed to signal readiness")
+        assert len(main_store) == 1
+        cache_mod.clear_cache()
+        assert len(main_store) == 0
+        resume_event.set()
+    finally:
+        thread.join(timeout=5)
+
+    if thread.is_alive():
+        raise AssertionError("worker thread did not finish")
+
+    assert not worker_errors
+    assert worker_state["initial_len"] == 1
+    assert worker_state["final_len"] == 1
+    assert worker_state["first_result"] == worker_state["second_result"] == "compiled:2"
+    assert compile_calls == [
+        "MainThread:expr:0:False",
+        "cache-worker:expr:0:False",
+    ]
+
+
+def test_cache_limit_thread_local_isolated() -> None:
+    main_original_limit = cache_mod.get_cache_limit()
+    main_store = _fresh_thread_cache()
+    cache_mod.set_cache_limit(7)
+
+    worker_before: List[int | None] = []
+    worker_after: List[int | None] = []
+    worker_done = threading.Event()
+
+    def worker() -> None:
+        _fresh_thread_cache()
+        worker_before.append(cache_mod.get_cache_limit())
+        cache_mod.set_cache_limit(2)
+        worker_after.append(cache_mod.get_cache_limit())
+        worker_done.set()
+
+    thread = threading.Thread(target=worker, name="cache-limit-worker")
+    thread.start()
+
+    try:
+        if not worker_done.wait(timeout=5):
+            raise AssertionError("worker thread did not finish")
+    finally:
+        thread.join(timeout=5)
+
+    if thread.is_alive():
+        raise AssertionError("worker thread did not finish")
+
+    current_limit = cache_mod.get_cache_limit()
+    try:
+        assert current_limit == 7
+    finally:
+        cache_mod.set_cache_limit(main_original_limit)
+
+    assert worker_before == [main_original_limit]
+    assert worker_after == [2]
+    assert cache_mod.get_cache_limit() == main_original_limit
+    assert list(main_store.keys()) == []
