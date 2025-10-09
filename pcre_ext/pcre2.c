@@ -10,6 +10,9 @@
 #include <immintrin.h>
 #endif
 
+#define STRINGIFY_DETAIL(value) #value
+#define STRINGIFY(value) STRINGIFY_DETAIL(value)
+
 static int default_jit_enabled = 1;
 static PyThread_type_lock default_jit_lock = NULL;
 static PyThread_type_lock cpu_feature_lock = NULL;
@@ -2101,6 +2104,26 @@ initialize_pcre2_version(void)
     if (pcre2_config(PCRE2_CONFIG_VERSION, buffer) == 0 && buffer[0] != '\0') {
         strncpy(pcre2_library_version, buffer, sizeof(pcre2_library_version) - 1);
         pcre2_library_version[sizeof(pcre2_library_version) - 1] = '\0';
+    } else {
+        const char *pre_release = STRINGIFY(PCRE2_PRERELEASE);
+        if (pre_release[0] != '\0') {
+            (void)snprintf(
+                pcre2_library_version,
+                sizeof(pcre2_library_version),
+                "%d.%d-%s",
+                PCRE2_MAJOR,
+                PCRE2_MINOR,
+                pre_release
+            );
+        } else {
+            (void)snprintf(
+                pcre2_library_version,
+                sizeof(pcre2_library_version),
+                "%d.%d",
+                PCRE2_MAJOR,
+                PCRE2_MINOR
+            );
+        }
     }
     pcre2_version_initialized = 1;
 }
