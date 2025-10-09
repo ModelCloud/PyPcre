@@ -4,26 +4,6 @@ import regex
 import json
 import pcre
 
-_u4 = regex.compile(r'((?<!\\)(?:\\\\)*)\\u([0-9A-Fa-f]{4})')
-_u8 = regex.compile(r'((?<!\\)(?:\\\\)*)\\U([0-9A-Fa-f]{8})')
-
-def to_pcre_hex(pattern: str):
-    count = 0
-
-    def rep8(m):
-        nonlocal count
-        count += 1
-        return m.group(1) + r'\x{' + m.group(2) + '}'
-
-    def rep4(m):
-        nonlocal count
-        count += 1
-        return m.group(1) + r'\x{' + m.group(2) + '}'
-
-    new_pat = _u8.sub(rep8, pattern)
-    new_pat = _u4.sub(rep4, new_pat)
-    return new_pat
-
 
 class TestTransformersRegex(unittest.TestCase):
     def test_transformers_regex(self):
@@ -52,7 +32,7 @@ class TestTransformersRegex(unittest.TestCase):
             try:
                 with self.subTest(pattern=pattern_text, subject=subject):
                     re_pattern = regex.compile(pattern_text)
-                    pcre_pattern = pcre.compile(to_pcre_hex(pattern_text))
+                    pcre_pattern = pcre.compile(pattern_text)
 
                     expected = [(m.span(), m.groups(), m.groupdict()) for m in re_pattern.finditer(subject)]
                     actual = [(m.span(), m.groups(), m.groupdict()) for m in pcre_pattern.finditer(subject)]
