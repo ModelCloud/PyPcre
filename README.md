@@ -9,14 +9,22 @@
 
 Python bindings for the system PCRE2 library with a familiar `re`-style API.
 
+<p align="center">
+    <a href="https://github.com/ModelCloud/PyPcre/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/Pcre.svg"></a>
+    <a href="https://pypi.org/project/PyPcre/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/PyPcre"></a>
+    <!-- <a href="https://pepy.tech/projects/PyPcre" style="text-decoration:none;"><img src="https://static.pepy.tech/badge/PyPcre" alt="PyPI Downloads"></a> -->
+    <a href="https://github.com/ModelCloud/PyPcre/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/PyPcre"></a>
+    <a href="https://huggingface.co/modelcloud/"><img src="https://img.shields.io/badge/🤗%20Hugging%20Face-ModelCloud-%23ff8811.svg"></a>
+</p>
+
+
 ## Installation
 
 ```bash
 pip install PyPcre
 ```
 
-The package links against the `libpcre2-8` variant already available on your
-system. See [Building](#building) for manual build details.
+The package prioritizes linking against the `libpcre2-8` shared library in system for fast install and max security protection which gets latest patches from OS. See [Building](#building) for manual build details.
 
 ## Usage
 
@@ -78,16 +86,10 @@ the conversion without repeating the flag.
 ### Automatic pattern caching
 
 `pcre.compile()` caches the final `Pattern` wrapper for up to 128
-unique `(pattern, flags)` pairs when the pattern object is hashable. This
-keeps repeated calls to top-level helpers efficient without any extra work
-from the caller. Adjust the capacity with `pcre.set_cache_limit(n)`—pass
+unique `(pattern, flags)` pairs when the pattern object is hashable. Adjust the capacity with `pcre.set_cache_limit(n)`—pass
 `0` to disable caching completely or `None` for an unlimited cache—and
 check the current limit with `pcre.get_cache_limit()`. The cache can be
-emptied at any time with `pcre.clear_cache()` if your application needs to
-release memory proactively.
-
-Non-hashable patterns (for example, custom objects) bypass the cache and are
-still compiled immediately.
+emptied at any time with `pcre.clear_cache()`.
 
 ### Text versus bytes defaults
 
@@ -116,7 +118,7 @@ bytes.
   order of the provided subjects and returns the same result objects you’d
   normally receive from the `Pattern` methods.
 - Threading is **opt-in by default** when Python runs without the GIL
-  (e.g. CPython with `-X gil=0` or `PYTHON_GIL=0`). When the GIL is active the default falls
+  (e.g. Python with `-X gil=0` or `PYTHON_GIL=0`). When the GIL is active the default falls
   back to sequential execution to avoid needless overhead.
 - With auto threading enabled (`configure_threads(enabled=True)`), the pool
   is only engaged when at least one subject is larger than the configured
@@ -131,9 +133,9 @@ bytes.
   `preload=True` to spin the pool up eagerly, and `shutdown_thread_pool()`
   to tear it down manually if needed.
 
-### JIT control
+### JIT Pattern Compilation and Execution
 
-Pcre’s JIT compiler is enabled by default for every compiled pattern. The
+Pcre2’s JIT compiler is enabled by default for every compiled pattern. The
 wrapper exposes two complementary ways to adjust that behaviour:
 
 - Toggle the global default at runtime with `pcre.configure(jit=False)` to
@@ -150,6 +152,29 @@ wrapper exposes two complementary ways to adjust that behaviour:
   fast = compile(r"expr", flags=Flag.JIT)      # force-enable for this pattern
   slow = compile(r"expr", flags=Flag.NO_JIT)   # force-disable for this pattern
   ```
+
+## Pattern cache
+- `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries.
+- Use `pcre.clear_cache()` when you need to free the cache proactively.
+- Non-hashable pattern objects skip the cache and are compiled each time.
+
+## Default flags for text patterns
+- String patterns enable `Flag.UTF` and `Flag.UCP` automatically so behaviour matches `re`.
+- Byte patterns keep both flags disabled; opt in manually if Unicode semantics are desired.
+- Explicitly supply `Flag.NO_UTF`/`Flag.NO_UCP` to override the defaults for strings.
+
+## Additional usage notes
+- All top-level helpers (`match`, `search`, `fullmatch`, `finditer`, `findall`) defer to the cached compiler.
+- Compiled `Pattern` objects expose `.pattern`, `.flags`, `.jit`, and `.groupindex` for introspection.
+- Execution helpers accept `pos`, `endpos`, and `options`, allowing you to thread PCRE2 execution flags per call.
+
+## Memory allocation
+- PyPcre will select the fastest available allocator at import time: it
+  prefers jemalloc, then tcmalloc, and finally falls back to the platform
+  `malloc`. Optional allocators are loaded via `dlopen`, so no additional
+  link flags are required when they are absent.
+- Call `pcre_ext_c.get_allocator()` to inspect which backend is active at
+  runtime.
 
 ## Building
 
@@ -182,31 +207,3 @@ If your system ships `libpcre2-8` under `/usr` but you also maintain a
 manually built copy under `/usr/local`, export `PCRE2_LIBRARY_PATH` (and, if
 needed, a matching `PCRE2_INCLUDE_DIR`) so the build links against the desired
 location.
-
-# Notes
-
-## Pattern cache
-- `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries.
-- Use `pcre.clear_cache()` when you need to free the cache proactively.
-- Non-hashable pattern objects skip the cache and are compiled each time.
-
-## Default flags for text patterns
-- String patterns enable `Flag.UTF` and `Flag.UCP` automatically so behaviour matches `re`.
-- Byte patterns keep both flags disabled; opt in manually if Unicode semantics are desired.
-- Explicitly supply `Flag.NO_UTF`/`Flag.NO_UCP` to override the defaults for strings.
-
-## Additional usage notes
-- All top-level helpers (`match`, `search`, `fullmatch`, `finditer`, `findall`) defer to the cached compiler.
-- Compiled `Pattern` objects expose `.pattern`, `.flags`, `.jit`, and `.groupindex` for introspection.
-- Execution helpers accept `pos`, `endpos`, and `options`, allowing you to thread PCRE2 execution flags per call.
-
-## Memory allocation
-- The extension selects the fastest available allocator at import time: it
-  prefers jemalloc, then tcmalloc, and finally falls back to the platform
-  `malloc`. Optional allocators are loaded via `dlopen`, so no additional
-  link flags are required when they are absent.
-- All internal buffers (match data wrappers, JIT stack cache entries, error
-  formatting scratch space) use the chosen allocator; CPython’s `PyMem_*`
-  family is no longer used within the extension.
-- Call `pcre_ext_c.get_allocator()` to inspect which backend is active at
-  runtime.
