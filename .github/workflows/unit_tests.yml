@@ -52,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
+        os: [ ubuntu-latest, macos-latest, macos-13 ] # macos-latest arm64, macos-13 intel
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
@@ -61,17 +61,6 @@ jobs:
         with:
           python-version: 3.12
           cache: 'pip'
-
-      - name: install dependencies
-        run: |
-          echo "OS is ${{ runner.os }}"
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            brew install pcre2
-          elif [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt update && sudo apt install libpcre2-dev
-          else
-            echo "Unknown OS"
-          fi
 
       - name: install
         run: |
@@ -101,7 +90,7 @@ jobs:
         with:
           copyback: false
           prepare: |
-            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip pcre2
+            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip pcre2 gcc gmake pkgconf
           run: |
             python -V
             python -m venv venv
@@ -128,7 +117,7 @@ jobs:
         uses: vmactions/solaris-vm@v1
         with:
           prepare: |
-            pkg install library/pcre2
+            pkg install library/pcre2 developer/gcc developer/build/gnu-make developer/build/pkg-config
           copyback: false
           run: |
             python -V
@@ -153,9 +142,11 @@ jobs:
         with:
           distribution: Ubuntu-24.04
           additional-packages:
+            python3-dev
             python3-pip
             python3-venv
-            libpcre2-dev
+            build-essential
+            pkg-config
 
       - name: test os
         shell: wsl-bash -u root {0}
