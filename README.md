@@ -57,9 +57,28 @@ exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 - `pcre.escape()` delegates directly to `re.escape` for byte and text
   patterns so escaping semantics remain identical.
 
+### `regex` package compatibility
+
+The [`regex`](https://pypi.org/project/regex/) package interprets both
+`\uXXXX`/`\u{...}` and `\UXXXXXXXX` escapes as UTF-8 code points, while
+PCRE2 expects hexadecimal escapes to use the `\x{...}` form. Enable
+`Flag.COMPAT_REGEX` to translate those escapes automatically when compiling
+patterns:
+
+```python
+from pcre import compile, Flag
+
+pattern = compile(r"\\u{1F600}", flags=Flag.COMPAT_REGEX)
+assert pattern.pattern == r"\\x{1F600}"
+```
+
+Set the default behaviour globally with `pcre.configure(compat_regex=True)`
+so that subsequent calls to `compile()` and the module-level helpers apply
+the conversion without repeating the flag.
+
 ### Automatic pattern caching
 
-`pcre.compile()` caches the final `Pattern` wrapper for up to 2048
+`pcre.compile()` caches the final `Pattern` wrapper for up to 128
 unique `(pattern, flags)` pairs when the pattern object is hashable. This
 keeps repeated calls to top-level helpers efficient without any extra work
 from the caller. Adjust the capacity with `pcre.set_cache_limit(n)`—pass
@@ -168,7 +187,7 @@ location.
 # Notes
 
 ## Pattern cache
-- `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 2048 entries.
+- `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries.
 - Use `pcre.clear_cache()` when you need to free the cache proactively.
 - Non-hashable pattern objects skip the cache and are compiled each time.
 
@@ -179,12 +198,12 @@ location.
 
 ## Additional usage notes
 - All top-level helpers (`match`, `search`, `fullmatch`, `finditer`, `findall`) defer to the cached compiler.
-- Compiled `Pattern` objects expose `.pattern`, `.pattern_bytes`, `.flags`, and `.groupindex` for introspection.
+- Compiled `Pattern` objects expose `.pattern`, `.flags`, `.jit`, and `.groupindex` for introspection.
 - Execution helpers accept `pos`, `endpos`, and `options`, allowing you to thread PCRE2 execution flags per call.
 
 ## Memory allocation
 - The extension selects the fastest available allocator at import time: it
-  prefers tcmalloc, then jemalloc, and finally falls back to the platform
+  prefers jemalloc, then tcmalloc, and finally falls back to the platform
   `malloc`. Optional allocators are loaded via `dlopen`, so no additional
   link flags are required when they are absent.
 - All internal buffers (match data wrappers, JIT stack cache entries, error

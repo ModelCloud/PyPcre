@@ -10,9 +10,31 @@
 #include <immintrin.h>
 #endif
 
+#define STRINGIFY_DETAIL(value) #value
+#define STRINGIFY(value) STRINGIFY_DETAIL(value)
+
+static const char *
+resolve_pcre2_prerelease(void)
+{
+    const char *raw = STRINGIFY(Z PCRE2_PRERELEASE);
+
+    if (raw[1] == '\0') {
+        return "";
+    }
+
+    raw += 1;
+    while (*raw == ' ') {
+        raw++;
+    }
+
+    return raw;
+}
+
 static int default_jit_enabled = 1;
 static PyThread_type_lock default_jit_lock = NULL;
 static PyThread_type_lock cpu_feature_lock = NULL;
+static char pcre2_library_version[64] = "unknown";
+static int pcre2_version_initialized = 0;
 #if defined(PCRE2_USE_OFFSET_LIMIT)
 static int offset_limit_support = -1;
 #endif
@@ -1871,6 +1893,8 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
 static PyObject *module_cpu_ascii_vector_mode(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static PyObject *module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
+static PyObject *module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
+static void initialize_pcre2_version(void);
 
 static PyMethodDef module_methods[] = {
     {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object." )},
@@ -1888,6 +1912,7 @@ static PyMethodDef module_methods[] = {
     {"get_jit_stack_cache_count", (PyCFunction)module_get_jit_stack_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached JIT stacks currently stored." )},
     {"get_jit_stack_limits", (PyCFunction)module_get_jit_stack_limits, METH_NOARGS, PyDoc_STR("Return the configured (start, max) JIT stack sizes." )},
     {"set_jit_stack_limits", (PyCFunction)module_set_jit_stack_limits, METH_VARARGS, PyDoc_STR("Set the (start, max) sizes for newly created JIT stacks." )},
+    {"get_library_version", (PyCFunction)module_get_pcre2_version, METH_NOARGS, PyDoc_STR("Return the PCRE2 library version string." )},
     {"get_allocator", (PyCFunction)module_memory_allocator, METH_NOARGS, PyDoc_STR("Return the name of the active heap allocator (tcmalloc/jemalloc/malloc)." )},
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
     {NULL, NULL, 0, NULL},
@@ -2023,6 +2048,12 @@ PyInit_cpcre2(void)
         goto error;
     }
 
+    initialize_pcre2_version();
+
+    if (PyModule_AddStringConstant(module, "PCRE2_VERSION", pcre2_library_version) < 0) {
+        goto error;
+    }
+
     if (PyModule_AddStringConstant(module, "__version__", "0.1.0") < 0) {
         goto error;
     }
@@ -2070,4 +2101,46 @@ module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
     const char *name = pcre_memory_allocator_name();
     return PyUnicode_FromString(name);
+}
+
+static PyObject *
+module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    initialize_pcre2_version();
+    return PyUnicode_FromString(pcre2_library_version);
+}
+
+static void
+initialize_pcre2_version(void)
+{
+    if (pcre2_version_initialized) {
+        return;
+    }
+
+    char buffer[sizeof(pcre2_library_version)] = {0};
+    if (pcre2_config(PCRE2_CONFIG_VERSION, buffer) == 0 && buffer[0] != '\0') {
+        strncpy(pcre2_library_version, buffer, sizeof(pcre2_library_version) - 1);
+        pcre2_library_version[sizeof(pcre2_library_version) - 1] = '\0';
+    } else {
+        const char *pre_release = resolve_pcre2_prerelease();
+        if (pre_release[0] != '\0') {
+            (void)snprintf(
+                pcre2_library_version,
+                sizeof(pcre2_library_version),
+                "%d.%d-%s",
+                PCRE2_MAJOR,
+                PCRE2_MINOR,
+                pre_release
+            );
+        } else {
+            (void)snprintf(
+                pcre2_library_version,
+                sizeof(pcre2_library_version),
+                "%d.%d",
+                PCRE2_MAJOR,
+                PCRE2_MINOR
+            );
+        }
+    }
+    pcre2_version_initialized = 1;
 }

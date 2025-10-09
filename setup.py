@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,12 @@ except ImportError:  # pragma: no cover - fallback for older Python environments
     from distutils.ccompiler import CCompiler, new_compiler  # type: ignore
     from distutils.errors import CCompilerError, DistutilsExecError  # type: ignore
     from distutils.sysconfig import customize_compiler  # type: ignore
+
+
+ROOT_DIR = Path(__file__).resolve().parent
+PCRE_EXT_DIR = ROOT_DIR / "pcre_ext"
+PCRE2_REPO_URL = "https://github.com/PCRE2Project/pcre2.git"
+PCRE2_TAG = "pcre2-10.46"
 
 
 MODULE_SOURCES = [
@@ -100,6 +107,254 @@ def _is_truthy_env(name: str) -> bool:
     if value is None:
         return False
     return value.strip().lower() in _TRUTHY_VALUES
+
+
+def _is_windows_platform() -> bool:
+    return sys.platform.startswith("win") or os.name == "nt"
+
+
+def _is_wsl_environment() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        release = platform.release()
+    except Exception:
+        return False
+    return "microsoft" in release.lower()
+
+
+def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
+    if _is_windows_platform() and not _is_wsl_environment():
+        os.environ["PCRE2_BUILD_FROM_SOURCE"] = "1"
+
+    if not _is_truthy_env("PCRE2_BUILD_FROM_SOURCE"):
+        return ([], [], [])
+
+    destination = PCRE_EXT_DIR / PCRE2_TAG
+    git_dir = destination / ".git"
+
+    if destination.exists() and not git_dir.is_dir():
+        raise RuntimeError(
+            f"Existing directory {destination} is not a git checkout; remove or rename it before building"
+        )
+
+    if not destination.exists():
+        clone_command = [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            PCRE2_TAG,
+            "--recurse-submodules",
+            "--shallow-submodules",
+            PCRE2_REPO_URL,
+            str(destination),
+        ]
+        try:
+            subprocess.run(clone_command, check=True)
+        except FileNotFoundError as exc:  # pragma: no cover - git missing on build host
+            raise RuntimeError("git is required to fetch PCRE2 sources when PCRE2_BUILD_FROM_SOURCE=1") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "Failed to clone PCRE2 source from official repository; see the output above for details"
+            ) from exc
+
+    try:
+        subprocess.run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=destination,
+            check=True,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - git missing on build host
+        raise RuntimeError("git with submodule support is required to fetch PCRE2 dependencies") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Failed to update PCRE2 git submodules; see the output above for details"
+        ) from exc
+
+    build_dir = destination / "build"
+    build_roots = [
+        destination,
+        destination / ".libs",
+        destination / "src",
+        destination / "src" / ".libs",
+        build_dir,
+        build_dir / "lib",
+        build_dir / "bin",
+        build_dir / "Release",
+        build_dir / "Debug",
+        build_dir / "RelWithDebInfo",
+        build_dir / "MinSizeRel",
+    ]
+
+    def _has_built_library() -> bool:
+        patterns = [
+            "libpcre2-8.so",
+            "libpcre2-8.so.*",
+            "libpcre2-8.a",
+            "libpcre2-8.dylib",
+            "libpcre2-8.lib",
+            "pcre2-8.dll",
+        ]
+        for root in build_roots:
+            if not root.exists():
+                continue
+            for pattern in patterns:
+                if any(root.glob(f"**/{pattern}")):
+                    return True
+        return False
+
+    if not _has_built_library():
+        env = os.environ.copy()
+        build_succeeded = False
+        cmake_error: Exception | None = None
+
+        if shutil.which("cmake"):
+            try:
+                cmake_args = [
+                    "cmake",
+                    "-S",
+                    str(destination),
+                    "-B",
+                    str(build_dir),
+                    "-DPCRE2_SUPPORT_JIT=ON",
+                    "-DPCRE2_BUILD_PCRE2_16=ON",
+                    "-DPCRE2_BUILD_TESTS=OFF",
+                    "-DBUILD_SHARED_LIBS=ON",
+                ]
+                if not _is_windows_platform():
+                    cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
+                subprocess.run(cmake_args, cwd=destination, env=env, check=True)
+
+                build_command = [
+                    "cmake",
+                    "--build",
+                    str(build_dir),
+                ]
+                if _is_windows_platform():
+                    build_command.extend(["--config", "Release"])
+                build_command.extend(["--", "-j4"])
+                subprocess.run(build_command, cwd=destination, env=env, check=True)
+            except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                cmake_error = exc
+            else:
+                build_succeeded = True
+
+        if not build_succeeded:
+            autoconf_script = destination / "configure"
+            autoconf_ready = autoconf_script.exists() and not _is_windows_platform()
+
+            if autoconf_ready:
+                build_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    configure_command = [
+                        str(autoconf_script),
+                        "--enable-jit",
+                        "--enable-pcre2-8",
+                        "--disable-tests",
+                    ]
+                    subprocess.run(configure_command, cwd=build_dir, env=env, check=True)
+                    subprocess.run(["make", "-j4"], cwd=build_dir, env=env, check=True)
+                except FileNotFoundError as exc:
+                    raise RuntimeError(
+                        "Building PCRE2 from source via Autoconf requires the GNU build toolchain (configure/make) to be available on PATH"
+                    ) from exc
+                except subprocess.CalledProcessError as exc:
+                    raise RuntimeError(
+                        "Failed to build PCRE2 from source using Autoconf; see the output above for details"
+                    ) from exc
+                else:
+                    build_succeeded = True
+            elif cmake_error is not None and isinstance(cmake_error, subprocess.CalledProcessError):
+                raise RuntimeError(
+                    "Failed to build PCRE2 from source; see the output above for details"
+                ) from cmake_error
+
+        if not build_succeeded:
+            raise RuntimeError(
+                "PCRE2 build tooling was not found. Install CMake or Autoconf (configure/make) to build from source."
+            )
+
+    header_source = destination / "src" / "pcre2.h.generic"
+    header_target = destination / "src" / "pcre2.h"
+    if header_source.exists() and not header_target.exists():
+        shutil.copy2(header_source, header_target)
+
+    include_target = PCRE_EXT_DIR / "pcre2.h"
+    if header_target.exists():
+        shutil.copy2(header_target, include_target)
+
+    include_dirs: list[str] = []
+    library_dirs: list[str] = []
+    library_files: list[str] = []
+    seen_includes: set[str] = set()
+    seen_lib_dirs: set[str] = set()
+    seen_lib_files: set[str] = set()
+
+    def _add_include(path: Path) -> None:
+        path = path.resolve()
+        path_str = str(path)
+        if path.is_dir() and path_str not in seen_includes:
+            include_dirs.append(path_str)
+            seen_includes.add(path_str)
+
+    def _add_library_file(path: Path) -> None:
+        path = path.resolve()
+        if not path.is_file():
+            return
+        path_str = str(path)
+        if path_str not in seen_lib_files:
+            library_files.append(path_str)
+            seen_lib_files.add(path_str)
+        parent = str(path.parent.resolve())
+        if parent not in seen_lib_dirs:
+            library_dirs.append(parent)
+            seen_lib_dirs.add(parent)
+
+    include_dir = destination / "src"
+    _add_include(include_dir)
+
+    search_roots = [
+        destination,
+        destination / "src",
+        destination / ".libs",
+        destination / "src" / ".libs",
+        build_dir,
+        build_dir / "lib",
+        build_dir / "bin",
+        build_dir / "Release",
+        build_dir / "Debug",
+        build_dir / "RelWithDebInfo",
+        build_dir / "MinSizeRel",
+    ]
+    search_patterns = [
+        f"**/{LIBRARY_BASENAME}.lib",
+        f"**/{LIBRARY_BASENAME}.a",
+        f"**/{LIBRARY_BASENAME}.so",
+        f"**/{LIBRARY_BASENAME}.so.*",
+        f"**/{LIBRARY_BASENAME}.dylib",
+        "**/pcre2-8.lib",
+        "**/pcre2-8.dll",
+        "**/pcre2-8-static.lib",
+        "**/pcre2-8-static.dll",
+    ]
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for pattern in search_patterns:
+            for path in root.glob(pattern):
+                _add_library_file(path)
+
+    if not library_files:
+        raise RuntimeError(
+            "PCRE2 build did not produce any libpcre2-8 artifacts; check the build output for errors"
+        )
+
+    return (include_dirs, library_dirs, library_files)
 
 
 def _get_test_compiler() -> CCompiler | None:
@@ -447,6 +702,14 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
     define_macros: list[tuple[str, str | None]] = []
     library_files: list[str] = []
 
+    source_include_dirs, source_library_dirs, source_library_files = _prepare_pcre2_source()
+    for directory in source_include_dirs:
+        _extend_unique(include_dirs, directory)
+    for directory in source_library_dirs:
+        _extend_unique(library_dirs, directory)
+    for path in source_library_files:
+        _extend_unique(library_files, path)
+
     cflags = _run_pkg_config("--cflags")
     libs = _run_pkg_config("--libs")
 
@@ -536,12 +799,22 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
         library_dirs.extend(_discover_library_dirs())
 
     if library_files:
-        libraries = [lib for lib in libraries if lib != "pcre2-8"]
+        linkable_files: list[str] = []
         for path in library_files:
-            _extend_unique(extra_link_args, path)
-            parent = str(Path(path).parent)
-            if parent:
-                _extend_unique(library_dirs, parent)
+            suffix = Path(path).suffix.lower()
+            if suffix == ".dll":
+                continue
+            linkable_files.append(path)
+
+        if linkable_files:
+            libraries = [lib for lib in libraries if lib != "pcre2-8"]
+            for path in linkable_files:
+                _extend_unique(extra_link_args, path)
+                parent = str(Path(path).parent)
+                if parent:
+                    _extend_unique(library_dirs, parent)
+        elif "pcre2-8" not in libraries:
+            libraries.append("pcre2-8")
     elif "pcre2-8" not in libraries:
         libraries.append("pcre2-8")
 
