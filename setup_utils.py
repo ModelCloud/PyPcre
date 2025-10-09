@@ -255,6 +255,8 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                         "--enable-jit",
                         "--enable-pcre2-8",
                         "--disable-tests",
+                        "--enable-static",
+                        "--disable-shared",
                     ]
                     subprocess.run(configure_command, cwd=build_dir, env=env, check=True)
                     subprocess.run(["make", "-j4"], cwd=build_dir, env=env, check=True)
