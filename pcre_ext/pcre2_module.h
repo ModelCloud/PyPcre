@@ -10,6 +10,7 @@
 #include <Python.h>
 #include <structmember.h>
 #include "pythread.h"
+#include <stddef.h>
 #include <stdint.h>
 
 #if !defined(PCRE2_CODE_UNIT_WIDTH)
@@ -78,5 +79,12 @@ Py_ssize_t utf8_offset_to_index(const char *data, Py_ssize_t length);
 int utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset_out);
 PyObject *create_groupindex_dict(pcre2_code *code);
 int coerce_jit_argument(PyObject *value, int default_value, int *out, int *is_explicit);
+
+/* Memory management */
+int pcre_memory_initialize(void);
+void pcre_memory_teardown(void);
+void *pcre_malloc(size_t size);
+void pcre_free(void *ptr);
+const char *pcre_memory_allocator_name(void);
 
 #endif

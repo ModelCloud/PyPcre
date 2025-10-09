@@ -32,6 +32,7 @@ MODULE_SOURCES = [
     "pcre_ext/cache.c",
     "pcre_ext/flag.c",
     "pcre_ext/util.c",
+    "pcre_ext/memory.c",
 ]
 
 LIB_EXTENSIONS = [
@@ -137,7 +138,7 @@ def _augment_compile_flags(flags: list[str]) -> None:
         ("-mtune=native", True),
         ("-fomit-frame-pointer", False),
         ("-funroll-loops", False),
-        ("-falign-loops=32", False),
+        #("-falign-loops=32", False),
     ]
 
     seen = set(flags)
@@ -387,6 +388,9 @@ def _collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]
 
     if "pcre2-8" not in libraries:
         libraries.append("pcre2-8")
+
+    if sys.platform.startswith("linux") and "dl" not in libraries:
+        libraries.append("dl")
 
     _augment_compile_flags(extra_compile_args)
     print(extra_compile_args)
