@@ -51,7 +51,9 @@ LIB_EXTENSIONS = [
 
 LIBRARY_BASENAME = "libpcre2-8"
 
-__all__ = ["MODULE_SOURCES", "collect_build_config"]
+RUNTIME_LIBRARY_FILES: list[str] = []
+
+__all__ = ["MODULE_SOURCES", "collect_build_config", "RUNTIME_LIBRARY_FILES"]
 
 
 def _run_pkg_config(*args: str) -> list[str]:
@@ -453,6 +455,9 @@ def _augment_compile_flags(flags: list[str]) -> None:
     if _is_truthy_env("PCRE2_DISABLE_OPT_FLAGS"):
         return
 
+    if _is_windows_platform():
+        return
+
     disable_native = _is_truthy_env("PCRE2_DISABLE_NATIVE_FLAGS")
     compiler = _get_test_compiler()
     if not disable_native and _should_disable_native_flags_for_macos(compiler):
@@ -790,7 +795,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if env_ldflags:
         extra_link_args.extend(shlex.split(env_ldflags))
 
-    if not any(flag.startswith("-std=") for flag in extra_compile_args):
+    if not _is_windows_platform() and not any(flag.startswith("-std=") for flag in extra_compile_args):
         extra_compile_args.append("-std=c99")
 
     if not _has_header(include_dirs):
@@ -799,7 +804,15 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if not _has_library(library_dirs):
         library_dirs.extend(_discover_library_dirs())
 
+    global RUNTIME_LIBRARY_FILES
+    runtime_libraries: list[str] = []
+
     if library_files:
+        for runtime_path in library_files:
+            lower_name = runtime_path.lower()
+            if lower_name.endswith(".dll") or lower_name.endswith(".dylib") or ".so" in Path(runtime_path).name:
+                _extend_unique(runtime_libraries, runtime_path)
+
         linkable_files: list[str] = []
         for path in library_files:
             suffix = Path(path).suffix.lower()
@@ -823,6 +836,8 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         libraries.append("dl")
 
     _augment_compile_flags(extra_compile_args)
+
+    RUNTIME_LIBRARY_FILES = runtime_libraries
 
     return {
         "include_dirs": include_dirs,
