@@ -4,6 +4,7 @@ import regex
 import json
 import pcre
 
+pcre.configure(compat_regex=True)
 
 class TestTransformersRegex(unittest.TestCase):
     def test_transformers_regex(self):
