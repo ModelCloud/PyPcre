@@ -4,6 +4,7 @@ import regex
 import json
 import pcre
 
+
 class TestTransformersRegex(unittest.TestCase):
     def test_transformers_regex(self):
         json_list = []
@@ -28,9 +29,15 @@ class TestTransformersRegex(unittest.TestCase):
             pattern_text = obj["pattern"]
             subject = obj["test_string"]
             print(f"index: {i} pattern_text: {pattern_text} subject: {subject}")
-            with self.subTest(pattern=pattern_text, subject=subject):
-                re_pattern = regex.compile(pattern_text)
-                pcre_pattern = pcre.compile(pattern_text)
-                expected = [(m.span(), m.groups(), m.groupdict()) for m in re_pattern.finditer(subject)]
-                actual = [(m.span(), m.groups(), m.groupdict()) for m in pcre_pattern.finditer(subject)]
-                self.assertEqual(actual, expected)
+            try:
+                with self.subTest(pattern=pattern_text, subject=subject):
+                    re_pattern = regex.compile(pattern_text)
+                    pcre_pattern = pcre.compile(pattern_text)
+
+                    expected = [(m.span(), m.groups(), m.groupdict()) for m in re_pattern.finditer(subject)]
+                    actual = [(m.span(), m.groups(), m.groupdict()) for m in pcre_pattern.finditer(subject)]
+                    self.assertEqual(expected, actual)
+            except regex.error as e:
+                self.fail(f"Compile error for pattern:\n  {pattern_text}\n  Error: {type(e).__name__}: {e}")
+            except pcre.error as e:
+                self.fail(f"Compile error for pattern:\n  {pattern_text}\n  Error: {type(e).__name__}: {e}")
