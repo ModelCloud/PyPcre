@@ -2,8 +2,8 @@ import types
 from collections import OrderedDict
 
 import pytest
-from pcre import cache as cache_mod
 from pcre import Flag
+from pcre import cache as cache_mod
 from pcre import pcre as core
 from pcre.flags import strip_py_only_flags
 
@@ -283,7 +283,7 @@ def test_pattern_match_handles_optional_end():
 
 
 def test_configure_updates_default_jit(monkeypatch):
-    calls = []
+    pass
 
 def test_pattern_search_and_fullmatch_delegate():
     search_method = MethodRecorder(FakeMatch((2, 4), group0="search-result"))

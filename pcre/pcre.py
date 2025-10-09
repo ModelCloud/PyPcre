@@ -25,13 +25,6 @@ from .flags import (
     THREADS,
     strip_py_only_flags,
 )
-from .threads import (
-    configure_thread_pool,
-    ensure_thread_pool,
-    get_auto_threshold,
-    get_thread_default,
-    shutdown_thread_pool,
-)
 from .re_compat import (
     Match,
     TemplatePatternStub,
@@ -47,6 +40,11 @@ from .re_compat import (
     prepare_subject,
     render_template,
     resolve_endpos,
+)
+from .threads import (
+    ensure_thread_pool,
+    get_auto_threshold,
+    get_thread_default,
 )
 
 

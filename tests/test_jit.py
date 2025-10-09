@@ -3,9 +3,8 @@
 
 import types
 
-import pytest
-
 import pcre
+import pytest
 from pcre import Flag
 from pcre import pcre as core
 
@@ -142,7 +141,7 @@ def test_flag_no_jit_does_not_change_global_default(monkeypatch):
     second = pcre.compile("expr", flags=Flag.NO_JIT)
     third = pcre.compile("expr")
 
-    assert [j for j in captured["jits"]] == [True, False, True]
+    assert list(captured["jits"]) == [True, False, True]
     assert first.jit is True
     assert second.jit is False
     assert third.jit is True

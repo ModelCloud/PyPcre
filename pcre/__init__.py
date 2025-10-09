@@ -17,29 +17,29 @@ from enum import IntEnum, IntFlag
 from typing import Any
 
 from . import cpcre2
-from .flags import PY_ONLY_FLAG_MEMBERS
 from .cache import get_cache_limit, set_cache_limit
-from .threads import configure_threads
+from .flags import PY_ONLY_FLAG_MEMBERS
 from .pcre import (
     Match,
     Pattern,
     PcreError,
     clear_cache,
-    configure_thread_pool,
-    configure,
     compile,
+    configure,
+    configure_thread_pool,
     findall,
     finditer,
-    module_fullmatch,
     fullmatch,
-    parallel_map,
     match,
+    module_fullmatch,
+    parallel_map,
     search,
     shutdown_thread_pool,
     split,
     sub,
     subn,
 )
+from .threads import configure_threads
 
 
 __version__ = getattr(cpcre2, "__version__", "0.0")

@@ -1,7 +1,7 @@
 import platform
-import pytest
 
 import pcre
+import pytest
 
 
 def test_ascii_vector_mode_exposed():

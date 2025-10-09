@@ -17,6 +17,7 @@ from pathlib import Path
 
 from setuptools import Extension, setup
 
+
 try:
     from setuptools._distutils.ccompiler import CCompiler, new_compiler
     from setuptools._distutils.errors import CCompilerError, DistutilsExecError

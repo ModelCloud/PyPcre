@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict
 
+
 try:
     from pcre import cpcre2
 except ImportError:
