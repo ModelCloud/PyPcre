@@ -4,9 +4,14 @@ import regex
 import json
 import pcre
 
-pcre.configure(compat_regex=True)
-
 class TestTransformersRegex(unittest.TestCase):
+
+    def setUp(self):
+        pcre.configure(compat_regex=True)
+
+    def tearDown(self):
+        pcre.configure(compat_regex=False)
+
     def test_transformers_regex(self):
         json_list = []
 
