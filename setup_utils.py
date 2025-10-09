@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 
@@ -104,6 +104,228 @@ def _run_command(command: list[str]) -> str | None:
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or None
+
+
+def _log_cmake_validation_failure(path: str, error: subprocess.CalledProcessError) -> None:
+    message_parts = [
+        f"Detected CMake at {path} but `cmake --version` exited with {error.returncode}.",
+    ]
+    if error.stdout:
+        message_parts.append("stdout:\n" + error.stdout.rstrip())
+    if error.stderr:
+        message_parts.append("stderr:\n" + error.stderr.rstrip())
+    sys.stderr.write("\n".join(message_parts) + "\n")
+
+
+def _path_contains_pyenv_shims(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    return ".pyenv" in normalized and "/shims/" in normalized
+
+
+def _is_python_script(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            first_line = handle.readline().strip().lower()
+    except OSError:
+        return False
+    if not first_line.startswith(b"#!"):
+        return False
+    return b"python" in first_line
+
+
+def _is_pyenv_python_shim(path: str) -> bool:
+    return _path_contains_pyenv_shims(path) and _is_python_script(path)
+
+
+def _log_skipping_pyenv_shim(path: str) -> None:
+    sys.stderr.write(f"Ignoring pyenv CMake shim at {path}\n")
+
+
+def _path_without_pyenv_shims() -> str | None:
+    raw_path = os.environ.get("PATH")
+    if not raw_path:
+        return None
+    entries: list[str] = []
+    for part in raw_path.split(os.pathsep):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        if _path_contains_pyenv_shims(candidate):
+            continue
+        entries.append(candidate)
+    if not entries:
+        return None
+    return os.pathsep.join(entries)
+
+
+def _candidate_extensions() -> list[str]:
+    if os.name != "nt":
+        return [""]
+    pathext = os.environ.get("PATHEXT")
+    if not pathext:
+        return ["", ".exe", ".bat", ".cmd", ".com"]
+    extensions = [""]
+    for ext in pathext.split(os.pathsep):
+        normalized = ext.strip()
+        if not normalized:
+            continue
+        if not normalized.startswith("."):
+            normalized = f".{normalized}"
+        extensions.append(normalized.lower())
+    return extensions
+
+
+def _executable_candidates_from_path(command_names: list[str], search_path: str | None) -> list[str]:
+    if not search_path:
+        return []
+    candidates: list[str] = []
+    extensions = _candidate_extensions()
+    for directory in search_path.split(os.pathsep):
+        directory = directory.strip()
+        if not directory:
+            continue
+        try:
+            base = Path(directory)
+        except Exception:
+            continue
+        for name in command_names:
+            for extension in extensions:
+                candidate = base / (name + extension)
+                try:
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        try:
+                            resolved = candidate.resolve()
+                        except OSError:
+                            resolved = candidate
+                        candidates.append(str(resolved))
+                except OSError:
+                    continue
+    return candidates
+
+
+def _filter_existing_executables(raw_paths: Iterable[str]) -> list[str]:
+    filtered: list[str] = []
+    for path in raw_paths:
+        candidate = Path(path)
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                try:
+                    filtered.append(str(candidate.resolve()))
+                except OSError:
+                    filtered.append(str(candidate))
+        except OSError:
+            continue
+    return filtered
+
+
+def _executable_candidates_from_system_tools(command_names: list[str]) -> list[str]:
+    candidates: list[str] = []
+    system = platform.system().lower()
+    has_which = shutil.which("which") is not None
+    for name in command_names:
+        if system == "windows":
+            where_command = shutil.which("where")
+            if where_command:
+                try:
+                    result = subprocess.run(
+                        [where_command, name],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                except (FileNotFoundError, subprocess.CalledProcessError):
+                    pass
+                else:
+                    raw = [line.strip() for line in result.stdout.splitlines()]
+                    candidates.extend(_filter_existing_executables(raw))
+            continue
+
+        # POSIX-like systems
+        if has_which:
+            try:
+                result = subprocess.run(
+                    ["which", "-a", name],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                pass
+            else:
+                raw = [line.strip() for line in result.stdout.splitlines()]
+                candidates.extend(_filter_existing_executables(raw))
+
+        if system in {"linux", "freebsd"} and shutil.which("whereis"):
+            try:
+                result = subprocess.run(
+                    ["whereis", "-b", name],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                continue
+            raw_paths: list[str] = []
+            output = result.stdout.strip()
+            if output:
+                parts = output.split()
+                raw_paths.extend(part.strip().rstrip(":") for part in parts[1:])
+            candidates.extend(_filter_existing_executables(raw_paths))
+
+    return candidates
+
+
+def _deduplicate_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _resolve_cmake_executable() -> str | None:
+    explicit = os.environ.get("CMAKE_EXECUTABLE")
+    command_names = ["cmake", "cmake3"]
+    candidate_paths: list[str] = []
+    if explicit:
+        candidate_paths.append(explicit)
+    candidate_paths.extend(_executable_candidates_from_path(command_names, os.environ.get("PATH")))
+    filtered_path = _path_without_pyenv_shims()
+    if filtered_path:
+        candidate_paths.extend(_executable_candidates_from_path(command_names, filtered_path))
+    candidate_paths.extend(_executable_candidates_from_system_tools(command_names))
+
+    candidate_paths = _deduplicate_preserve_order(candidate_paths)
+    if candidate_paths:
+        listing = "\n".join(f"  - {path}" for path in candidate_paths)
+        sys.stderr.write(f"Found CMake candidates:\n{listing}\n")
+
+    for path in candidate_paths:
+        if _is_pyenv_python_shim(path):
+            _log_skipping_pyenv_shim(path)
+            continue
+        try:
+            subprocess.run(
+                [path, "--version"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError:
+            continue
+        except subprocess.CalledProcessError as exc:
+            _log_cmake_validation_failure(path, exc)
+            continue
+        sys.stderr.write(f"Validated CMake executable at {path}\n")
+        return path
+    return None
 
 
 _COMPILER_INITIALIZED = False
@@ -274,47 +496,59 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if not _has_built_library():
         env = os.environ.copy()
         build_succeeded = False
-        cmake_error: Exception | None = None
 
-        if shutil.which("cmake"):
+        cmake_executable = _resolve_cmake_executable()
+        if cmake_executable:
+            ninja_executable = shutil.which("ninja")
+            sys.stderr.write(f"Using CMake at {cmake_executable}\n")
+            cmake_args = [
+                cmake_executable,
+                "-S",
+                str(destination),
+                "-B",
+                str(build_dir),
+                "-DPCRE2_SUPPORT_JIT=ON",
+                "-DPCRE2_BUILD_PCRE2_8=ON",
+                "-DPCRE2_BUILD_TESTS=OFF",
+                "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
+                "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
+            ]
+            if ninja_executable:
+                cmake_args.extend(["-G", "Ninja"])
+                env.setdefault("CMAKE_MAKE_PROGRAM", ninja_executable)
+            if not _is_windows_platform():
+                cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
             try:
-                cmake_args = [
-                    "cmake",
-                    "-S",
-                    str(destination),
-                    "-B",
-                    str(build_dir),
-                    "-DPCRE2_SUPPORT_JIT=ON",
-                    "-DPCRE2_BUILD_PCRE2_8=ON",
-                    "-DPCRE2_BUILD_TESTS=OFF",
-                    "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
-                    "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
-                ]
-                if not _is_windows_platform():
-                    cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
                 subprocess.run(cmake_args, cwd=destination, env=env, check=True)
 
                 build_command = [
-                    "cmake",
+                    cmake_executable,
                     "--build",
                     str(build_dir),
                 ]
-                if _is_windows_platform():
-                    build_command.extend(["--config", "Release", "--parallel", "8"])
+                if _is_windows_platform() and not ninja_executable:
+                    build_command.extend(["--config", "Release"])
+
+                if ninja_executable:
+                    build_command.extend(["--parallel", "8"])
+                elif _is_windows_platform():
+                    build_command.extend(["--parallel", "8"])
                 else:
                     build_command.extend(["--", "-j8"])
                 subprocess.run(build_command, cwd=destination, env=env, check=True)
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-                cmake_error = exc
+                raise RuntimeError(
+                    "Failed to build PCRE2 from source using CMake; see the output above for details"
+                ) from exc
             else:
                 build_succeeded = True
-
-        if not build_succeeded:
+        else:
             autoconf_script = destination / "configure"
             autoconf_ready = autoconf_script.exists() and not _is_windows_platform()
 
             if autoconf_ready:
                 build_dir.mkdir(parents=True, exist_ok=True)
+                sys.stderr.write(f"Using AutoConf at {autoconf_script}\n")
                 try:
                     configure_command = [
                         str(autoconf_script),
@@ -336,10 +570,6 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     ) from exc
                 else:
                     build_succeeded = True
-            elif cmake_error is not None and isinstance(cmake_error, subprocess.CalledProcessError):
-                raise RuntimeError(
-                    "Failed to build PCRE2 from source; see the output above for details"
-                ) from cmake_error
 
         if not build_succeeded:
             raise RuntimeError(
