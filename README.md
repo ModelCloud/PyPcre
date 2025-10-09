@@ -5,14 +5,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 -->
 
-# Pcre (Python Pcre2 Binding)
+# PyPcre (Python Pcre2 Binding)
 
 Python bindings for the system PCRE2 library with a familiar `re`-style API.
 
 ## Installation
 
 ```bash
-pip install pcre
+pip install PyPcre
 ```
 
 The package links against the `libpcre2-8` variant already available on your
@@ -181,3 +181,14 @@ location.
 - All top-level helpers (`match`, `search`, `fullmatch`, `finditer`, `findall`) defer to the cached compiler.
 - Compiled `Pattern` objects expose `.pattern`, `.pattern_bytes`, `.flags`, and `.groupindex` for introspection.
 - Execution helpers accept `pos`, `endpos`, and `options`, allowing you to thread PCRE2 execution flags per call.
+
+## Memory allocation
+- The extension selects the fastest available allocator at import time: it
+  prefers tcmalloc, then jemalloc, and finally falls back to the platform
+  `malloc`. Optional allocators are loaded via `dlopen`, so no additional
+  link flags are required when they are absent.
+- All internal buffers (match data wrappers, JIT stack cache entries, error
+  formatting scratch space) use the chosen allocator; CPython’s `PyMem_*`
+  family is no longer used within the extension.
+- Call `pcre.cpcre2.get_allocator()` to inspect which backend is active at
+  runtime.

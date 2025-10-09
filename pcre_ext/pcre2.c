@@ -85,7 +85,7 @@ Match_dealloc(MatchObject *self)
     Py_XDECREF(self->pattern);
     Py_XDECREF(self->subject);
     Py_XDECREF(self->utf8_owner);
-    PyMem_Free(self->ovector);
+    pcre_free(self->ovector);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -943,7 +943,7 @@ create_match_object(PatternObject *pattern,
         return NULL;
     }
 
-    match->ovector = PyMem_Malloc(sizeof(Py_ssize_t) * ovec_count * 2);
+    match->ovector = pcre_malloc(sizeof(Py_ssize_t) * ovec_count * 2);
     if (match->ovector == NULL) {
         PyErr_NoMemory();
         PyObject_Del(match);
@@ -1867,6 +1867,7 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 }
 
 static PyObject *module_cpu_ascii_vector_mode(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
+static PyObject *module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 
 static PyMethodDef module_methods[] = {
     {"compile", (PyCFunction)module_compile, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Compile a pattern into a PCRE2 Pattern object." )},
@@ -1884,6 +1885,7 @@ static PyMethodDef module_methods[] = {
     {"get_jit_stack_cache_count", (PyCFunction)module_get_jit_stack_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached JIT stacks currently stored." )},
     {"get_jit_stack_limits", (PyCFunction)module_get_jit_stack_limits, METH_NOARGS, PyDoc_STR("Return the configured (start, max) JIT stack sizes." )},
     {"set_jit_stack_limits", (PyCFunction)module_set_jit_stack_limits, METH_VARARGS, PyDoc_STR("Set the (start, max) sizes for newly created JIT stacks." )},
+    {"get_allocator", (PyCFunction)module_memory_allocator, METH_NOARGS, PyDoc_STR("Return the name of the active heap allocator (tcmalloc/jemalloc/malloc)." )},
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
     {NULL, NULL, 0, NULL},
 };
@@ -1972,6 +1974,10 @@ PyInit_cpcre2(void)
         return NULL;
     }
 
+    if (pcre_memory_initialize() < 0) {
+        goto error;
+    }
+
     if (pcre_error_init(module) < 0) {
         goto error;
     }
@@ -2031,6 +2037,7 @@ PyInit_cpcre2(void)
     return module;
 
 error:
+    pcre_memory_teardown();
     cache_teardown();
     pcre_error_teardown();
     if (cpu_feature_lock != NULL) {
@@ -2053,4 +2060,11 @@ module_cpu_ascii_vector_mode(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(ar
 #else
     return PyLong_FromLong(0);
 #endif
+}
+
+static PyObject *
+module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    const char *name = pcre_memory_allocator_name();
+    return PyUnicode_FromString(name);
 }

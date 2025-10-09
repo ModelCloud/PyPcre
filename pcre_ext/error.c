@@ -1220,7 +1220,7 @@ macro_name_to_camel(const char *macro_name)
         new_component = 0;
     }
 
-    char *result = PyMem_Malloc(length + 1);
+    char *result = pcre_malloc(length + 1);
     if (result == NULL) {
         PyErr_NoMemory();
         return NULL;
@@ -1333,43 +1333,43 @@ register_pcre_error_types(PyObject *module)
 
         size_t camel_len = strlen(camel);
         size_t class_name_len = strlen("PcreError") + camel_len;
-        char *class_name = PyMem_Malloc(class_name_len + 1);
+        char *class_name = pcre_malloc(class_name_len + 1);
         if (class_name == NULL) {
             PyErr_NoMemory();
-            PyMem_Free(camel);
+            pcre_free(camel);
             goto error;
         }
         snprintf(class_name, class_name_len + 1, "PcreError%s", camel);
 
         size_t qual_name_len = strlen("pcre.") + class_name_len;
-        char *qual_name = PyMem_Malloc(qual_name_len + 1);
+        char *qual_name = pcre_malloc(qual_name_len + 1);
         if (qual_name == NULL) {
             PyErr_NoMemory();
-            PyMem_Free(class_name);
-            PyMem_Free(camel);
+            pcre_free(class_name);
+            pcre_free(camel);
             goto error;
         }
         snprintf(qual_name, qual_name_len + 1, "pcre.%s", class_name);
 
         PyObject *exc_type = PyErr_NewException(qual_name, PcreError, NULL);
-        PyMem_Free(qual_name);
-        PyMem_Free(camel);
+        pcre_free(qual_name);
+        pcre_free(camel);
         if (exc_type == NULL) {
-            PyMem_Free(class_name);
+            pcre_free(class_name);
             goto error;
         }
 
         PyObject *code_obj = PyLong_FromLong(info->code);
         if (code_obj == NULL) {
             Py_DECREF(exc_type);
-            PyMem_Free(class_name);
+            pcre_free(class_name);
             goto error;
         }
 
         if (PyObject_SetAttrString(exc_type, "code", code_obj) < 0) {
             Py_DECREF(code_obj);
             Py_DECREF(exc_type);
-            PyMem_Free(class_name);
+            pcre_free(class_name);
             goto error;
         }
 
@@ -1377,14 +1377,14 @@ register_pcre_error_types(PyObject *module)
         if (macro_str == NULL) {
             Py_DECREF(code_obj);
             Py_DECREF(exc_type);
-            PyMem_Free(class_name);
+            pcre_free(class_name);
             goto error;
         }
         if (PyObject_SetAttrString(exc_type, "macro", macro_str) < 0) {
             Py_DECREF(macro_str);
             Py_DECREF(code_obj);
             Py_DECREF(exc_type);
-            PyMem_Free(class_name);
+            pcre_free(class_name);
             goto error;
         }
         Py_DECREF(macro_str);
@@ -1393,14 +1393,14 @@ register_pcre_error_types(PyObject *module)
         if (contains < 0) {
             Py_DECREF(code_obj);
             Py_DECREF(exc_type);
-            PyMem_Free(class_name);
+            pcre_free(class_name);
             goto error;
         }
         if (!contains) {
             if (PyDict_SetItem(PcreErrorByCode, code_obj, exc_type) < 0) {
                 Py_DECREF(code_obj);
                 Py_DECREF(exc_type);
-                PyMem_Free(class_name);
+                pcre_free(class_name);
                 goto error;
             }
         }
@@ -1411,10 +1411,10 @@ register_pcre_error_types(PyObject *module)
             }
             Py_DECREF(code_obj);
             Py_DECREF(exc_type);
-            PyMem_Free(class_name);
+            pcre_free(class_name);
             goto error;
         }
-        PyMem_Free(class_name);
+        pcre_free(class_name);
         Py_DECREF(code_obj);
     }
 
