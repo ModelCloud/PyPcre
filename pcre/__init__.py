@@ -18,6 +18,7 @@ from typing import Any
 
 import pcre_ext_c as _backend
 
+
 pcre_ext_c = _backend
 from .cache import get_cache_limit, set_cache_limit
 from .flags import PY_ONLY_FLAG_MEMBERS
@@ -39,9 +40,7 @@ from .pcre import (
     sub,
     subn,
 )
-
-from .threads import configure_thread_pool, shutdown_thread_pool
-from .threads import configure_threads
+from .threads import configure_thread_pool, configure_threads, shutdown_thread_pool
 
 
 __version__ = getattr(_backend, "__version__", "0.0")

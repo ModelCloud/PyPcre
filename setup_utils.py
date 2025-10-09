@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 
@@ -21,35 +21,68 @@ from setuptools._distutils.errors import CCompilerError, DistutilsExecError
 from setuptools._distutils.sysconfig import customize_compiler
 
 
-ROOT_DIR = Path(__file__).resolve().parent
-PCRE_EXT_DIR = ROOT_DIR / "pcre_ext"
-PCRE2_REPO_URL = "https://github.com/PCRE2Project/pcre2.git"
-PCRE2_TAG = "pcre2-10.46"
+_PCRE_EXT_DIR: Path | None = None
+_PCRE2_REPO_URL: str | None = None
+_PCRE2_TAG: str | None = None
 
 
-MODULE_SOURCES = [
-    "pcre_ext/pcre2.c",
-    "pcre_ext/error.c",
-    "pcre_ext/cache.c",
-    "pcre_ext/flag.c",
-    "pcre_ext/util.c",
-    "pcre_ext/memory.c",
-]
+_LIB_EXTENSIONS: tuple[str, ...] = ()
+_LIBRARY_BASENAME: str | None = None
+_LIBRARY_SEARCH_PATTERNS: tuple[str, ...] = ()
 
-LIB_EXTENSIONS = [
-    ".so",
-    ".so.0",
-    ".so.1",
-    ".a",
-    ".dylib",
-    ".sl",
-]
 
-LIBRARY_BASENAME = "libpcre2-8"
+def configure_environment(
+    *,
+    pcre_ext_dir: Path,
+    repo_url: str,
+    repo_tag: str,
+    lib_extensions: Iterable[str],
+    library_basename: str,
+    library_search_patterns: Iterable[str],
+) -> None:
+    """Inject project-specific constants from setup.py."""
 
-RUNTIME_LIBRARY_FILES: list[str] = []
+    global _PCRE_EXT_DIR, _PCRE2_REPO_URL, _PCRE2_TAG
+    global _LIB_EXTENSIONS, _LIBRARY_BASENAME, _LIBRARY_SEARCH_PATTERNS
 
-__all__ = ["MODULE_SOURCES", "collect_build_config", "RUNTIME_LIBRARY_FILES"]
+    _PCRE_EXT_DIR = pcre_ext_dir
+    _PCRE2_REPO_URL = repo_url
+    _PCRE2_TAG = repo_tag
+    _LIB_EXTENSIONS = tuple(lib_extensions)
+    _LIBRARY_BASENAME = library_basename
+    _LIBRARY_SEARCH_PATTERNS = tuple(library_search_patterns)
+
+
+def _require_config(value: object, name: str) -> object:
+    if value is None or (isinstance(value, tuple) and not value):
+        raise RuntimeError(
+            f"setup_utils.configure_environment() must be called before accessing {name}"
+        )
+    return value
+
+
+def _get_pcre_ext_dir() -> Path:
+    return _require_config(_PCRE_EXT_DIR, "PCRE_EXT_DIR")  # type: ignore[return-value]
+
+
+def _get_repo_url() -> str:
+    return _require_config(_PCRE2_REPO_URL, "PCRE2_REPO_URL")  # type: ignore[return-value]
+
+
+def _get_repo_tag() -> str:
+    return _require_config(_PCRE2_TAG, "PCRE2_TAG")  # type: ignore[return-value]
+
+
+def _get_lib_extensions() -> tuple[str, ...]:
+    return _require_config(_LIB_EXTENSIONS, "LIB_EXTENSIONS")  # type: ignore[return-value]
+
+
+def _get_library_basename() -> str:
+    return _require_config(_LIBRARY_BASENAME, "LIBRARY_BASENAME")  # type: ignore[return-value]
+
+
+def _get_library_search_patterns() -> tuple[str, ...]:
+    return _require_config(_LIBRARY_SEARCH_PATTERNS, "LIBRARY_SEARCH_PATTERNS")  # type: ignore[return-value]
 
 
 def _run_pkg_config(*args: str) -> list[str]:
@@ -94,6 +127,228 @@ def _run_command(command: list[str]) -> str | None:
     return result.stdout.strip() or None
 
 
+def _log_cmake_validation_failure(path: str, error: subprocess.CalledProcessError) -> None:
+    message_parts = [
+        f"Detected CMake at {path} but `cmake --version` exited with {error.returncode}.",
+    ]
+    if error.stdout:
+        message_parts.append("stdout:\n" + error.stdout.rstrip())
+    if error.stderr:
+        message_parts.append("stderr:\n" + error.stderr.rstrip())
+    sys.stderr.write("\n".join(message_parts) + "\n")
+
+
+def _path_contains_pyenv_shims(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    return ".pyenv" in normalized and "/shims/" in normalized
+
+
+def _is_python_script(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            first_line = handle.readline().strip().lower()
+    except OSError:
+        return False
+    if not first_line.startswith(b"#!"):
+        return False
+    return b"python" in first_line
+
+
+def _is_pyenv_python_shim(path: str) -> bool:
+    return _path_contains_pyenv_shims(path) and _is_python_script(path)
+
+
+def _log_skipping_pyenv_shim(path: str) -> None:
+    sys.stderr.write(f"Ignoring pyenv CMake shim at {path}\n")
+
+
+def _path_without_pyenv_shims() -> str | None:
+    raw_path = os.environ.get("PATH")
+    if not raw_path:
+        return None
+    entries: list[str] = []
+    for part in raw_path.split(os.pathsep):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        if _path_contains_pyenv_shims(candidate):
+            continue
+        entries.append(candidate)
+    if not entries:
+        return None
+    return os.pathsep.join(entries)
+
+
+def _candidate_extensions() -> list[str]:
+    if os.name != "nt":
+        return [""]
+    pathext = os.environ.get("PATHEXT")
+    if not pathext:
+        return ["", ".exe", ".bat", ".cmd", ".com"]
+    extensions = [""]
+    for ext in pathext.split(os.pathsep):
+        normalized = ext.strip()
+        if not normalized:
+            continue
+        if not normalized.startswith("."):
+            normalized = f".{normalized}"
+        extensions.append(normalized.lower())
+    return extensions
+
+
+def _executable_candidates_from_path(command_names: list[str], search_path: str | None) -> list[str]:
+    if not search_path:
+        return []
+    candidates: list[str] = []
+    extensions = _candidate_extensions()
+    for directory in search_path.split(os.pathsep):
+        directory = directory.strip()
+        if not directory:
+            continue
+        try:
+            base = Path(directory)
+        except Exception:
+            continue
+        for name in command_names:
+            for extension in extensions:
+                candidate = base / (name + extension)
+                try:
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        try:
+                            resolved = candidate.resolve()
+                        except OSError:
+                            resolved = candidate
+                        candidates.append(str(resolved))
+                except OSError:
+                    continue
+    return candidates
+
+
+def _filter_existing_executables(raw_paths: Iterable[str]) -> list[str]:
+    filtered: list[str] = []
+    for path in raw_paths:
+        candidate = Path(path)
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                try:
+                    filtered.append(str(candidate.resolve()))
+                except OSError:
+                    filtered.append(str(candidate))
+        except OSError:
+            continue
+    return filtered
+
+
+def _executable_candidates_from_system_tools(command_names: list[str]) -> list[str]:
+    candidates: list[str] = []
+    system = platform.system().lower()
+    has_which = shutil.which("which") is not None
+    for name in command_names:
+        if system == "windows":
+            where_command = shutil.which("where")
+            if where_command:
+                try:
+                    result = subprocess.run(
+                        [where_command, name],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                except (FileNotFoundError, subprocess.CalledProcessError):
+                    pass
+                else:
+                    raw = [line.strip() for line in result.stdout.splitlines()]
+                    candidates.extend(_filter_existing_executables(raw))
+            continue
+
+        # POSIX-like systems
+        if has_which:
+            try:
+                result = subprocess.run(
+                    ["which", "-a", name],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                pass
+            else:
+                raw = [line.strip() for line in result.stdout.splitlines()]
+                candidates.extend(_filter_existing_executables(raw))
+
+        if system in {"linux", "freebsd"} and shutil.which("whereis"):
+            try:
+                result = subprocess.run(
+                    ["whereis", "-b", name],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                continue
+            raw_paths: list[str] = []
+            output = result.stdout.strip()
+            if output:
+                parts = output.split()
+                raw_paths.extend(part.strip().rstrip(":") for part in parts[1:])
+            candidates.extend(_filter_existing_executables(raw_paths))
+
+    return candidates
+
+
+def _deduplicate_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _resolve_cmake_executable() -> str | None:
+    explicit = os.environ.get("CMAKE_EXECUTABLE")
+    command_names = ["cmake", "cmake3"]
+    candidate_paths: list[str] = []
+    if explicit:
+        candidate_paths.append(explicit)
+    candidate_paths.extend(_executable_candidates_from_path(command_names, os.environ.get("PATH")))
+    filtered_path = _path_without_pyenv_shims()
+    if filtered_path:
+        candidate_paths.extend(_executable_candidates_from_path(command_names, filtered_path))
+    candidate_paths.extend(_executable_candidates_from_system_tools(command_names))
+
+    candidate_paths = _deduplicate_preserve_order(candidate_paths)
+    if candidate_paths:
+        listing = "\n".join(f"  - {path}" for path in candidate_paths)
+        sys.stderr.write(f"Found CMake candidates:\n{listing}\n")
+
+    for path in candidate_paths:
+        if _is_pyenv_python_shim(path):
+            _log_skipping_pyenv_shim(path)
+            continue
+        try:
+            subprocess.run(
+                [path, "--version"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError:
+            continue
+        except subprocess.CalledProcessError as exc:
+            _log_cmake_validation_failure(path, exc)
+            continue
+        sys.stderr.write(f"Validated CMake executable at {path}\n")
+        return path
+    return None
+
+
 _COMPILER_INITIALIZED = False
 _COMPILER_INSTANCE: CCompiler | None = None
 _COMPILER_FLAG_CACHE: dict[str, bool] = {}
@@ -123,6 +378,58 @@ def _is_wsl_environment() -> bool:
     return "microsoft" in release.lower()
 
 
+def _clean_previous_build(destination: Path, build_dir: Path, build_roots: list[Path]) -> None:
+    if not destination.exists():
+        return
+
+    env = os.environ.copy()
+    cleaned = False
+
+    if build_dir.exists():
+        cmake_cache = build_dir / "CMakeCache.txt"
+        cmake_executable = shutil.which("cmake")
+        if cmake_cache.exists() and cmake_executable:
+            cmake_command = ["cmake", "--build", str(build_dir), "--target", "clean"]
+            if _is_windows_platform():
+                cmake_command.extend(["--config", "Release"])
+            try:
+                subprocess.run(cmake_command, cwd=destination, env=env, check=True)
+            except subprocess.CalledProcessError:
+                pass
+            else:
+                cleaned = True
+
+        makefile_exists = any((build_dir / name).exists() for name in ("Makefile", "makefile"))
+        if makefile_exists and shutil.which("make"):
+            for target in ("clean", "distclean"):
+                try:
+                    subprocess.run(["make", target], cwd=build_dir, env=env, check=True)
+                except subprocess.CalledProcessError:
+                    continue
+                else:
+                    cleaned = True
+                    break
+
+    if not cleaned:
+        for candidate in (build_dir, destination / ".libs", destination / "src" / ".libs"):
+            if candidate.is_dir():
+                shutil.rmtree(candidate, ignore_errors=True)
+
+    patterns = _get_library_search_patterns()
+
+    for root in build_roots:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            for path in root.glob(pattern):
+                try:
+                    path.unlink()
+                except IsADirectoryError:
+                    shutil.rmtree(path, ignore_errors=True)
+                except FileNotFoundError:
+                    continue
+
+
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if _is_windows_platform() and not _is_wsl_environment():
         os.environ["PCRE2_BUILD_FROM_SOURCE"] = "1"
@@ -130,8 +437,9 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if not _is_truthy_env("PCRE2_BUILD_FROM_SOURCE"):
         return ([], [], [])
 
-    destination = PCRE_EXT_DIR / PCRE2_TAG
+    destination = _get_pcre_ext_dir() / _get_repo_tag()
     git_dir = destination / ".git"
+    repo_already_present = destination.exists()
 
     if destination.exists() and not git_dir.is_dir():
         raise RuntimeError(
@@ -145,10 +453,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             "--depth",
             "1",
             "--branch",
-            PCRE2_TAG,
+            _get_repo_tag(),
             "--recurse-submodules",
             "--shallow-submodules",
-            PCRE2_REPO_URL,
+            _get_repo_url(),
             str(destination),
         ]
         try:
@@ -188,6 +496,9 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         build_dir / "MinSizeRel",
     ]
 
+    if repo_already_present:
+        _clean_previous_build(destination, build_dir, build_roots)
+
     def _has_built_library() -> bool:
         patterns = [
             "libpcre2-8.so",
@@ -208,47 +519,59 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if not _has_built_library():
         env = os.environ.copy()
         build_succeeded = False
-        cmake_error: Exception | None = None
 
-        if shutil.which("cmake"):
+        cmake_executable = _resolve_cmake_executable()
+        if cmake_executable:
+            ninja_executable = shutil.which("ninja")
+            sys.stderr.write(f"Using CMake at {cmake_executable}\n")
+            cmake_args = [
+                cmake_executable,
+                "-S",
+                str(destination),
+                "-B",
+                str(build_dir),
+                "-DPCRE2_SUPPORT_JIT=ON",
+                "-DPCRE2_BUILD_PCRE2_8=ON",
+                "-DPCRE2_BUILD_TESTS=OFF",
+                "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
+                "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
+            ]
+            if ninja_executable:
+                cmake_args.extend(["-G", "Ninja"])
+                env.setdefault("CMAKE_MAKE_PROGRAM", ninja_executable)
+            if not _is_windows_platform():
+                cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
             try:
-                cmake_args = [
-                    "cmake",
-                    "-S",
-                    str(destination),
-                    "-B",
-                    str(build_dir),
-                    "-DPCRE2_SUPPORT_JIT=ON",
-                    "-DPCRE2_BUILD_PCRE2_8=ON",
-                    "-DPCRE2_BUILD_TESTS=OFF",
-                    "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
-                    "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
-                ]
-                if not _is_windows_platform():
-                    cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
                 subprocess.run(cmake_args, cwd=destination, env=env, check=True)
 
                 build_command = [
-                    "cmake",
+                    cmake_executable,
                     "--build",
                     str(build_dir),
                 ]
-                if _is_windows_platform():
-                    build_command.extend(["--config", "Release", "--parallel", "4"])
+                if _is_windows_platform() and not ninja_executable:
+                    build_command.extend(["--config", "Release"])
+
+                if ninja_executable:
+                    build_command.extend(["--parallel", "8"])
+                elif _is_windows_platform():
+                    build_command.extend(["--parallel", "8"])
                 else:
-                    build_command.extend(["--", "-j4"])
+                    build_command.extend(["--", "-j8"])
                 subprocess.run(build_command, cwd=destination, env=env, check=True)
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-                cmake_error = exc
+                raise RuntimeError(
+                    "Failed to build PCRE2 from source using CMake; see the output above for details"
+                ) from exc
             else:
                 build_succeeded = True
-
-        if not build_succeeded:
+        else:
             autoconf_script = destination / "configure"
             autoconf_ready = autoconf_script.exists() and not _is_windows_platform()
 
             if autoconf_ready:
                 build_dir.mkdir(parents=True, exist_ok=True)
+                sys.stderr.write(f"Using AutoConf at {autoconf_script}\n")
                 try:
                     configure_command = [
                         str(autoconf_script),
@@ -270,10 +593,6 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     ) from exc
                 else:
                     build_succeeded = True
-            elif cmake_error is not None and isinstance(cmake_error, subprocess.CalledProcessError):
-                raise RuntimeError(
-                    "Failed to build PCRE2 from source; see the output above for details"
-                ) from cmake_error
 
         if not build_succeeded:
             raise RuntimeError(
@@ -285,7 +604,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if header_source.exists() and not header_target.exists():
         shutil.copy2(header_source, header_target)
 
-    include_target = PCRE_EXT_DIR / "pcre2.h"
+    include_target = _get_pcre_ext_dir() / "pcre2.h"
     if header_target.exists():
         shutil.copy2(header_target, include_target)
 
@@ -332,22 +651,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         build_dir / "RelWithDebInfo",
         build_dir / "MinSizeRel",
     ]
-    search_patterns = [
-        f"**/{LIBRARY_BASENAME}.lib",
-        f"**/{LIBRARY_BASENAME}.a",
-        f"**/{LIBRARY_BASENAME}.so",
-        f"**/{LIBRARY_BASENAME}.so.*",
-        f"**/{LIBRARY_BASENAME}.dylib",
-        "**/pcre2-8.lib",
-        "**/pcre2-8.dll",
-        "**/pcre2-8-static.lib",
-        "**/pcre2-8-static.dll",
-    ]
-
     for root in search_roots:
         if not root.exists():
             continue
-        for pattern in search_patterns:
+        for pattern in _get_library_search_patterns():
             for path in root.glob(pattern):
                 _add_library_file(path)
 
@@ -608,14 +915,15 @@ def _library_exists(directory: Path) -> bool:
 def _locate_library_file(directory: Path) -> Path | None:
     if not directory.exists():
         return None
-    for extension in LIB_EXTENSIONS:
-        candidate = directory / f"{LIBRARY_BASENAME}{extension}"
+    basename = _get_library_basename()
+    for extension in _get_lib_extensions():
+        candidate = directory / f"{basename}{extension}"
         if candidate.exists():
             return candidate
-    for candidate in directory.glob(f"{LIBRARY_BASENAME}.so.*"):
+    for candidate in directory.glob(f"{basename}.so.*"):
         if candidate.exists():
             return candidate
-    fallback = directory / f"{LIBRARY_BASENAME}.dll"
+    fallback = directory / f"{basename}.dll"
     if fallback.exists():
         return fallback
     return None
@@ -707,150 +1015,43 @@ def _has_library(library_dirs: list[str]) -> bool:
     return False
 
 
-def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]]:
-    include_dirs: list[str] = []
-    library_dirs: list[str] = []
-    libraries: list[str] = []
-    extra_compile_args: list[str] = []
-    extra_link_args: list[str] = []
-    define_macros: list[tuple[str, str | None]] = []
-    library_files: list[str] = []
+# Public helper aliases imported by setup.py
+prepare_pcre2_source = _prepare_pcre2_source
+extend_unique = _extend_unique
+extend_env_paths = _extend_env_paths
+run_pkg_config = _run_pkg_config
+find_library_with_pkg_config = _find_library_with_pkg_config
+find_library_with_ldconfig = _find_library_with_ldconfig
+find_library_with_brew = _find_library_with_brew
+discover_library_dirs = _discover_library_dirs
+discover_include_dirs = _discover_include_dirs
+locate_library_file = _locate_library_file
+header_exists = _header_exists
+library_exists = _library_exists
+augment_compile_flags = _augment_compile_flags
+has_header = _has_header
+has_library = _has_library
+is_truthy_env = _is_truthy_env
+is_windows_platform = _is_windows_platform
 
-    source_include_dirs, source_library_dirs, source_library_files = _prepare_pcre2_source()
-    for directory in source_include_dirs:
-        _extend_unique(include_dirs, directory)
-    for directory in source_library_dirs:
-        _extend_unique(library_dirs, directory)
-    for path in source_library_files:
-        _extend_unique(library_files, path)
 
-    cflags = _run_pkg_config("--cflags")
-    libs = _run_pkg_config("--libs")
-
-    for flag in cflags:
-        if flag.startswith("-I") and len(flag) > 2:
-            _extend_unique(include_dirs, flag[2:])
-        elif flag.startswith("-D") and len(flag) > 2:
-            name_value = flag[2:].split("=", 1)
-            define_macros.append((name_value[0], name_value[1] if len(name_value) > 1 else None))
-        else:
-            extra_compile_args.append(flag)
-
-    for flag in libs:
-        if flag.startswith("-L") and len(flag) > 2:
-            _extend_unique(library_dirs, flag[2:])
-        elif flag.startswith("-l") and len(flag) > 2:
-            _extend_unique(libraries, flag[2:])
-        else:
-            extra_link_args.append(flag)
-
-    _extend_env_paths(include_dirs, "PCRE2_INCLUDE_DIR")
-
-    _extend_env_paths(library_dirs, "PCRE2_LIBRARY_DIR")
-
-    env_lib_path = os.environ.get("PCRE2_LIBRARY_PATH")
-    if env_lib_path:
-        for raw_path in env_lib_path.split(os.pathsep):
-            candidate = raw_path.strip()
-            if not candidate:
-                continue
-            path = Path(candidate)
-            if path.is_file() or any(candidate.endswith(ext) for ext in LIB_EXTENSIONS):
-                _extend_unique(library_files, str(path))
-                parent = str(path.parent)
-                if parent:
-                    _extend_unique(library_dirs, parent)
-            else:
-                _extend_unique(library_dirs, candidate)
-
-    _extend_env_paths(libraries, "PCRE2_LIBRARIES")
-
-    if not library_files:
-        for path in _find_library_with_pkg_config():
-            _extend_unique(library_files, path)
-
-    if not library_files:
-        directory_candidates = [Path(p) for p in library_dirs]
-        directory_candidates.extend(Path(p) for p in _discover_library_dirs())
-        for directory in directory_candidates:
-            located = _locate_library_file(directory)
-            if located is not None:
-                _extend_unique(library_files, str(located))
-                break
-
-    if not library_files:
-        for path in _find_library_with_ldconfig():
-            _extend_unique(library_files, path)
-
-    if not library_files:
-        for path in _find_library_with_brew():
-            _extend_unique(library_files, path)
-
-    env_cflags = os.environ.get("PCRE2_CFLAGS")
-    if env_cflags:
-        extra_compile_args.extend(shlex.split(env_cflags))
-
-    env_ldflags = os.environ.get("PCRE2_LDFLAGS")
-    if env_ldflags:
-        extra_link_args.extend(shlex.split(env_ldflags))
-
-    if not _is_windows_platform() and not any(flag.startswith("-std=") for flag in extra_compile_args):
-        extra_compile_args.append("-std=c99")
-
-    if not _has_header(include_dirs):
-        include_dirs.extend(_discover_include_dirs())
-
-    if not _has_library(library_dirs):
-        library_dirs.extend(_discover_library_dirs())
-
-    global RUNTIME_LIBRARY_FILES
-    runtime_libraries: list[str] = []
-
-    if library_files:
-        for runtime_path in library_files:
-            lower_name = runtime_path.lower()
-            if lower_name.endswith(".dll") or lower_name.endswith(".dylib") or ".so" in Path(runtime_path).name:
-                _extend_unique(runtime_libraries, runtime_path)
-
-        linkable_files: list[str] = []
-        for path in library_files:
-            suffix = Path(path).suffix.lower()
-            if suffix == ".dll":
-                continue
-            linkable_files.append(path)
-
-        if linkable_files:
-            libraries = [lib for lib in libraries if lib != "pcre2-8"]
-            for path in linkable_files:
-                _extend_unique(extra_link_args, path)
-                parent = str(Path(path).parent)
-                if parent:
-                    _extend_unique(library_dirs, parent)
-        elif "pcre2-8" not in libraries:
-            libraries.append("pcre2-8")
-    elif "pcre2-8" not in libraries:
-        libraries.append("pcre2-8")
-
-    if sys.platform.startswith("linux") and "dl" not in libraries:
-        libraries.append("dl")
-
-    if _is_windows_platform():
-        has_runtime_dll = any(path.lower().endswith(".dll") for path in runtime_libraries)
-        force_static_env = _is_truthy_env("PCRE2_FORCE_STATIC")
-        if (force_static_env or (library_files and not has_runtime_dll)) and not any(
-            macro[0] == "PCRE2_STATIC" for macro in define_macros
-        ):
-            define_macros.append(("PCRE2_STATIC", "1"))
-
-    _augment_compile_flags(extra_compile_args)
-
-    RUNTIME_LIBRARY_FILES = runtime_libraries
-
-    return {
-        "include_dirs": include_dirs,
-        "library_dirs": library_dirs,
-        "libraries": libraries,
-        "extra_compile_args": extra_compile_args,
-        "extra_link_args": extra_link_args,
-        "define_macros": define_macros,
-    }
+__all__ = [
+    "configure_environment",
+    "prepare_pcre2_source",
+    "extend_unique",
+    "extend_env_paths",
+    "run_pkg_config",
+    "find_library_with_pkg_config",
+    "find_library_with_ldconfig",
+    "find_library_with_brew",
+    "discover_library_dirs",
+    "discover_include_dirs",
+    "locate_library_file",
+    "header_exists",
+    "library_exists",
+    "augment_compile_flags",
+    "has_header",
+    "has_library",
+    "is_truthy_env",
+    "is_windows_platform",
+]

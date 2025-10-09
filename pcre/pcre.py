@@ -13,6 +13,7 @@ from re import _parser
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
+
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
 from .flags import (
