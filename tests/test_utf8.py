@@ -6,9 +6,10 @@
 import unittest
 
 import pcre
+import pcre_ext_c
 
 
-BACKEND = getattr(pcre, "cpcre2", getattr(pcre, "_pcre2", None))
+BACKEND = pcre_ext_c
 BACKEND_IS_FALLBACK = getattr(BACKEND, "__name__", "") == "pcre._fallback"
 
 

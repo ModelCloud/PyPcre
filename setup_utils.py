@@ -15,14 +15,10 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-try:
-    from setuptools._distutils.ccompiler import CCompiler, new_compiler
-    from setuptools._distutils.errors import CCompilerError, DistutilsExecError
-    from setuptools._distutils.sysconfig import customize_compiler
-except ImportError:  # pragma: no cover - fallback for older Python environments
-    from distutils.ccompiler import CCompiler, new_compiler  # type: ignore
-    from distutils.errors import CCompilerError, DistutilsExecError  # type: ignore
-    from distutils.sysconfig import customize_compiler  # type: ignore
+
+from setuptools._distutils.ccompiler import CCompiler, new_compiler
+from setuptools._distutils.errors import CCompilerError, DistutilsExecError
+from setuptools._distutils.sysconfig import customize_compiler
 
 
 ROOT_DIR = Path(__file__).resolve().parent

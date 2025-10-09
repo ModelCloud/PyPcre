@@ -20,7 +20,7 @@ from setup_utils import MODULE_SOURCES, RUNTIME_LIBRARY_FILES, collect_build_con
 
 
 EXTENSION = Extension(
-    name="pcre.cpcre2",
+    name="pcre_ext_c",
     sources=MODULE_SOURCES,
     **collect_build_config(),
 )

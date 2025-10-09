@@ -208,5 +208,5 @@ location.
 - All internal buffers (match data wrappers, JIT stack cache entries, error
   formatting scratch space) use the chosen allocator; CPython’s `PyMem_*`
   family is no longer used within the extension.
-- Call `pcre.cpcre2.get_allocator()` to inspect which backend is active at
+- Call `pcre_ext_c.get_allocator()` to inspect which backend is active at
   runtime.

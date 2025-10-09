@@ -12,7 +12,7 @@ import re as _std_re
 from re import _parser
 from typing import Any, List
 
-from . import cpcre2 as _pcre2
+import pcre_ext_c as _pcre2
 
 
 _CRawMatch = _pcre2.Match

@@ -6,7 +6,7 @@
 """High level Python bindings for PCRE2.
 
 This package exposes a Pythonic API on top of the low-level C extension found in
-``pcre.cpcre2``. The wrapper keeps friction low compared to :mod:`re` while
+``pcre_ext_c``. The wrapper keeps friction low compared to :mod:`re` while
 surfacing PCRE2-specific flags and behaviours.
 """
 
@@ -16,7 +16,9 @@ import re as _std_re
 from enum import IntEnum, IntFlag
 from typing import Any
 
-from . import cpcre2
+import pcre_ext_c as _backend
+
+pcre_ext_c = _backend
 from .cache import get_cache_limit, set_cache_limit
 from .flags import PY_ONLY_FLAG_MEMBERS
 from .pcre import (
@@ -42,17 +44,17 @@ from .threads import configure_thread_pool, shutdown_thread_pool
 from .threads import configure_threads
 
 
-__version__ = getattr(cpcre2, "__version__", "0.0")
+__version__ = getattr(_backend, "__version__", "0.0")
 
-_cpu_ascii_vector_mode = getattr(cpcre2, "_cpu_ascii_vector_mode", None)
+_cpu_ascii_vector_mode = getattr(_backend, "_cpu_ascii_vector_mode", None)
 
 _FLAG_MEMBERS: dict[str, int] = {}
 _ERROR_CODE_MEMBERS: dict[str, int] = {}
 
-for _name in dir(cpcre2):
+for _name in dir(_backend):
     if not _name.startswith("PCRE2_"):
         continue
-    _value = getattr(cpcre2, _name)
+    _value = getattr(_backend, _name)
     if not isinstance(_value, int):
         continue
 
@@ -94,9 +96,9 @@ PcreError.error_code = property(_error_code_property)
 
 
 _EXPORTED_ERROR_CLASSES: list[str] = []
-for _name in dir(cpcre2):
+for _name in dir(_backend):
     if _name.startswith("PcreError") and _name != "PcreError":
-        globals()[_name] = getattr(cpcre2, _name)
+        globals()[_name] = getattr(_backend, _name)
         _EXPORTED_ERROR_CLASSES.append(_name)
 
 

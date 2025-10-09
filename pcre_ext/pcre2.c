@@ -2031,7 +2031,7 @@ static PyMethodDef module_methods[] = {
 
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
-    .m_name = "pcre.cpcre2",
+    .m_name = "pcre_ext_c",
     .m_doc = "Low-level bindings to the PCRE2 regular expression engine.",
     .m_size = -1,
     .m_methods = module_methods,
@@ -2096,7 +2096,7 @@ detect_offset_limit_support(void)
 }
 
 PyMODINIT_FUNC
-PyInit_cpcre2(void)
+PyInit_pcre_ext_c(void)
 {
     if (PyType_Ready(&PatternType) < 0) {
         return NULL;
