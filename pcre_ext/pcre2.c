@@ -13,6 +13,23 @@
 #define STRINGIFY_DETAIL(value) #value
 #define STRINGIFY(value) STRINGIFY_DETAIL(value)
 
+static const char *
+resolve_pcre2_prerelease(void)
+{
+    const char *raw = STRINGIFY(Z PCRE2_PRERELEASE);
+
+    if (raw[1] == '\0') {
+        return "";
+    }
+
+    raw += 1;
+    while (*raw == ' ') {
+        raw++;
+    }
+
+    return raw;
+}
+
 static int default_jit_enabled = 1;
 static PyThread_type_lock default_jit_lock = NULL;
 static PyThread_type_lock cpu_feature_lock = NULL;
@@ -2105,7 +2122,7 @@ initialize_pcre2_version(void)
         strncpy(pcre2_library_version, buffer, sizeof(pcre2_library_version) - 1);
         pcre2_library_version[sizeof(pcre2_library_version) - 1] = '\0';
     } else {
-        const char *pre_release = STRINGIFY(PCRE2_PRERELEASE);
+        const char *pre_release = resolve_pcre2_prerelease();
         if (pre_release[0] != '\0') {
             (void)snprintf(
                 pcre2_library_version,
