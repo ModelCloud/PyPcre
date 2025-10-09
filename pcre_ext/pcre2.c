@@ -11,6 +11,71 @@
 #endif
 
 static int default_jit_enabled = 1;
+static PyThread_type_lock default_jit_lock = NULL;
+static PyThread_type_lock cpu_feature_lock = NULL;
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+static int offset_limit_support = -1;
+#endif
+
+static void detect_offset_limit_support(void);
+
+static inline int
+default_jit_get(void)
+{
+    if (default_jit_lock == NULL) {
+        return default_jit_enabled;
+    }
+    PyThread_acquire_lock(default_jit_lock, 1);
+    int value = default_jit_enabled;
+    PyThread_release_lock(default_jit_lock);
+    return value;
+}
+
+static inline void
+default_jit_set(int value)
+{
+    if (default_jit_lock == NULL) {
+        default_jit_enabled = value;
+        return;
+    }
+    PyThread_acquire_lock(default_jit_lock, 1);
+    default_jit_enabled = value;
+    PyThread_release_lock(default_jit_lock);
+}
+
+static inline int
+pattern_jit_get(PatternObject *pattern)
+{
+    if (pattern->jit_lock != NULL) {
+        PyThread_acquire_lock(pattern->jit_lock, 1);
+        int value = pattern->jit_enabled;
+        PyThread_release_lock(pattern->jit_lock);
+        return value;
+    }
+    return pattern->jit_enabled;
+}
+
+static inline void
+pattern_jit_set(PatternObject *pattern, int value)
+{
+    if (pattern->jit_lock != NULL) {
+        PyThread_acquire_lock(pattern->jit_lock, 1);
+        pattern->jit_enabled = value;
+        PyThread_release_lock(pattern->jit_lock);
+        return;
+    }
+    pattern->jit_enabled = value;
+}
+
+static inline int
+offset_limit_option_enabled(void)
+{
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    return offset_limit_support == 1;
+#else
+    return 0;
+#endif
+}
 
 
 /* Match type */
@@ -351,10 +416,11 @@ static inline int
 ascii_vector_mode(void)
 {
     static int cached = -1;
-    if (cached != -1) {
-        return cached;
+    if (cpu_feature_lock != NULL) {
+        PyThread_acquire_lock(cpu_feature_lock, 1);
     }
-    cached = 0;
+    if (cached == -1) {
+        cached = 0;
 #if defined(__has_builtin)
 #  if __has_builtin(__builtin_cpu_supports)
 #    define PCRE_HAVE_CPU_SUPPORTS 1
@@ -365,15 +431,20 @@ ascii_vector_mode(void)
 #  endif
 #endif
 #if defined(PCRE_HAVE_CPU_SUPPORTS)
-    if (__builtin_cpu_supports("avx512bw")) {
-        cached = 3;
+        if (__builtin_cpu_supports("avx512bw")) {
+            cached = 3;
     } else if (__builtin_cpu_supports("avx2")) {
         cached = 2;
     } else if (__builtin_cpu_supports("sse2")) {
-        cached = 1;
-    }
+            cached = 1;
+        }
 #endif
-    return cached;
+    }
+    int result = cached;
+    if (cpu_feature_lock != NULL) {
+        PyThread_release_lock(cpu_feature_lock);
+    }
+    return result;
 }
 
 #if defined(__GNUC__)
@@ -697,8 +768,16 @@ FindIter_iternext(FindIterObject *self)
     const char *buffer = self->utf8_data;
     uint32_t options = self->base_options;
     int rc = 0;
+    PCRE2_SIZE exec_length = (PCRE2_SIZE)self->subject_length_bytes;
 
-    if (self->pattern->jit_enabled) {
+    if (self->has_endpos && self->resolved_end_byte < self->subject_length_bytes && !offset_limit_option_enabled()) {
+        exec_length = (PCRE2_SIZE)self->resolved_end_byte;
+        if (exec_length < (PCRE2_SIZE)self->current_byte) {
+            exec_length = (PCRE2_SIZE)self->current_byte;
+        }
+    }
+
+    if (pattern_jit_get(self->pattern)) {
         if (self->match_context == NULL) {
             self->match_context = pcre2_match_context_create(NULL);
             if (self->match_context == NULL) {
@@ -717,15 +796,15 @@ FindIter_iternext(FindIterObject *self)
         Py_BEGIN_ALLOW_THREADS
         rc = pcre2_jit_match(self->pattern->code,
                              (PCRE2_SPTR)buffer,
-                             (PCRE2_SIZE)self->subject_length_bytes,
+                             exec_length,
                              (PCRE2_SIZE)self->current_byte,
                              options,
                              self->match_data,
                              self->match_context);
         Py_END_ALLOW_THREADS
 
-        if (rc == PCRE2_ERROR_JIT_BADOPTION) {
-            self->pattern->jit_enabled = 0;
+        if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
+            pattern_jit_set(self->pattern, 0);
             if (self->jit_stack != NULL) {
                 if (self->match_context != NULL) {
                     pcre2_jit_stack_assign(self->match_context, NULL, NULL);
@@ -745,7 +824,7 @@ FindIter_iternext(FindIterObject *self)
     Py_BEGIN_ALLOW_THREADS
     rc = pcre2_match(self->pattern->code,
                      (PCRE2_SPTR)buffer,
-                     (PCRE2_SIZE)self->subject_length_bytes,
+                     exec_length,
                      (PCRE2_SIZE)self->current_byte,
                      options,
                      self->match_data,
@@ -1021,7 +1100,11 @@ Pattern_create_finditer(PatternObject *pattern,
         goto error;
     }
 
-    if (pattern->jit_enabled || (has_endpos && resolved_end_byte != iter->subject_length_bytes)) {
+    int pattern_jit_enabled = pattern_jit_get(pattern);
+    int need_offset_limit = (has_endpos && resolved_end_byte != iter->subject_length_bytes);
+    int use_offset_limit = need_offset_limit && offset_limit_option_enabled();
+
+    if (pattern_jit_enabled || use_offset_limit) {
         match_context = pcre2_match_context_create(NULL);
         if (match_context == NULL) {
             PyErr_NoMemory();
@@ -1029,26 +1112,20 @@ Pattern_create_finditer(PatternObject *pattern,
         }
     }
 
-    if (has_endpos && resolved_end_byte != iter->subject_length_bytes) {
-        if (match_context == NULL) {
-            match_context = pcre2_match_context_create(NULL);
-            if (match_context == NULL) {
-                PyErr_NoMemory();
-                goto error;
-            }
-        }
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    if (use_offset_limit) {
         int ctx_rc = pcre2_set_offset_limit(match_context, (PCRE2_SIZE)resolved_end_byte);
         if (ctx_rc < 0) {
-            if (match_context != NULL) {
-                pcre2_match_context_free(match_context);
-            }
+            pcre2_match_context_free(match_context);
             match_context = NULL;
             raise_pcre_error("set_offset_limit", ctx_rc, 0);
             goto error;
         }
+        iter->base_options |= PCRE2_USE_OFFSET_LIMIT;
     }
+#endif
 
-    if (pattern->jit_enabled) {
+    if (pattern_jit_enabled) {
         if (match_context == NULL) {
             match_context = pcre2_match_context_create(NULL);
             if (match_context == NULL) {
@@ -1103,6 +1180,10 @@ typedef enum {
 static void
 Pattern_dealloc(PatternObject *self)
 {
+    if (self->jit_lock != NULL) {
+        PyThread_free_lock(self->jit_lock);
+        self->jit_lock = NULL;
+    }
     if (self->code != NULL) {
         pcre2_code_free(self->code);
         self->code = NULL;
@@ -1142,7 +1223,7 @@ Pattern_get_flags(PatternObject *self, void *closure)
 static PyObject *
 Pattern_get_jit(PatternObject *self, void *closure)
 {
-    if (self->jit_enabled) {
+    if (pattern_jit_get(self)) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
@@ -1292,7 +1373,16 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     pcre2_match_context *match_context = NULL;
     pcre2_jit_stack *jit_stack = NULL;
     int using_jit_stack = 0;
-    if (offset_limit != (PCRE2_SIZE)subject_length_bytes) {
+    PCRE2_SIZE exec_length = (PCRE2_SIZE)subject_length_bytes;
+    int need_offset_limit = (offset_limit != (PCRE2_SIZE)subject_length_bytes);
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    int use_offset_limit_option = need_offset_limit && offset_limit_option_enabled();
+#else
+    int use_offset_limit_option = 0;
+#endif
+
+    if (use_offset_limit_option) {
+#if defined(PCRE2_USE_OFFSET_LIMIT)
         match_context = pcre2_match_context_create(NULL);
         if (match_context == NULL) {
             match_data_cache_release(match_data);
@@ -1308,11 +1398,20 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             raise_pcre_error("set_offset_limit", ctx_rc, 0);
             return NULL;
         }
+        match_options |= PCRE2_USE_OFFSET_LIMIT;
+#endif
+    } else if (need_offset_limit) {
+        exec_length = offset_limit;
+        if (exec_length < (PCRE2_SIZE)byte_start) {
+            exec_length = (PCRE2_SIZE)byte_start;
+        }
     }
 
     int rc = 0;
 
-    if (self->jit_enabled) {
+    int attempt_jit = pattern_jit_get(self);
+
+    if (attempt_jit) {
         if (match_context == NULL) {
             match_context = pcre2_match_context_create(NULL);
             if (match_context == NULL) {
@@ -1338,7 +1437,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         Py_BEGIN_ALLOW_THREADS
         rc = pcre2_jit_match(self->code,
                               (PCRE2_SPTR)buffer,
-                              (PCRE2_SIZE)subject_length_bytes,
+                              exec_length,
                               (PCRE2_SIZE)byte_start,
                               match_options,
                               match_data,
@@ -1351,8 +1450,8 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             using_jit_stack = 0;
         }
 
-        if (rc == PCRE2_ERROR_JIT_BADOPTION) {
-            self->jit_enabled = 0;
+        if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
+            pattern_jit_set(self, 0);
         } else if (rc != PCRE2_ERROR_NOMATCH && rc < 0) {
             PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
             match_data_cache_release(match_data);
@@ -1365,11 +1464,11 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         }
     }
 
-    if (!self->jit_enabled) {
+    if (!pattern_jit_get(self)) {
         Py_BEGIN_ALLOW_THREADS
         rc = pcre2_match(self->code,
                          (PCRE2_SPTR)buffer,
-                         (PCRE2_SIZE)subject_length_bytes,
+                         exec_length,
                          (PCRE2_SIZE)byte_start,
                          match_options,
                          match_data,
@@ -1549,13 +1648,29 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
         return NULL;
     }
 
+    pattern->code = NULL;
+    pattern->pattern = NULL;
+    pattern->pattern_bytes = NULL;
+    pattern->groupindex = NULL;
+    pattern->jit_lock = NULL;
+    pattern->jit_enabled = 0;
+
+    pattern->jit_lock = PyThread_allocate_lock();
+    if (pattern->jit_lock == NULL) {
+        PyErr_NoMemory();
+        PyObject_Del(pattern);
+        pcre2_code_free(code);
+        Py_DECREF(pattern_bytes);
+        return NULL;
+    }
+
     pattern->code = code;
     Py_INCREF(pattern_obj);
     pattern->pattern = pattern_obj;
     pattern->pattern_bytes = pattern_bytes;
     pattern->pattern_is_bytes = is_bytes;
     pattern->compile_options = compile_options;
-    pattern->jit_enabled = 0;
+    pattern_jit_set(pattern, 0);
 
     uint32_t capture_count = 0;
     if (pcre2_pattern_info(code, PCRE2_INFO_CAPTURECOUNT, &capture_count) != 0) {
@@ -1572,12 +1687,12 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     if (jit) {
         int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
         if (jit_rc == 0) {
-            pattern->jit_enabled = 1;
+            pattern_jit_set(pattern, 1);
         } else if (jit_rc == PCRE2_ERROR_JIT_BADOPTION) {
-            pattern->jit_enabled = 0;
+            pattern_jit_set(pattern, 0);
 #ifdef PCRE2_ERROR_JIT_UNSUPPORTED
         } else if (!jit_explicit && jit_rc == PCRE2_ERROR_JIT_UNSUPPORTED) {
-            pattern->jit_enabled = 0;
+            pattern_jit_set(pattern, 0);
 #endif
         } else {
             Py_DECREF(pattern);
@@ -1602,7 +1717,8 @@ module_compile(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
     int jit = 0;
     int jit_explicit = 0;
-    if (coerce_jit_argument(jit_obj, default_jit_enabled, &jit, &jit_explicit) < 0) {
+    int current_default = default_jit_get();
+    if (coerce_jit_argument(jit_obj, current_default, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
@@ -1635,7 +1751,8 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
     int jit = 0;
     int jit_explicit = 0;
-    if (coerce_jit_argument(jit_obj, default_jit_enabled, &jit, &jit_explicit) < 0) {
+    int current_default = default_jit_get();
+    if (coerce_jit_argument(jit_obj, current_default, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
@@ -1669,7 +1786,8 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
     int jit = 0;
     int jit_explicit = 0;
-    if (coerce_jit_argument(jit_obj, default_jit_enabled, &jit, &jit_explicit) < 0) {
+    int current_default = default_jit_get();
+    if (coerce_jit_argument(jit_obj, current_default, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
@@ -1703,7 +1821,8 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
     int jit = 0;
     int jit_explicit = 0;
-    if (coerce_jit_argument(jit_obj, default_jit_enabled, &jit, &jit_explicit) < 0) {
+    int current_default = default_jit_get();
+    if (coerce_jit_argument(jit_obj, current_default, &jit, &jit_explicit) < 0) {
         return NULL;
     }
 
@@ -1734,13 +1853,14 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 
     if (jit_obj != Py_None) {
         int jit = 0;
-        if (coerce_jit_argument(jit_obj, default_jit_enabled, &jit, NULL) < 0) {
+        int current_default = default_jit_get();
+        if (coerce_jit_argument(jit_obj, current_default, &jit, NULL) < 0) {
             return NULL;
         }
-        default_jit_enabled = jit;
+        default_jit_set(jit);
     }
 
-    if (default_jit_enabled) {
+    if (default_jit_get()) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;
@@ -1779,6 +1899,61 @@ static struct PyModuleDef moduledef = {
 #endif
 };
 
+static void
+detect_offset_limit_support(void)
+{
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    if (offset_limit_support != -1) {
+        return;
+    }
+
+    int error_code = 0;
+    PCRE2_SIZE error_offset = 0;
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)".", 1, 0, &error_code, &error_offset, NULL);
+    if (code == NULL) {
+        offset_limit_support = 0;
+        return;
+    }
+
+    pcre2_match_data *match_data = pcre2_match_data_create(2, NULL);
+    if (match_data == NULL) {
+        pcre2_code_free(code);
+        offset_limit_support = 0;
+        return;
+    }
+
+    pcre2_match_context *match_context = pcre2_match_context_create(NULL);
+    if (match_context == NULL) {
+        pcre2_match_data_free(match_data);
+        pcre2_code_free(code);
+        offset_limit_support = 0;
+        return;
+    }
+
+    int rc = pcre2_set_offset_limit(match_context, 0);
+    if (rc < 0) {
+        offset_limit_support = 0;
+    } else {
+        rc = pcre2_match(code,
+                         (PCRE2_SPTR)"a",
+                         1,
+                         0,
+                         PCRE2_USE_OFFSET_LIMIT,
+                         match_data,
+                         match_context);
+        if (rc == PCRE2_ERROR_BADOPTION) {
+            offset_limit_support = 0;
+        } else {
+            offset_limit_support = 1;
+        }
+    }
+
+    pcre2_match_context_free(match_context);
+    pcre2_match_data_free(match_data);
+    pcre2_code_free(code);
+#endif
+}
+
 PyMODINIT_FUNC
 PyInit_cpcre2(void)
 {
@@ -1803,6 +1978,24 @@ PyInit_cpcre2(void)
 
     if (cache_initialize() < 0) {
         goto error;
+    }
+
+    detect_offset_limit_support();
+
+    if (default_jit_lock == NULL) {
+        default_jit_lock = PyThread_allocate_lock();
+        if (default_jit_lock == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+    }
+
+    if (cpu_feature_lock == NULL) {
+        cpu_feature_lock = PyThread_allocate_lock();
+        if (cpu_feature_lock == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
     }
 
     Py_INCREF(&PatternType);
@@ -1840,6 +2033,14 @@ PyInit_cpcre2(void)
 error:
     cache_teardown();
     pcre_error_teardown();
+    if (cpu_feature_lock != NULL) {
+        PyThread_free_lock(cpu_feature_lock);
+        cpu_feature_lock = NULL;
+    }
+    if (default_jit_lock != NULL) {
+        PyThread_free_lock(default_jit_lock);
+        default_jit_lock = NULL;
+    }
     Py_DECREF(module);
     return NULL;
 }

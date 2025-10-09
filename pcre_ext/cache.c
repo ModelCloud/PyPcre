@@ -272,6 +272,8 @@ pcre2_jit_stack *
 jit_stack_cache_acquire(void)
 {
     pcre2_jit_stack *stack = NULL;
+    size_t start_size = 0;
+    size_t max_size = 0;
 
     if (jit_stack_cache_lock != NULL) {
         PyThread_acquire_lock(jit_stack_cache_lock, 1);
@@ -287,6 +289,9 @@ jit_stack_cache_acquire(void)
         PyMem_Free(entry);
     }
 
+    start_size = jit_stack_start_size;
+    max_size = jit_stack_max_size;
+
     if (jit_stack_cache_lock != NULL) {
         PyThread_release_lock(jit_stack_cache_lock);
     }
@@ -295,7 +300,7 @@ jit_stack_cache_acquire(void)
         return stack;
     }
 
-    return pcre2_jit_stack_create(jit_stack_start_size, jit_stack_max_size, NULL);
+    return pcre2_jit_stack_create(start_size, max_size, NULL);
 }
 
 void
@@ -343,7 +348,19 @@ jit_stack_cache_release(pcre2_jit_stack *jit_stack)
 PyObject *
 module_get_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    return PyLong_FromUnsignedLong((unsigned long)match_data_cache_capacity);
+    unsigned long value = 0;
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_acquire_lock(match_data_cache_lock, 1);
+    }
+
+    value = match_data_cache_capacity;
+
+    if (match_data_cache_lock != NULL) {
+        PyThread_release_lock(match_data_cache_lock);
+    }
+
+    return PyLong_FromUnsignedLong(value);
 }
 
 PyObject *
@@ -408,7 +425,19 @@ module_get_match_data_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUS
 PyObject *
 module_get_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    return PyLong_FromUnsignedLong((unsigned long)jit_stack_cache_capacity);
+    unsigned long value = 0;
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    value = jit_stack_cache_capacity;
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+
+    return PyLong_FromUnsignedLong(value);
 }
 
 PyObject *
@@ -473,7 +502,21 @@ module_get_jit_stack_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSE
 PyObject *
 module_get_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    return Py_BuildValue("kk", (unsigned long)jit_stack_start_size, (unsigned long)jit_stack_max_size);
+    unsigned long start = 0;
+    unsigned long max = 0;
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_acquire_lock(jit_stack_cache_lock, 1);
+    }
+
+    start = (unsigned long)jit_stack_start_size;
+    max = (unsigned long)jit_stack_max_size;
+
+    if (jit_stack_cache_lock != NULL) {
+        PyThread_release_lock(jit_stack_cache_lock);
+    }
+
+    return Py_BuildValue("kk", start, max);
 }
 
 PyObject *

@@ -5,11 +5,24 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 import time
 from pathlib import Path
 from typing import Dict
 
-from pcre import cpcre2
+try:
+    from pcre import cpcre2
+except ImportError:
+    # Allow direct execution without installing the package by injecting the project root.
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    module = sys.modules.get("pcre")
+    if module is not None:
+        module_file = getattr(module, "__file__", "") or ""
+        if not module_file.startswith(str(project_root)):
+            sys.modules.pop("pcre", None)
+    from pcre import cpcre2
 
 _SUBJECT_BUILDERS = {
     "ascii": lambda n: "a" * n,
@@ -17,7 +30,7 @@ _SUBJECT_BUILDERS = {
     "2byte": lambda n: "\u0100" * n,
     "4byte": lambda n: "\U0001f600" * n,
 }
-_LENGTHS = (5000, 20000)
+_LENGTHS = (128, 64000)
 _BASE_ITERATIONS = 5  # legacy default used for averaging
 _REQUIRED_MULTIPLIER = 5
 _MIN_ITERATIONS = 50

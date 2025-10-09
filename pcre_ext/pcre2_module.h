@@ -26,6 +26,7 @@ typedef struct {
     uint32_t compile_options;
     uint32_t capture_count;
     int pattern_is_bytes;
+    PyThread_type_lock jit_lock;
     int jit_enabled;
 } PatternObject;
 
