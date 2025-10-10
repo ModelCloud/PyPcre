@@ -518,13 +518,15 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     def _has_built_library() -> bool:
         patterns = [
+            # POSIX/Mac
             "libpcre2-8.so",
             "libpcre2-8.so.*",
             "libpcre2-8.a",
             "libpcre2-8.dylib",
-            "libpcre2-8.lib",
-            #"pcre2-8.dll",
-            "pcre2-8-static.dll",
+            # Windows (MSVC)
+            "pcre2-8.lib",
+            "pcre2-8-static.lib",
+            "pcre2-8.dll",
         ]
         for root in build_roots:
             if not root.exists():
@@ -540,44 +542,40 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
         cmake_executable = _resolve_cmake_executable()
         if cmake_executable:
-            ninja_executable = shutil.which("ninja")
             sys.stderr.write(f"Using CMake at {cmake_executable}\n")
             cmake_args = [
                 cmake_executable,
-                "-S",
-                str(destination),
-                "-B",
-                str(build_dir),
+                "-S", str(destination),
+                "-B", str(build_dir),
                 "-DPCRE2_SUPPORT_JIT=ON",
                 "-DPCRE2_BUILD_PCRE2_8=ON",
                 "-DPCRE2_BUILD_TESTS=OFF",
                 "-DPCRE2_BUILD_PCRE2GREP=OFF",
                 "-DPCRE2_BUILD_PCRE2TEST=OFF",
-                "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
-                #"-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
+                "-DBUILD_SHARED_LIBS=OFF",   # build a static lib
             ]
-            if ninja_executable:
-                cmake_args.extend(["-G", "Ninja"])
-                env.setdefault("CMAKE_MAKE_PROGRAM", ninja_executable)
-            if not _is_windows_platform():
-                cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
+            # On Windows, force MSVC and the /MD runtime. Never let CMake pick MinGW.
+            if _is_windows_platform():
+                cmake_args += [
+                    "-G", "Visual Studio 17 2022",
+                    "-A", "x64",
+                    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
+                ]
+            else:
+                ninja = shutil.which("ninja")
+                if ninja:
+                    cmake_args += ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]
+                    env.setdefault("CMAKE_MAKE_PROGRAM", ninja)
+                else:
+                    cmake_args += ["-DCMAKE_BUILD_TYPE=Release"]
+
             try:
                 subprocess.run(cmake_args, cwd=destination, env=env, check=True)
-
-                build_command = [
-                    cmake_executable,
-                    "--build",
-                    str(build_dir),
-                ]
-                if _is_windows_platform() and not ninja_executable:
-                    build_command.extend(["--config", "Release"])
-
-                if ninja_executable:
-                    build_command.extend(["--parallel", "8"])
-                elif _is_windows_platform():
-                    build_command.extend(["--parallel", "8"])
+                build_command = [cmake_executable, "--build", str(build_dir)]
+                if _is_windows_platform():
+                    build_command += ["--config", "Release", "--parallel", "8"]
                 else:
-                    build_command.extend(["--", "-j8"])
+                    build_command += ["--parallel", "8"]
                 subprocess.run(build_command, cwd=destination, env=env, check=True)
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
                 raise RuntimeError(
@@ -679,6 +677,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         for pattern in _get_library_search_patterns():
             for path in root.glob(pattern):
                 _add_library_file(path)
+
+    # On Windows, never feed GCC/MinGW archives to MSVC.
+    if _is_windows_platform():
+        library_files = [p for p in library_files if p.lower().endswith(".lib")]
 
     if not library_files:
         raise RuntimeError(

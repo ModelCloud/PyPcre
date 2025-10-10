@@ -54,28 +54,33 @@ PCRE_EXT_DIR = ROOT_DIR / "pcre_ext"
 PCRE2_REPO_URL = "https://github.com/PCRE2Project/pcre2.git"
 PCRE2_TAG = "pcre2-10.46"
 
-LIB_EXTENSIONS = [
-    ".so",
-    ".so.0",
-    ".so.1",
-    ".a",
-    ".dylib",
-    ".sl",
-]
-
-LIBRARY_BASENAME = "libpcre2-8"
-
-LIBRARY_SEARCH_PATTERNS = [
-    f"**/{LIBRARY_BASENAME}.lib",
-    f"**/{LIBRARY_BASENAME}.a",
-    f"**/{LIBRARY_BASENAME}.so",
-    f"**/{LIBRARY_BASENAME}.so.*",
-    f"**/{LIBRARY_BASENAME}.dylib",
-    "**/pcre2-8.lib",
-    #"**/pcre2-8.dll",
-    "**/pcre2-8-static.lib",
-    "**/pcre2-8-static.dll",
-]
+# Platform-specific library naming/selection
+if os.name == "nt":
+    # Only accept MSVC libraries on Windows; never consider .a
+    LIB_EXTENSIONS = [".lib"]
+    # Prefer the static library when we build PCRE2 ourselves; fall back to import lib
+    LIBRARY_BASENAME = "pcre2-8-static"
+    LIBRARY_SEARCH_PATTERNS = [
+        "**/pcre2-8-static.lib",
+        "**/pcre2-8.lib",
+        "**/pcre2-8.dll",  # runtime (for packaging/copying), not for linking
+    ]
+else:
+    LIB_EXTENSIONS = [
+        ".so",
+        ".so.0",
+        ".so.1",
+        ".a",
+        ".dylib",
+        ".sl",
+    ]
+    LIBRARY_BASENAME = "libpcre2-8"
+    LIBRARY_SEARCH_PATTERNS = [
+        f"**/{LIBRARY_BASENAME}.a",
+        f"**/{LIBRARY_BASENAME}.so",
+        f"**/{LIBRARY_BASENAME}.so.*",
+        f"**/{LIBRARY_BASENAME}.dylib",
+    ]
 
 RUNTIME_LIBRARY_FILES: list[str] = []
 
@@ -88,6 +93,7 @@ setup_utils.configure_environment(
     library_search_patterns=LIBRARY_SEARCH_PATTERNS,
 )
 
+
 def filter_with_real_path(paths: list[str]) -> list[str]:
     unique_libs = []
     seen_realpaths = set()
@@ -97,6 +103,7 @@ def filter_with_real_path(paths: list[str]) -> list[str]:
             seen_realpaths.add(real)
             unique_libs.append(path)
     return unique_libs
+
 
 def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]]:
     include_dirs: list[str] = []
@@ -261,6 +268,10 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
         if extra_link_args_x64:
             extra_link_args = extra_link_args_x64
+
+    # On Windows, only keep .lib paths in extra_link_args (drop accidental .a)
+    if os.name == "nt":
+        extra_link_args = [p for p in extra_link_args if p.lower().endswith(".lib")]
 
     extra_link_args = filter_with_real_path(extra_link_args)
     config = {
