@@ -143,26 +143,22 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
 
     extend_env_paths(libraries, "PCRE2_LIBRARIES")
 
-    if not library_files:
-        for path in find_library_with_pkg_config():
-            extend_unique(library_files, path)
+    directory_candidates = [Path(p) for p in library_dirs]
+    directory_candidates.extend(Path(p) for p in discover_library_dirs())
+    for directory in directory_candidates:
+        located = locate_library_file(directory)
+        if located is not None:
+            extend_unique(library_files, str(located))
+            break
 
-    if not library_files:
-        directory_candidates = [Path(p) for p in library_dirs]
-        directory_candidates.extend(Path(p) for p in discover_library_dirs())
-        for directory in directory_candidates:
-            located = locate_library_file(directory)
-            if located is not None:
-                extend_unique(library_files, str(located))
-                break
+    for path in find_library_with_pkg_config():
+        extend_unique(library_files, path)
 
-    if not library_files:
-        for path in find_library_with_ldconfig():
-            extend_unique(library_files, path)
+    for path in find_library_with_ldconfig():
+        extend_unique(library_files, path)
 
-    if not library_files:
-        for path in find_library_with_brew():
-            extend_unique(library_files, path)
+    for path in find_library_with_brew():
+        extend_unique(library_files, path)
 
     env_cflags = os.environ.get("PCRE2_CFLAGS")
     if env_cflags:
@@ -224,6 +220,11 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     RUNTIME_LIBRARY_FILES.clear()
     RUNTIME_LIBRARY_FILES.extend(runtime_libraries)
 
+    if sys.platform.startswith("sunos") or sys.platform.startswith("solaris"):
+        extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
+        if not platform.machine() in ['x86_64', 'AMD64', 'amd64', 'x64'] and extra_link_args_x64:
+            extra_link_args = extra_link_args_x64
+
     config = {
         "include_dirs": include_dirs,
         "library_dirs": library_dirs,
@@ -245,3 +246,4 @@ EXTENSION = Extension(
 )
 
 setup(ext_modules=[EXTENSION], cmdclass={"build_ext": build_ext})
+
