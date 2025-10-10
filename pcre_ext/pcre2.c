@@ -65,25 +65,18 @@ static void detect_offset_limit_support(void);
 static inline void
 module_state_lock_acquire(void)
 {
-    if (module_state_lock != NULL) {
-        PyThread_acquire_lock(module_state_lock, 1);
-    }
+    PyThread_acquire_lock(module_state_lock, 1);
 }
 
 static inline void
 module_state_lock_release(void)
 {
-    if (module_state_lock != NULL) {
-        PyThread_release_lock(module_state_lock);
-    }
+    PyThread_release_lock(module_state_lock);
 }
 
 static inline int
 default_jit_get(void)
 {
-    if (default_jit_lock == NULL) {
-        return default_jit_enabled;
-    }
     PyThread_acquire_lock(default_jit_lock, 1);
     int value = default_jit_enabled;
     PyThread_release_lock(default_jit_lock);
@@ -93,10 +86,6 @@ default_jit_get(void)
 static inline void
 default_jit_set(int value)
 {
-    if (default_jit_lock == NULL) {
-        default_jit_enabled = value;
-        return;
-    }
     PyThread_acquire_lock(default_jit_lock, 1);
     default_jit_enabled = value;
     PyThread_release_lock(default_jit_lock);
@@ -2130,6 +2119,22 @@ PyInit_pcre_ext_c(void)
         }
     }
 
+    if (default_jit_lock == NULL) {
+        default_jit_lock = PyThread_allocate_lock();
+        if (default_jit_lock == NULL) {
+            PyErr_NoMemory();
+            goto error_unlock_module;
+        }
+    }
+
+    if (cpu_feature_lock == NULL) {
+        cpu_feature_lock = PyThread_allocate_lock();
+        if (cpu_feature_lock == NULL) {
+            PyErr_NoMemory();
+            goto error_unlock_module;
+        }
+    }
+
     if (PyType_Ready(&PatternType) < 0) {
         return NULL;
     }
@@ -2158,22 +2163,6 @@ PyInit_pcre_ext_c(void)
     }
 
     detect_offset_limit_support();
-
-    if (default_jit_lock == NULL) {
-        default_jit_lock = PyThread_allocate_lock();
-        if (default_jit_lock == NULL) {
-            PyErr_NoMemory();
-            goto error;
-        }
-    }
-
-    if (cpu_feature_lock == NULL) {
-        cpu_feature_lock = PyThread_allocate_lock();
-        if (cpu_feature_lock == NULL) {
-            PyErr_NoMemory();
-            goto error;
-        }
-    }
 
     Py_INCREF(&PatternType);
     if (PyModule_AddObject(module, "Pattern", (PyObject *)&PatternType) < 0) {
@@ -2217,10 +2206,6 @@ error:
     pcre_memory_teardown();
     cache_teardown();
     pcre_error_teardown();
-    if (module_state_lock != NULL) {
-        PyThread_free_lock(module_state_lock);
-        module_state_lock = NULL;
-    }
     if (cpu_feature_lock != NULL) {
         PyThread_free_lock(cpu_feature_lock);
         cpu_feature_lock = NULL;
@@ -2229,7 +2214,22 @@ error:
         PyThread_free_lock(default_jit_lock);
         default_jit_lock = NULL;
     }
+    if (module_state_lock != NULL) {
+        PyThread_free_lock(module_state_lock);
+        module_state_lock = NULL;
+    }
     Py_DECREF(module);
+    return NULL;
+
+error_unlock_module:
+    if (default_jit_lock != NULL) {
+        PyThread_free_lock(default_jit_lock);
+        default_jit_lock = NULL;
+    }
+    if (module_state_lock != NULL) {
+        PyThread_free_lock(module_state_lock);
+        module_state_lock = NULL;
+    }
     return NULL;
 }
 

@@ -42,10 +42,3 @@ packages = ["pcre"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-required_plugins = [
-    "jaraco.path",
-    "jaraco.envs",
-    "path",
-    "regex",
-    "pcre2",
-]
