@@ -2381,18 +2381,6 @@ module_compile(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 }
 
 static PyObject *
-call_pattern_method(PatternObject *pattern, PyObject *callable, PyObject *subject)
-{
-    PyObject *args = PyTuple_Pack(1, subject);
-    if (args == NULL) {
-        return NULL;
-    }
-    PyObject *result = PyObject_Call(callable, args, NULL);
-    Py_DECREF(args);
-    return result;
-}
-
-static PyObject *
 module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 {
     static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
@@ -2416,13 +2404,7 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *callable = PyObject_GetAttrString((PyObject *)pattern, "match");
-    if (callable == NULL) {
-        Py_DECREF(pattern);
-        return NULL;
-    }
-    PyObject *result = call_pattern_method(pattern, callable, subject);
-    Py_DECREF(callable);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_MATCH);
     Py_DECREF(pattern);
     return result;
 }
@@ -2451,13 +2433,7 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *callable = PyObject_GetAttrString((PyObject *)pattern, "search");
-    if (callable == NULL) {
-        Py_DECREF(pattern);
-        return NULL;
-    }
-    PyObject *result = call_pattern_method(pattern, callable, subject);
-    Py_DECREF(callable);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_SEARCH);
     Py_DECREF(pattern);
     return result;
 }
@@ -2486,13 +2462,7 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *callable = PyObject_GetAttrString((PyObject *)pattern, "fullmatch");
-    if (callable == NULL) {
-        Py_DECREF(pattern);
-        return NULL;
-    }
-    PyObject *result = call_pattern_method(pattern, callable, subject);
-    Py_DECREF(callable);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_FULLMATCH);
     Py_DECREF(pattern);
     return result;
 }
