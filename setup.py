@@ -182,6 +182,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     has_std_flag = any(
         flag.lower().startswith("/std:") or flag.startswith("-std=") for flag in extra_compile_args
     )
+    has_msvc_atomics_flag = any(flag.lower() == "/experimental:c11atomics" for flag in extra_compile_args)
     if is_windows_platform():
         if not has_std_flag:
             c11_probe = (
@@ -199,6 +200,8 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
                 extra_compile_args.append("/std:clatest")
             else:
                 raise RuntimeError("MSVC requires /std:c11 or newer for atomics support")
+        if not has_msvc_atomics_flag and compiler_supports_flag("/experimental:c11atomics"):
+            extra_compile_args.append("/experimental:c11atomics")
     elif not has_std_flag:
         if compiler_supports_flag("-std=c11"):
             extra_compile_args.append("-std=c11")
