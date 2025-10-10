@@ -138,20 +138,20 @@ pcre_memory_initialize(void)
         size_t pos = 0;
 
         if (equals_ignore_case(forced, "malloc")) {
-            allocator_initialized = 1;
             current_handle = NULL;
             current_alloc = malloc;
             current_free = free;
             current_name = "malloc";
+            allocator_initialized = 1;
             return 0;
         }
 
         if (equals_ignore_case(forced, "pymem")) {
-            allocator_initialized = 1;
             current_handle = NULL;
             current_alloc = (alloc_fn)PyMem_Malloc;
             current_free = (free_fn)PyMem_Free;
             current_name = "pymem";
+            allocator_initialized = 1;
             return 0;
         }
 
@@ -180,11 +180,11 @@ pcre_memory_initialize(void)
         }
     }
 
-    allocator_initialized = 1;
     current_handle = NULL;
     current_alloc = malloc;
     current_free = free;
     current_name = "malloc";
+    allocator_initialized = 1;
     return 0;
 }
 
@@ -192,9 +192,10 @@ void
 pcre_memory_teardown(void)
 {
 #if !defined(_WIN32)
-    if (current_handle != NULL) {
-        dlclose(current_handle);
-        current_handle = NULL;
+    void *handle_to_close = current_handle;
+    current_handle = NULL;
+    if (handle_to_close != NULL) {
+        dlclose(handle_to_close);
     }
 #endif
     current_alloc = malloc;

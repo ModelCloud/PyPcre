@@ -94,16 +94,10 @@ current limit with `pcre.get_cache_limit()`. The cache can be emptied at any tim
 with `pcre.clear_cache()`.
 
 Applications that prefer the historic global cache can opt back in before any
-compilation takes place:
-
-```python
-import pcre
-
-pcre.cache_strategy("global")  # call before compile()/match()/search()
-```
-
-Switching strategies after patterns have been compiled raises `RuntimeError`, so
-pick the desired mode during process start-up.
+compilation takes place by setting `PYPCRE_CACHE_PATTERN_GLOBAL=1` in the
+environment **before importing** `pcre`. Runtime switching is no longer
+supported; altering the value after patterns have been compiled raises
+`RuntimeError`.
 
 ### Text versus bytes defaults
 
@@ -147,6 +141,34 @@ bytes.
   `preload=True` to spin the pool up eagerly, and `shutdown_thread_pool()`
   to tear it down manually if needed.
 
+### Performance considerations
+
+- **Precompile for hot loops.** The module-level helpers mirror the `re`
+  API and route through the shared compilation cache, but the extra call
+  plumbing still adds overhead. With a simple pattern like `"fo"`, using
+  the low-level `pcre_ext_c.Pattern` directly costs ~0.60 µs per call,
+  whereas the high-level `pcre.match()` helper lands at ~4.4 µs per call
+  under the same workload. For sustained loops, create a `Pattern` object
+  once and reuse it.
+- **Benchmark toggles.** The extension defaults to the fastest safe
+  configuration, but you can flip individual knobs back to the legacy
+  behaviour by setting environment variables *before* importing `pcre`:
+
+  | Env var                        | Effect (per-call, `pattern.match("fo")`) |
+  |--------------------------------|------------------------------------------|
+  | _(baseline)_                   | 0.60 µs                                  |
+  | `PCRE2_DISABLE_CONTEXT_CACHE=1`| 0.60 µs                                  |
+  | `PCRE2_FORCE_JIT_LOCK=1`       | 0.60 µs                                  |
+  | `pcre.match()` helper          | 4.43 µs                                  |
+
+  The toggles reintroduce the legacy GIL hand-off, per-call match-context
+  allocation, and explicit locks so you can quantify the impact of each
+  optimisation on your workload. Measurements were taken on CPython 3.14 (rc3)
+  with 200 000 evaluations of `pcre_ext_c.compile("fo").match("foobar")`; absolute
+  values will vary by platform, but the relative differences are
+  representative. Leave the variables unset in production to keep the new fast
+  paths active.
+
 ### JIT Pattern Compilation and Execution
 
 Pcre2’s JIT compiler is enabled by default for every compiled pattern. The
@@ -169,7 +191,7 @@ wrapper exposes two complementary ways to adjust that behaviour:
 
 ## Pattern cache
 - `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries per thread by default.
-- Call `pcre.cache_strategy("global")` once at boot if you need a shared, process-wide cache instead of isolated thread stores.
+- Set `PYPCRE_CACHE_PATTERN_GLOBAL=1` before importing `pcre` if you need a shared, process-wide cache instead of isolated thread stores.
 - Use `pcre.clear_cache()` when you need to free the active cache proactively.
 - Non-hashable pattern objects skip the cache and are compiled each time.
 

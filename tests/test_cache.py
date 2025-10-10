@@ -25,13 +25,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def _reset_cache_state() -> None:
-    cache_mod.cache_strategy("thread-local")
+    if cache_mod.cache_strategy() != "thread-local":
+        pytest.skip("global pattern cache enabled via environment; thread-local tests skipped")
     original_limit = cache_mod.get_cache_limit()
     cache_mod.clear_cache()
     try:
         yield
     finally:
-        cache_mod.cache_strategy("thread-local")
         cache_mod.set_cache_limit(original_limit)
         cache_mod.clear_cache()
 
@@ -42,13 +42,15 @@ def _fresh_thread_cache() -> OrderedDict[Any, Any]:
     return store
 
 
-def _run_cache_script(source: str) -> Dict[str, Any]:
+def _run_cache_script(source: str, env_overrides: Dict[str, str] | None = None) -> Dict[str, Any]:
     env = os.environ.copy()
     pythonpath_entries = [str(PROJECT_ROOT)]
     existing_pythonpath = env.get("PYTHONPATH")
     if existing_pythonpath:
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+    if env_overrides:
+        env.update(env_overrides)
 
     completed = subprocess.run(
         [sys.executable, "-c", source],
@@ -115,7 +117,8 @@ def _benchmark_strategy(strategy: str, iterations: int = 20000, threads: int = 1
         THREAD_COUNT = {threads}
         REPEATS = 5
 
-        cache_mod.cache_strategy(STRATEGY)
+        if cache_mod.cache_strategy() != STRATEGY:
+            raise SystemExit(f"strategy mismatch: {strategy!r} != {cache_mod.cache_strategy()!r}")
         cache_mod.clear_cache()
         cache_mod.cached_compile("expr", 0, wrapper, jit=False)
 
@@ -186,7 +189,10 @@ def _benchmark_strategy(strategy: str, iterations: int = 20000, threads: int = 1
         )
         """
     )
-    return _run_cache_script(script)
+    env_overrides = {
+        "PYPCRE_CACHE_PATTERN_GLOBAL": "1" if strategy == "global" else "0"
+    }
+    return _run_cache_script(script, env_overrides=env_overrides)
 
 
 def test_cached_compile_thread_local_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -364,6 +370,9 @@ def test_cache_strategy_cannot_switch_after_use(monkeypatch: pytest.MonkeyPatch)
     def wrapper(raw: Any) -> Any:
         return raw
 
+    with pytest.raises(RuntimeError):
+        cache_mod.cache_strategy("global")
+
     cache_mod.cached_compile("expr", 0, wrapper, jit=False)
     with pytest.raises(RuntimeError):
         cache_mod.cache_strategy("global")
@@ -376,7 +385,8 @@ def test_cache_strategy_global_shares_cache_across_threads() -> None:
         import threading
         import pcre.cache as cache_mod
 
-        cache_mod.cache_strategy("global")
+        if cache_mod.cache_strategy() != "global":
+            raise SystemExit("global cache not active")
         cache_mod.clear_cache()
 
         compile_calls = []
@@ -416,7 +426,7 @@ def test_cache_strategy_global_shares_cache_across_threads() -> None:
         """
     )
 
-    result = _run_cache_script(script)
+    result = _run_cache_script(script, env_overrides={"PYPCRE_CACHE_PATTERN_GLOBAL": "1"})
     assert result["calls"] == 1
     assert result["main_result"] == result["worker_result"] == "compiled:1"
 

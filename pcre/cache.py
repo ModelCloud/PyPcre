@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import OrderedDict
 from enum import Enum
 from threading import RLock, local
@@ -63,6 +64,17 @@ def _normalize_strategy(value: str) -> _CacheStrategy:
     except ValueError as exc:  # pragma: no cover - defensive
         raise ValueError("cache strategy must be 'thread-local' or 'global'") from exc
 
+def _env_flag_is_true(value: str | None) -> bool:
+    if value is None or value == "":
+        return False
+    return value[0] not in {"0", "f", "F", "n", "N"}
+
+
+if _env_flag_is_true(os.getenv("PYPCRE_CACHE_PATTERN_GLOBAL")):
+    _CACHE_STRATEGY = _CacheStrategy.GLOBAL
+else:
+    _CACHE_STRATEGY = _CacheStrategy.THREAD_LOCAL
+
 
 def cache_strategy(strategy: str | None = None) -> str:
     """Select or query the caching strategy.
@@ -80,18 +92,13 @@ def cache_strategy(strategy: str | None = None) -> str:
         return _CACHE_STRATEGY.value
 
     desired = _normalize_strategy(strategy)
-    if _CACHE_STRATEGY_LOCKED and desired is not _CACHE_STRATEGY:
-        raise RuntimeError(
-            "cache strategy already locked to '" f"{_CACHE_STRATEGY.value}'"
-            "; call cache_strategy() before compiling patterns"
-        )
-
     if desired is _CACHE_STRATEGY:
         return _CACHE_STRATEGY.value
 
-    _pcre2.set_cache_strategy(desired.value)
-    _CACHE_STRATEGY = desired
-    return _CACHE_STRATEGY.value
+    raise RuntimeError(
+        "cache strategy is fixed at import time; set PYPCRE_CACHE_PATTERN_GLOBAL=1 "
+        "before importing pcre to enable the global cache"
+    )
 
 
 def _cached_compile_thread_local(
@@ -246,5 +253,5 @@ def get_cache_limit() -> int | None:
     return _GLOBAL_STATE.cache_limit
 
 
-# Ensure the backend aligns with the default strategy.
-_pcre2.set_cache_strategy(_CACHE_STRATEGY.value)
+# The backend has already been configured during module import; rely on its
+# reported strategy to keep this helper in sync.

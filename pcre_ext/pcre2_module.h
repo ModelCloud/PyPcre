@@ -13,6 +13,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if !defined(__STDC_NO_ATOMICS__)
+#   include <stdatomic.h>
+#   define PCRE_EXT_HAVE_ATOMICS 1
+#endif
+
 #if !defined(PCRE2_CODE_UNIT_WIDTH)
 #define PCRE2_CODE_UNIT_WIDTH 8
 #endif
@@ -38,8 +43,12 @@ typedef struct {
     uint32_t compile_options;
     uint32_t capture_count;
     int pattern_is_bytes;
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    _Atomic int jit_enabled;
+#else
     PyThread_type_lock jit_lock;
     int jit_enabled;
+#endif
 } PatternObject;
 
 typedef struct {
@@ -71,6 +80,9 @@ int cache_initialize(void);
 void cache_teardown(void);
 pcre2_match_data *match_data_cache_acquire(PatternObject *self);
 void match_data_cache_release(pcre2_match_data *match_data);
+pcre2_match_context *match_context_cache_acquire(int use_offset_limit);
+void match_context_cache_release(pcre2_match_context *context, int had_offset_limit);
+void cache_set_context_cache_enabled(int enabled);
 pcre2_jit_stack *jit_stack_cache_acquire(void);
 void jit_stack_cache_release(pcre2_jit_stack *jit_stack);
 PyObject *module_get_match_data_cache_size(PyObject *module, PyObject *args);
