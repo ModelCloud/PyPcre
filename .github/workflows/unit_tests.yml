@@ -52,14 +52,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, macos-13 ] # macos-latest arm64, macos-13 intel
+        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v6
         with:
-          python-version: 3.12
+          python-version: 3.13
           cache: 'pip'
 
       - name: install
