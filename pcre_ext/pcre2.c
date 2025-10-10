@@ -2697,7 +2697,10 @@ PyInit_pcre_ext_c(void)
     }
 #endif
 
-    force_lock_env = Py_GETENV("PCRE2_FORCE_JIT_LOCK");
+    force_lock_env = Py_GETENV("PYPCRE_FORCE_JIT_LOCK");
+    if (force_lock_env == NULL) {
+        force_lock_env = Py_GETENV("PCRE2_FORCE_JIT_LOCK");
+    }
     if (env_flag_is_true(force_lock_env)) {
         pcre_force_jit_lock = 1;
         if (jit_serial_lock == NULL) {
@@ -2711,10 +2714,16 @@ PyInit_pcre_ext_c(void)
         pcre_force_jit_lock = 0;
     }
 
-    context_cache_env = Py_GETENV("PCRE2_DISABLE_CONTEXT_CACHE");
+    context_cache_env = Py_GETENV("PYPCRE_DISABLE_CONTEXT_CACHE");
+    if (context_cache_env == NULL) {
+        context_cache_env = Py_GETENV("PCRE2_DISABLE_CONTEXT_CACHE");
+    }
     cache_set_context_cache_enabled(env_flag_is_true(context_cache_env) ? 0 : 1);
 
     pattern_cache_env = Py_GETENV("PYPCRE_CACHE_PATTERN_GLOBAL");
+    if (pattern_cache_env == NULL) {
+        pattern_cache_env = Py_GETENV("PCRE2_CACHE_PATTERN_GLOBAL");
+    }
     pattern_cache_global = env_flag_is_true(pattern_cache_env);
     if (pattern_cache_initialize(pattern_cache_global) < 0) {
         goto error_locks;

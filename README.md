@@ -157,8 +157,8 @@ bytes.
   | Env var                        | Effect (per-call, `pattern.match("fo")`) |
   |--------------------------------|------------------------------------------|
   | _(baseline)_                   | 0.60 µs                                  |
-  | `PCRE2_DISABLE_CONTEXT_CACHE=1`| 0.60 µs                                  |
-  | `PCRE2_FORCE_JIT_LOCK=1`       | 0.60 µs                                  |
+  | `PYPCRE_DISABLE_CONTEXT_CACHE=1` *(was `PCRE2_DISABLE_CONTEXT_CACHE`)* | 0.60 µs |
+  | `PYPCRE_FORCE_JIT_LOCK=1` *(was `PCRE2_FORCE_JIT_LOCK`)*       | 0.60 µs |
   | `pcre.match()` helper          | 4.43 µs                                  |
 
   The toggles reintroduce the legacy GIL hand-off, per-call match-context
