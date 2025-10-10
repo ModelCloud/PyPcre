@@ -121,6 +121,112 @@ jit_guard_release(void)
     }
 }
 
+static inline pcre2_match_data *
+pattern_match_data_acquire(PatternObject *pattern, int *from_pattern_cache)
+{
+    *from_pattern_cache = 0;
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    pcre2_match_data *cached = atomic_exchange_explicit(
+        &pattern->cached_match_data,
+        NULL,
+        memory_order_acq_rel
+    );
+    if (cached != NULL) {
+        *from_pattern_cache = 1;
+        return cached;
+    }
+#else
+    (void)pattern;
+#endif
+    return match_data_cache_acquire(pattern);
+}
+
+static inline void
+pattern_match_data_release(PatternObject *pattern,
+                           pcre2_match_data *match_data,
+                           int from_pattern_cache)
+{
+    if (match_data == NULL) {
+        return;
+    }
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    if (from_pattern_cache) {
+        pcre2_match_data *expected = NULL;
+        if (!atomic_compare_exchange_strong_explicit(
+                &pattern->cached_match_data,
+                &expected,
+                match_data,
+                memory_order_release,
+                memory_order_relaxed)) {
+            match_data_cache_release(match_data);
+        }
+        return;
+    }
+#else
+    (void)pattern;
+    (void)from_pattern_cache;
+#endif
+    match_data_cache_release(match_data);
+}
+
+static inline pcre2_match_context *
+pattern_match_context_acquire(PatternObject *pattern,
+                              int use_offset_limit,
+                              int *from_pattern_cache)
+{
+    *from_pattern_cache = 0;
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    pcre2_match_context *cached = atomic_exchange_explicit(
+        &pattern->cached_match_context,
+        NULL,
+        memory_order_acq_rel
+    );
+    if (cached != NULL) {
+        *from_pattern_cache = 1;
+        return cached;
+    }
+#else
+    (void)pattern;
+#endif
+    return match_context_cache_acquire(use_offset_limit);
+}
+
+static inline void
+pattern_match_context_release(PatternObject *pattern,
+                              pcre2_match_context *context,
+                              int had_offset_limit,
+                              int from_pattern_cache)
+{
+    if (context == NULL) {
+        return;
+    }
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    if (from_pattern_cache) {
+        pcre2_jit_stack_assign(context, NULL, NULL);
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+        if (had_offset_limit) {
+            (void)pcre2_set_offset_limit(context, PCRE2_UNSET);
+        }
+#else
+        (void)had_offset_limit;
+#endif
+        pcre2_match_context *expected = NULL;
+        if (!atomic_compare_exchange_strong_explicit(
+                &pattern->cached_match_context,
+                &expected,
+                context,
+                memory_order_release,
+                memory_order_relaxed)) {
+            match_context_cache_release(context, 0);
+        }
+        return;
+    }
+#else
+    (void)pattern;
+#endif
+    match_context_cache_release(context, had_offset_limit);
+}
+
 static inline int
 pattern_cache_is_global(void)
 {
@@ -1358,19 +1464,22 @@ Pattern_create_finditer(PatternObject *pattern,
         if (PyUnicode_READY(subject_obj) < 0) {
             goto error;
         }
-        Py_ssize_t utf8_length = 0;
-        const char *utf8_data = PyUnicode_AsUTF8AndSize(subject_obj, &utf8_length);
-        if (utf8_data == NULL) {
-            goto error;
-        }
-        iter->subject_is_bytes = 0;
-        iter->subject_length_bytes = utf8_length;
-        iter->logical_length = PyUnicode_GET_LENGTH(subject_obj);
-        iter->utf8_data = utf8_data;
         Py_INCREF(subject_obj);
+        iter->subject_is_bytes = 0;
+        iter->logical_length = PyUnicode_GET_LENGTH(subject_obj);
         iter->utf8_owner = subject_obj;
         if (PyUnicode_IS_ASCII(subject_obj)) {
+            iter->subject_length_bytes = iter->logical_length;
+            iter->utf8_data = (const char *)PyUnicode_1BYTE_DATA(subject_obj);
             iter->utf8_is_ascii = 1;
+        } else {
+            Py_ssize_t utf8_length = 0;
+            const char *utf8_data = PyUnicode_AsUTF8AndSize(subject_obj, &utf8_length);
+            if (utf8_data == NULL) {
+                goto error;
+            }
+            iter->subject_length_bytes = utf8_length;
+            iter->utf8_data = utf8_data;
         }
     } else {
         PyErr_SetString(PyExc_TypeError, "subject must be str or bytes");
@@ -1519,6 +1628,33 @@ Pattern_dealloc(PatternObject *self)
         self->jit_lock = NULL;
     }
 #endif
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    pcre2_match_data *cached_match = atomic_exchange_explicit(
+        &self->cached_match_data,
+        NULL,
+        memory_order_acq_rel
+    );
+    if (cached_match != NULL) {
+        pcre2_match_data_free(cached_match);
+    }
+    pcre2_match_context *cached_context = atomic_exchange_explicit(
+        &self->cached_match_context,
+        NULL,
+        memory_order_acq_rel
+    );
+    if (cached_context != NULL) {
+        pcre2_match_context_free(cached_context);
+    }
+#else
+    if (self->cached_match_data != NULL) {
+        pcre2_match_data_free(self->cached_match_data);
+        self->cached_match_data = NULL;
+    }
+    if (self->cached_match_context != NULL) {
+        pcre2_match_context_free(self->cached_match_context);
+        self->cached_match_context = NULL;
+    }
+#endif
     if (self->code != NULL) {
         pcre2_code_free(self->code);
         self->code = NULL;
@@ -1609,18 +1745,22 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         if (PyUnicode_READY(subject_obj) < 0) {
             return NULL;
         }
-        Py_ssize_t utf8_length = 0;
-        const char *utf8_data = PyUnicode_AsUTF8AndSize(subject_obj, &utf8_length);
-        if (utf8_data == NULL) {
-            return NULL;
-        }
         Py_INCREF(subject_obj);
         utf8_owner = subject_obj;
-        buffer = utf8_data;
-        subject_length_bytes = utf8_length;
         logical_length = PyUnicode_GET_LENGTH(subject_obj);
         if (PyUnicode_IS_ASCII(subject_obj)) {
+            buffer = (const char *)PyUnicode_1BYTE_DATA(subject_obj);
+            subject_length_bytes = logical_length;
             ascii_text = 1;
+        } else {
+            Py_ssize_t utf8_length = 0;
+            const char *utf8_data = PyUnicode_AsUTF8AndSize(subject_obj, &utf8_length);
+            if (utf8_data == NULL) {
+                Py_DECREF(utf8_owner);
+                return NULL;
+            }
+            buffer = utf8_data;
+            subject_length_bytes = utf8_length;
         }
     } else {
         PyErr_SetString(PyExc_TypeError, "expected str or bytes");
@@ -1686,6 +1826,32 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         return NULL;
     }
 
+    if (mode == EXEC_MODE_SEARCH && self->has_first_literal) {
+        if (byte_start >= byte_end) {
+            Py_DECREF(utf8_owner);
+            Py_RETURN_NONE;
+        }
+        const unsigned char *scan_start = (const unsigned char *)(buffer + byte_start);
+        size_t span = (size_t)(byte_end - byte_start);
+        if (memchr(scan_start, (unsigned char)self->first_literal, span) == NULL) {
+            Py_DECREF(utf8_owner);
+            Py_RETURN_NONE;
+        }
+    }
+
+    if ((mode == EXEC_MODE_MATCH || mode == EXEC_MODE_FULLMATCH) &&
+        self->has_first_literal) {
+        if (byte_start >= byte_end) {
+            Py_DECREF(utf8_owner);
+            Py_RETURN_NONE;
+        }
+        unsigned char leading = (unsigned char)buffer[byte_start];
+        if (leading != (unsigned char)self->first_literal) {
+            Py_DECREF(utf8_owner);
+            Py_RETURN_NONE;
+        }
+    }
+
     PCRE2_SIZE offset_limit = (PCRE2_SIZE)byte_end;
 
     uint32_t match_options = options;
@@ -1698,7 +1864,8 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         match_options |= PCRE2_NO_UTF_CHECK;
     }
 
-    pcre2_match_data *match_data = match_data_cache_acquire(self);
+    int match_data_from_pattern = 0;
+    pcre2_match_data *match_data = pattern_match_data_acquire(self, &match_data_from_pattern);
     if (match_data == NULL) {
         Py_DECREF(utf8_owner);
         PyErr_NoMemory();
@@ -1708,7 +1875,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     int rc = 0;
     int attempt_jit = pattern_jit_get(self);
     pcre2_match_context *match_context = NULL;
-    int match_context_acquired = 0;
+    int match_context_from_pattern = 0;
     int match_context_used_offset_limit = 0;
     pcre2_jit_stack *jit_stack = NULL;
     PCRE2_SIZE exec_length = (PCRE2_SIZE)subject_length_bytes;
@@ -1720,21 +1887,30 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 #endif
 
     if (use_offset_limit_option || attempt_jit) {
-        match_context = match_context_cache_acquire(use_offset_limit_option);
+        match_context = pattern_match_context_acquire(
+            self,
+            use_offset_limit_option,
+            &match_context_from_pattern
+        );
         if (match_context == NULL) {
-            match_data_cache_release(match_data);
+            pattern_match_data_release(self, match_data, match_data_from_pattern);
             Py_DECREF(utf8_owner);
+            PyErr_NoMemory();
             return NULL;
         }
-        match_context_acquired = 1;
     }
 
 #if defined(PCRE2_USE_OFFSET_LIMIT)
     if (use_offset_limit_option) {
         int ctx_rc = pcre2_set_offset_limit(match_context, offset_limit);
         if (ctx_rc < 0) {
-            match_context_cache_release(match_context, /*had_offset_limit=*/0);
-            match_data_cache_release(match_data);
+            pattern_match_context_release(
+                self,
+                match_context,
+                /*had_offset_limit=*/0,
+                match_context_from_pattern
+            );
+            pattern_match_data_release(self, match_data, match_data_from_pattern);
             Py_DECREF(utf8_owner);
             raise_pcre_error("set_offset_limit", ctx_rc, 0);
             return NULL;
@@ -1753,10 +1929,15 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     if (attempt_jit) {
         jit_stack = jit_stack_cache_acquire();
         if (jit_stack == NULL) {
-            if (match_context_acquired) {
-                match_context_cache_release(match_context, match_context_used_offset_limit);
+            if (match_context != NULL) {
+                pattern_match_context_release(
+                    self,
+                    match_context,
+                    match_context_used_offset_limit,
+                    match_context_from_pattern
+                );
             }
-            match_data_cache_release(match_data);
+            pattern_match_data_release(self, match_data, match_data_from_pattern);
             Py_DECREF(utf8_owner);
             PyErr_NoMemory();
             return NULL;
@@ -1780,8 +1961,13 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             pattern_jit_set(self, 0);
         } else if (rc != PCRE2_ERROR_NOMATCH && rc < 0) {
             PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
-            match_context_cache_release(match_context, match_context_used_offset_limit);
-            match_data_cache_release(match_data);
+            pattern_match_context_release(
+                self,
+                match_context,
+                match_context_used_offset_limit,
+                match_context_from_pattern
+            );
+            pattern_match_data_release(self, match_data, match_data_from_pattern);
             Py_DECREF(utf8_owner);
             raise_pcre_error("jit_match", rc, error_offset);
             return NULL;
@@ -1799,16 +1985,26 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
 
     if (rc == PCRE2_ERROR_NOMATCH) {
-        match_context_cache_release(match_context, match_context_used_offset_limit);
-        match_data_cache_release(match_data);
+        pattern_match_context_release(
+            self,
+            match_context,
+            match_context_used_offset_limit,
+            match_context_from_pattern
+        );
+        pattern_match_data_release(self, match_data, match_data_from_pattern);
         Py_DECREF(utf8_owner);
         Py_RETURN_NONE;
     }
 
     if (rc < 0) {
         PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
-        match_context_cache_release(match_context, match_context_used_offset_limit);
-        match_data_cache_release(match_data);
+        pattern_match_context_release(
+            self,
+            match_context,
+            match_context_used_offset_limit,
+            match_context_from_pattern
+        );
+        pattern_match_data_release(self, match_data, match_data_from_pattern);
         Py_DECREF(utf8_owner);
         raise_pcre_error("match", rc, error_offset);
         return NULL;
@@ -1817,8 +2013,13 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     uint32_t available_ovector_pairs = pcre2_get_ovector_count(match_data);
     PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
     if (ovector == NULL || available_ovector_pairs == 0) {
-        match_context_cache_release(match_context, match_context_used_offset_limit);
-        match_data_cache_release(match_data);
+        pattern_match_context_release(
+            self,
+            match_context,
+            match_context_used_offset_limit,
+            match_context_from_pattern
+        );
+        pattern_match_data_release(self, match_data, match_data_from_pattern);
         Py_DECREF(utf8_owner);
         PyErr_SetString(PyExc_RuntimeError, "PCRE2 returned empty match data");
         return NULL;
@@ -1838,8 +2039,13 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         (uint32_t)expected_pairs,
         ovector);
 
-    match_context_cache_release(match_context, match_context_used_offset_limit);
-    match_data_cache_release(match_data);
+    pattern_match_context_release(
+        self,
+        match_context,
+        match_context_used_offset_limit,
+        match_context_from_pattern
+    );
+    pattern_match_data_release(self, match_data, match_data_from_pattern);
 
     if (match == NULL) {
         Py_DECREF(utf8_owner);
@@ -1970,6 +2176,8 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     pattern->groupindex = NULL;
 #if defined(PCRE_EXT_HAVE_ATOMICS)
     atomic_store_explicit(&pattern->jit_enabled, 0, memory_order_relaxed);
+    atomic_store_explicit(&pattern->cached_match_data, NULL, memory_order_relaxed);
+    atomic_store_explicit(&pattern->cached_match_context, NULL, memory_order_relaxed);
 #else
     pattern->jit_lock = PyThread_allocate_lock();
     if (pattern->jit_lock == NULL) {
@@ -1980,6 +2188,8 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
         return NULL;
     }
     pattern->jit_enabled = 0;
+    pattern->cached_match_data = NULL;
+    pattern->cached_match_context = NULL;
 #endif
 
     pattern->code = code;
@@ -1989,12 +2199,26 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     pattern->pattern_is_bytes = is_bytes;
     pattern->compile_options = compile_options;
     pattern_jit_set(pattern, 0);
+    pattern->has_first_literal = 0;
+    pattern->first_literal = 0;
+    pattern->first_literal_caseless = (compile_options & PCRE2_CASELESS) != 0;
 
     uint32_t capture_count = 0;
     if (pcre2_pattern_info(code, PCRE2_INFO_CAPTURECOUNT, &capture_count) != 0) {
         capture_count = 0;
     }
     pattern->capture_count = capture_count;
+
+    uint32_t first_code_type = 0;
+    if (!pattern->first_literal_caseless &&
+        pcre2_pattern_info(code, PCRE2_INFO_FIRSTCODETYPE, &first_code_type) == 0 &&
+        first_code_type == 1u) {
+        uint32_t first_code_unit = 0;
+        if (pcre2_pattern_info(code, PCRE2_INFO_FIRSTCODEUNIT, &first_code_unit) == 0) {
+            pattern->has_first_literal = 1;
+            pattern->first_literal = first_code_unit & 0xFFu;
+        }
+    }
 
     pattern->groupindex = create_groupindex_dict(code);
     if (pattern->groupindex == NULL) {
@@ -2157,18 +2381,6 @@ module_compile(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 }
 
 static PyObject *
-call_pattern_method(PatternObject *pattern, PyObject *callable, PyObject *subject)
-{
-    PyObject *args = PyTuple_Pack(1, subject);
-    if (args == NULL) {
-        return NULL;
-    }
-    PyObject *result = PyObject_Call(callable, args, NULL);
-    Py_DECREF(args);
-    return result;
-}
-
-static PyObject *
 module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 {
     static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
@@ -2192,13 +2404,7 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *callable = PyObject_GetAttrString((PyObject *)pattern, "match");
-    if (callable == NULL) {
-        Py_DECREF(pattern);
-        return NULL;
-    }
-    PyObject *result = call_pattern_method(pattern, callable, subject);
-    Py_DECREF(callable);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_MATCH);
     Py_DECREF(pattern);
     return result;
 }
@@ -2227,13 +2433,7 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *callable = PyObject_GetAttrString((PyObject *)pattern, "search");
-    if (callable == NULL) {
-        Py_DECREF(pattern);
-        return NULL;
-    }
-    PyObject *result = call_pattern_method(pattern, callable, subject);
-    Py_DECREF(callable);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_SEARCH);
     Py_DECREF(pattern);
     return result;
 }
@@ -2262,13 +2462,7 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *callable = PyObject_GetAttrString((PyObject *)pattern, "fullmatch");
-    if (callable == NULL) {
-        Py_DECREF(pattern);
-        return NULL;
-    }
-    PyObject *result = call_pattern_method(pattern, callable, subject);
-    Py_DECREF(callable);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_FULLMATCH);
     Py_DECREF(pattern);
     return result;
 }

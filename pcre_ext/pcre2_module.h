@@ -45,10 +45,17 @@ typedef struct {
     int pattern_is_bytes;
 #if defined(PCRE_EXT_HAVE_ATOMICS)
     _Atomic int jit_enabled;
+    _Atomic(pcre2_match_data *) cached_match_data;
+    _Atomic(pcre2_match_context *) cached_match_context;
 #else
     PyThread_type_lock jit_lock;
     int jit_enabled;
+    pcre2_match_data *cached_match_data;
+    pcre2_match_context *cached_match_context;
 #endif
+    int has_first_literal;
+    uint32_t first_literal;
+    int first_literal_caseless;
 } PatternObject;
 
 typedef struct {
