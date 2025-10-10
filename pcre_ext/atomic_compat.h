@@ -16,7 +16,7 @@ extern "C" {
 #if defined(_MSC_VER) && !defined(ATOMIC_COMPAT_FORCE_STDATOMIC)
 #  define ATOMIC_COMPAT_MSVC 1
 #else
-#  define how 0
+#  define ATOMIC_COMPAT_MSVC 0
 #endif
 
 #if !ATOMIC_COMPAT_MSVC
@@ -174,73 +174,85 @@ static inline void atomic_compat_size_store(volatile size_t *ptr, size_t value)
 #define atomic_compat_load(ptr) \
     _Generic(*(ptr), \
         int: (int)atomic_compat_long_load((volatile LONG *)(ptr)), \
+        volatile int: (int)atomic_compat_long_load((volatile LONG *)(ptr)), \
         unsigned int: (unsigned int)atomic_compat_long_load((volatile LONG *)(ptr)), \
+        volatile unsigned int: (unsigned int)atomic_compat_long_load((volatile LONG *)(ptr)), \
         long: (long)atomic_compat_long_load((volatile LONG *)(ptr)), \
+        volatile long: (long)atomic_compat_long_load((volatile LONG *)(ptr)), \
         unsigned long: (unsigned long)atomic_compat_long_load((volatile LONG *)(ptr)), \
-        uint32_t: (uint32_t)atomic_compat_long_load((volatile LONG *)(ptr)), \
+        volatile unsigned long: (unsigned long)atomic_compat_long_load((volatile LONG *)(ptr)), \
         size_t: atomic_compat_size_load((volatile size_t *)(ptr)), \
-        pcre2_match_data *: (pcre2_match_data *)atomic_compat_pointer_load((void * volatile *)(ptr)), \
-        pcre2_match_context *: (pcre2_match_context *)atomic_compat_pointer_load((void * volatile *)(ptr)), \
-        pcre2_jit_stack *: (pcre2_jit_stack *)atomic_compat_pointer_load((void * volatile *)(ptr)), \
-        void *: atomic_compat_pointer_load((void * volatile *)(ptr)) \
+        volatile size_t: atomic_compat_size_load((volatile size_t *)(ptr)), \
+        void *: atomic_compat_pointer_load((void * volatile *)(ptr)), \
+        volatile void *: atomic_compat_pointer_load((void * volatile *)(ptr)) \
     )
 
 #define atomic_compat_store(ptr, value) \
     _Generic(*(ptr), \
         int: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile int: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
         unsigned int: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile unsigned int: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
         long: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile long: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
         unsigned long: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
-        uint32_t: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile unsigned long: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
         size_t: atomic_compat_size_store((volatile size_t *)(ptr), (size_t)(value)), \
-        pcre2_match_data *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)), \
-        pcre2_match_context *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)), \
-        pcre2_jit_stack *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)), \
-        void *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)) \
+        volatile size_t: atomic_compat_size_store((volatile size_t *)(ptr), (size_t)(value)), \
+        void *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)), \
+        volatile void *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)) \
     )
 
 #define atomic_compat_exchange(ptr, value) \
     _Generic(*(ptr), \
         int: (int)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile int: (int)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
         unsigned int: (unsigned int)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile unsigned int: (unsigned int)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
         long: (long)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile long: (long)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
         unsigned long: (unsigned long)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
-        uint32_t: (uint32_t)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
-        pcre2_match_data *: (pcre2_match_data *)atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)), \
-        pcre2_match_context *: (pcre2_match_context *)atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)), \
-        pcre2_jit_stack *: (pcre2_jit_stack *)atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)), \
-        void *: atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)) \
+        volatile unsigned long: (unsigned long)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
+        void *: atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)), \
+        volatile void *: atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)) \
     )
 
 #define atomic_compat_fetch_add(ptr, value) \
     _Generic(*(ptr), \
         int: (int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile int: (int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)), \
         unsigned int: (unsigned int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile unsigned int: (unsigned int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)), \
         long: (long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)), \
+        volatile long: (long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)), \
         unsigned long: (unsigned long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)), \
-        uint32_t: (uint32_t)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)) \
+        volatile unsigned long: (unsigned long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)(value)) \
     )
 
 #define atomic_compat_fetch_sub(ptr, value) \
     _Generic(*(ptr), \
         int: (int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)-(value)), \
+        volatile int: (int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), (LONG)-(value)), \
         unsigned int: (unsigned int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), -(LONG)(value)), \
+        volatile unsigned int: (unsigned int)atomic_compat_long_fetch_add((volatile LONG *)(ptr), -(LONG)(value)), \
         long: (long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), -(LONG)(value)), \
+        volatile long: (long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), -(LONG)(value)), \
         unsigned long: (unsigned long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), -(LONG)(value)), \
-        uint32_t: (uint32_t)atomic_compat_long_fetch_add((volatile LONG *)(ptr), -(LONG)(value)) \
+        volatile unsigned long: (unsigned long)atomic_compat_long_fetch_add((volatile LONG *)(ptr), -(LONG)(value)) \
     )
 
 #define atomic_compat_compare_exchange(ptr, expected, desired) \
     _Generic(*(ptr), \
         int: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
+        volatile int: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
         unsigned int: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
+        volatile unsigned int: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
         long: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
+        volatile long: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
         unsigned long: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
-        uint32_t: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
-        pcre2_match_data *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)), \
-        pcre2_match_context *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)), \
-        pcre2_jit_stack *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)), \
-        void *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)) \
+        volatile unsigned long: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
+        void *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)), \
+        volatile void *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)) \
     )
 
 #define atomic_load_explicit(ptr, order) ((void)(order), atomic_compat_load(ptr))
