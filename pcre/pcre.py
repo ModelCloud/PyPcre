@@ -46,6 +46,7 @@ from .threads import (
     ensure_thread_pool,
     get_auto_threshold,
     get_thread_default,
+    threading_supported,
 )
 
 
@@ -654,6 +655,12 @@ def parallel_map(
         )
 
     if mode == _THREAD_MODE_AUTO and not _should_use_auto_threads(materials):
+        return [
+            bound_method(subject, pos=pos, endpos=endpos, options=options)
+            for subject in materials
+        ]
+
+    if not threading_supported():
         return [
             bound_method(subject, pos=pos, endpos=endpos, options=options)
             for subject in materials

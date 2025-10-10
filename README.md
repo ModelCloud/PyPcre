@@ -125,6 +125,9 @@ bytes.
   `match`, `search`, `fullmatch`, and `findall`. The helper preserves the
   order of the provided subjects and returns the same result objects you’d
   normally receive from the `Pattern` methods.
+- The threaded backend activates only on machines with at least eight CPU
+  cores; otherwise execution falls back to the sequential path regardless of
+  flags or configuration.
 - Threading is **opt-in by default** when Python runs without the GIL
   (e.g. Python with `-X gil=0` or `PYTHON_GIL=0`). When the GIL is active the default falls
   back to sequential execution to avoid needless overhead.

@@ -19,6 +19,10 @@ class TestThreadedBackend(unittest.TestCase):
         pcre.clear_cache()
         pcre.configure_threads(enabled=True, threshold=60_000)
 
+    def _skip_if_thread_barred(self) -> None:
+        if not thread_utils.threading_supported():
+            self.skipTest("threaded backend requires >=8 CPU cores")
+
     def test_parallel_map_disabled_via_flag(self):
         pattern = pcre.compile(r"requires-flag", Flag.NO_THREADS)
         subjects = ["alpha", "beta"]
@@ -37,6 +41,7 @@ class TestThreadedBackend(unittest.TestCase):
         self.assertEqual(pattern.thread_mode, "auto")
 
     def test_parallel_map_auto_default_threads_above_threshold(self):
+        self._skip_if_thread_barred()
         pattern = pcre.compile(r"seq")
         subjects = ["a" * 70_000, "b" * 70_000]
 
@@ -108,6 +113,7 @@ class TestThreadedBackend(unittest.TestCase):
         self.assertGreaterEqual(par_elapsed, 0.0)
 
     def test_parallel_cross_over_lengths(self):
+        self._skip_if_thread_barred()
         base_delay = 1e-05
         thread_penalty = 0.005
         tolerance = 0.003

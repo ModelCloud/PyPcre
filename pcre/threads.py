@@ -16,20 +16,41 @@ from typing import Final
 
 
 _POOL_NAME: Final[str] = "pcre-worker"
+_MIN_CORES_FOR_THREADS: Final[int] = 8
 _THREAD_POOL_LOCK = threading.RLock()
 _THREAD_POOL: ThreadPoolExecutor | None = None
 _THREAD_POOL_WORKERS: int | None = None
-_THREADS_DEFAULT: bool = not (hasattr(sys, "_is_gil_enabled") and sys._is_gil_enabled())
 _THREAD_AUTO_THRESHOLD: int = 60_000
 
 
+def _cpu_total() -> int:
+    return os.cpu_count() or 1
+
+
+def threading_supported() -> bool:
+    """Report whether the threaded backend is allowed on this machine."""
+
+    return _cpu_total() >= _MIN_CORES_FOR_THREADS
+
+
+_THREADS_DEFAULT: bool = threading_supported() and not (
+    hasattr(sys, "_is_gil_enabled") and sys._is_gil_enabled()
+)
+
+
 def _max_threads() -> int:
-    cpu_total = os.cpu_count() or 1
+    if not threading_supported():
+        return 0
+    cpu_total = _cpu_total()
     return max(1, cpu_total // 4)
 
 
 def _determine_worker_count(value: int | None) -> int:
     maximum = _max_threads()
+    if maximum == 0:
+        raise RuntimeError(
+            "Threaded backend requires at least 8 CPU cores; refusing to create pool"
+        )
     if value is None:
         return maximum
 
@@ -123,7 +144,11 @@ def configure_threads(*, enabled: bool | None = None, threshold: int | None = No
     global _THREAD_AUTO_THRESHOLD
 
     if enabled is not None:
-        _THREADS_DEFAULT = bool(enabled)
+        requested = bool(enabled)
+        if requested and not threading_supported():
+            _THREADS_DEFAULT = False
+        else:
+            _THREADS_DEFAULT = requested
 
     if threshold is not None:
         try:
@@ -156,4 +181,5 @@ __all__ = [
     "configure_threads",
     "get_thread_default",
     "get_auto_threshold",
+    "threading_supported",
 ]
