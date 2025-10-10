@@ -51,9 +51,9 @@ resolve_pcre2_prerelease(void)
 }
 
 static char pcre2_library_version[64] = "unknown";
-static _Atomic int pcre2_version_initialized = 0;
+static ATOMIC_VAR(int) pcre2_version_initialized = 0;
 #if defined(PCRE2_USE_OFFSET_LIMIT)
-static _Atomic int offset_limit_support = ATOMIC_VAR_INIT(-1);
+static ATOMIC_VAR(int) offset_limit_support = ATOMIC_VAR_INIT(-1);
 #endif
 
 static void detect_offset_limit_support(void);
@@ -67,16 +67,16 @@ typedef struct {
 } PatternCacheState;
 
 static Py_tss_t pattern_cache_tss = Py_tss_NEEDS_INIT;
-static _Atomic int pattern_cache_tss_ready = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(int) pattern_cache_tss_ready = ATOMIC_VAR_INIT(0);
 static PatternCacheState global_pattern_cache = {NULL, NULL, MODULE_COMPILE_CACHE_LIMIT};
 static PyThread_type_lock global_pattern_cache_lock = NULL;
-static _Atomic int pattern_cache_global_mode = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(int) pattern_cache_global_mode = ATOMIC_VAR_INIT(0);
 
 static int pcre_force_jit_lock = 0;
 static PyThread_type_lock jit_serial_lock = NULL;
 
 #if defined(PCRE_EXT_HAVE_ATOMICS)
-static _Atomic int default_jit_enabled = 1;
+static ATOMIC_VAR(int) default_jit_enabled = 1;
 #else
 static int default_jit_enabled = 1;
 static PyThread_type_lock default_jit_lock = NULL;
@@ -848,7 +848,7 @@ ascii_prefix_length_scalar(const char *data, Py_ssize_t max_len)
 static inline int
 ascii_vector_mode(void)
 {
-    static _Atomic int cached = ATOMIC_VAR_INIT(-1);
+    static ATOMIC_VAR(int) cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
     if (value != -1) {
         return value;

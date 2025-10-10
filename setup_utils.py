@@ -368,6 +368,7 @@ def _resolve_cmake_executable() -> str | None:
 _COMPILER_INITIALIZED = False
 _COMPILER_INSTANCE: CCompiler | None = None
 _COMPILER_FLAG_CACHE: dict[str, bool] = {}
+_COMPILER_FLAG_COMBO_CACHE: dict[tuple[tuple[str, ...], str], bool] = {}
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -747,30 +748,47 @@ def _should_disable_native_flags_for_macos(compiler: CCompiler | None) -> bool:
     return not _is_x86_architecture(arch)
 
 
-def _compiler_supports_flag(flag: str) -> bool:
-    cached = _COMPILER_FLAG_CACHE.get(flag)
+def _compiler_supports_flags(
+    flags: Iterable[str], *, code: str | None = None
+) -> bool:
+    normalized = tuple(str(flag) for flag in flags if flag)
+    source_code = code or "int main(void) { return 0; }\n"
+    cache_key = (normalized, source_code)
+
+    cached = _COMPILER_FLAG_COMBO_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     compiler = _get_test_compiler()
     if compiler is None:
-        _COMPILER_FLAG_CACHE[flag] = False
+        _COMPILER_FLAG_COMBO_CACHE[cache_key] = False
         return False
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        source = Path(tmpdir) / "flag_check.c"
-        source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        source_path = Path(tmpdir) / "flag_check.c"
+        source_path.write_text(source_code, encoding="utf-8")
         try:
             compiler.compile(
-                [str(source)],
+                [str(source_path)],
                 output_dir=tmpdir,
-                extra_postargs=[flag],
+                extra_postargs=list(normalized),
             )
         except (CCompilerError, DistutilsExecError, OSError):
-            _COMPILER_FLAG_CACHE[flag] = False
+            _COMPILER_FLAG_COMBO_CACHE[cache_key] = False
         else:
-            _COMPILER_FLAG_CACHE[flag] = True
-    return _COMPILER_FLAG_CACHE[flag]
+            _COMPILER_FLAG_COMBO_CACHE[cache_key] = True
+
+    return _COMPILER_FLAG_COMBO_CACHE[cache_key]
+
+
+def _compiler_supports_flag(flag: str) -> bool:
+    cached = _COMPILER_FLAG_CACHE.get(flag)
+    if cached is not None:
+        return cached
+
+    result = _compiler_supports_flags([flag])
+    _COMPILER_FLAG_CACHE[flag] = result
+    return result
 
 
 def _augment_compile_flags(flags: list[str]) -> None:
@@ -1046,6 +1064,7 @@ header_exists = _header_exists
 library_exists = _library_exists
 augment_compile_flags = _augment_compile_flags
 compiler_supports_flag = _compiler_supports_flag
+compiler_supports_flags = _compiler_supports_flags
 has_header = _has_header
 has_library = _has_library
 is_truthy_env = _is_truthy_env
@@ -1068,6 +1087,7 @@ __all__ = [
     "library_exists",
     "augment_compile_flags",
     "compiler_supports_flag",
+    "compiler_supports_flags",
     "has_header",
     "has_library",
     "is_truthy_env",

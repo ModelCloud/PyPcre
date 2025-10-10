@@ -13,11 +13,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if !defined(__STDC_NO_ATOMICS__)
-#   include <stdatomic.h>
-#   define PCRE_EXT_HAVE_ATOMICS 1
-#endif
-
 #if !defined(PCRE2_CODE_UNIT_WIDTH)
 #define PCRE2_CODE_UNIT_WIDTH 8
 #endif
@@ -34,6 +29,12 @@
 #   include "pcre2.h"
 #endif
 
+#include "atomic_compat.h"
+
+#if ATOMIC_COMPAT_HAVE_ATOMICS
+#   define PCRE_EXT_HAVE_ATOMICS 1
+#endif
+
 typedef struct {
     PyObject_HEAD
     pcre2_code *code;
@@ -44,9 +45,9 @@ typedef struct {
     uint32_t capture_count;
     int pattern_is_bytes;
 #if defined(PCRE_EXT_HAVE_ATOMICS)
-    _Atomic int jit_enabled;
-    _Atomic(pcre2_match_data *) cached_match_data;
-    _Atomic(pcre2_match_context *) cached_match_context;
+    ATOMIC_VAR(int) jit_enabled;
+    ATOMIC_VAR(pcre2_match_data *) cached_match_data;
+    ATOMIC_VAR(pcre2_match_context *) cached_match_context;
 #else
     PyThread_type_lock jit_lock;
     int jit_enabled;
