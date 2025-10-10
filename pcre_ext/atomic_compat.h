@@ -171,6 +171,30 @@ static inline void atomic_compat_size_store(volatile size_t *ptr, size_t value)
 }
 #endif
 
+static inline void *atomic_compat_pointer_default_load(void * volatile *ptr)
+{
+    return atomic_compat_pointer_load(ptr);
+}
+
+static inline void atomic_compat_pointer_default_store(void * volatile *ptr, void *value)
+{
+    atomic_compat_pointer_store(ptr, value);
+}
+
+static inline void *atomic_compat_pointer_default_exchange(void * volatile *ptr, void *value)
+{
+    return atomic_compat_pointer_exchange(ptr, value);
+}
+
+static inline int atomic_compat_pointer_default_compare_exchange(
+    void * volatile *ptr,
+    void **expected,
+    void *desired
+)
+{
+    return atomic_compat_pointer_compare_exchange(ptr, expected, desired);
+}
+
 #define atomic_compat_load(ptr) \
     _Generic(*(ptr), \
         int: (int)atomic_compat_long_load((volatile LONG *)(ptr)), \
@@ -183,8 +207,7 @@ static inline void atomic_compat_size_store(volatile size_t *ptr, size_t value)
         volatile unsigned long: (unsigned long)atomic_compat_long_load((volatile LONG *)(ptr)), \
         size_t: atomic_compat_size_load((volatile size_t *)(ptr)), \
         volatile size_t: atomic_compat_size_load((volatile size_t *)(ptr)), \
-        void *: atomic_compat_pointer_load((void * volatile *)(ptr)), \
-        volatile void *: atomic_compat_pointer_load((void * volatile *)(ptr)) \
+        default: atomic_compat_pointer_default_load((void * volatile *)(ptr)) \
     )
 
 #define atomic_compat_store(ptr, value) \
@@ -199,8 +222,7 @@ static inline void atomic_compat_size_store(volatile size_t *ptr, size_t value)
         volatile unsigned long: atomic_compat_long_store((volatile LONG *)(ptr), (LONG)(value)), \
         size_t: atomic_compat_size_store((volatile size_t *)(ptr), (size_t)(value)), \
         volatile size_t: atomic_compat_size_store((volatile size_t *)(ptr), (size_t)(value)), \
-        void *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)), \
-        volatile void *: atomic_compat_pointer_store((void * volatile *)(ptr), (void *)(value)) \
+        default: atomic_compat_pointer_default_store((void * volatile *)(ptr), (void *)(value)) \
     )
 
 #define atomic_compat_exchange(ptr, value) \
@@ -213,8 +235,7 @@ static inline void atomic_compat_size_store(volatile size_t *ptr, size_t value)
         volatile long: (long)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
         unsigned long: (unsigned long)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
         volatile unsigned long: (unsigned long)atomic_compat_long_exchange((volatile LONG *)(ptr), (LONG)(value)), \
-        void *: atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)), \
-        volatile void *: atomic_compat_pointer_exchange((void * volatile *)(ptr), (void *)(value)) \
+        default: atomic_compat_pointer_default_exchange((void * volatile *)(ptr), (void *)(value)) \
     )
 
 #define atomic_compat_fetch_add(ptr, value) \
@@ -251,8 +272,7 @@ static inline void atomic_compat_size_store(volatile size_t *ptr, size_t value)
         volatile long: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
         unsigned long: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
         volatile unsigned long: atomic_compat_long_compare_exchange((volatile LONG *)(ptr), (LONG *)(expected), (LONG)(desired)), \
-        void *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)), \
-        volatile void *: atomic_compat_pointer_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)) \
+        default: atomic_compat_pointer_default_compare_exchange((void * volatile *)(ptr), (void **)(expected), (void *)(desired)) \
     )
 
 #define atomic_load_explicit(ptr, order) ((void)(order), atomic_compat_load(ptr))
