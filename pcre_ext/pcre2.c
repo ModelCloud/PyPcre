@@ -865,6 +865,7 @@ ascii_vector_mode(void)
 #  endif
 #endif
 #if defined(PCRE_HAVE_CPU_SUPPORTS)
+    __builtin_cpu_init();
     if (__builtin_cpu_supports("avx512bw")) {
         detected = 3;
     } else if (__builtin_cpu_supports("avx2")) {
