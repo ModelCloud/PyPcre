@@ -117,7 +117,29 @@ def join_parts(parts: List[Any], *, is_bytes: bool) -> Any:
     return "".join(parts)
 
 
-def render_template(parsed: List[Any], match: "Match", *, is_bytes: bool, empty: Any) -> Any:
+def render_template(parsed: Any, match: "Match", *, is_bytes: bool, empty: Any) -> Any:
+    """Render a parsed replacement template across Python versions."""
+
+    # Python 3.11's ``parse_template`` returns a ``(groups, literals)`` tuple,
+    # whereas newer versions return a flat list. We support both shapes here.
+    if (
+        isinstance(parsed, tuple)
+        and len(parsed) == 2
+        and isinstance(parsed[0], list)
+        and isinstance(parsed[1], list)
+    ):
+        group_slots, literals = parsed
+        # Copy literals so repeated substitutions reuse the cached template.
+        pieces: List[Any] = [empty if part is None else part for part in literals]
+        for slot_index, group_index in group_slots:
+            group_value = match.group(group_index)
+            pieces[slot_index] = coerce_group_value(
+                group_value,
+                is_bytes=is_bytes,
+                empty=empty,
+            )
+        return join_parts(pieces, is_bytes=is_bytes)
+
     pieces: List[Any] = []
     for item in parsed:
         if isinstance(item, int):
