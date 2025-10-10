@@ -31,6 +31,20 @@ _LIBRARY_BASENAME: str | None = None
 _LIBRARY_SEARCH_PATTERNS: tuple[str, ...] = ()
 
 
+def _ensure_macos_archflags() -> None:
+    if sys.platform != "darwin":
+        return
+    if os.environ.get("ARCHFLAGS"):
+        return
+    machine = platform.machine()
+    if not machine:
+        return
+    normalized = machine.lower()
+    if normalized == "aarch64":
+        normalized = "arm64"
+    os.environ["ARCHFLAGS"] = f"-arch {normalized}"
+
+
 def configure_environment(
     *,
     pcre_ext_dir: Path,
@@ -51,6 +65,8 @@ def configure_environment(
     _LIB_EXTENSIONS = tuple(lib_extensions)
     _LIBRARY_BASENAME = library_basename
     _LIBRARY_SEARCH_PATTERNS = tuple(library_search_patterns)
+
+    _ensure_macos_archflags()
 
 
 def _require_config(value: object, name: str) -> object:
