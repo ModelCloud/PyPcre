@@ -378,6 +378,32 @@ def test_cache_strategy_cannot_switch_after_use(monkeypatch: pytest.MonkeyPatch)
         cache_mod.cache_strategy("global")
 
 
+def test_thread_cache_cleanup_no_leak() -> None:
+    script = textwrap.dedent(
+        """
+        import gc
+        import json
+        import threading
+        import pcre_ext_c as ext
+
+        def worker() -> None:
+            for _ in range(200):
+                ext.match("foo", "foo")
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        gc.collect()
+        print(json.dumps({"count": ext._debug_thread_cache_count()}))
+        """
+    )
+    data = _run_cache_script(script, env_overrides={"PYPCRE_DEBUG": "1"})
+    assert data["count"] == 0
+
+
 def test_cache_strategy_global_shares_cache_across_threads() -> None:
     script = textwrap.dedent(
         """

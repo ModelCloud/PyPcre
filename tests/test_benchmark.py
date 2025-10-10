@@ -27,10 +27,10 @@ except ImportError:  # pragma: no cover - optional dependency
 from tabulate import tabulate
 
 
-RUN_BENCHMARKS = os.getenv("PCRE2_RUN_BENCHMARKS") == "1"
-THREAD_COUNT = int(os.getenv("PCRE2_BENCH_THREADS", "16"))
-SINGLE_ITERATIONS = int(os.getenv("PCRE2_BENCH_ITERS", "5000"))
-THREAD_ITERATIONS = int(os.getenv("PCRE2_BENCH_THREAD_ITERS", "40"))
+RUN_BENCHMARKS = os.getenv("PYPCRE_RUN_BENCHMARKS") == "1"
+THREAD_COUNT = int(os.getenv("PYPCRE_BENCH_THREADS", "16"))
+SINGLE_ITERATIONS = int(os.getenv("PYPCRE_BENCH_ITERS", "5000"))
+THREAD_ITERATIONS = int(os.getenv("PYPCRE_BENCH_THREAD_ITERS", "40"))
 
 
 UNICODE_SAMPLE_LENGTH = 128
@@ -98,7 +98,7 @@ def _build_module_operations(module):
     return operations
 
 
-@unittest.skipUnless(RUN_BENCHMARKS, "Set PCRE2_RUN_BENCHMARKS=1 to enable benchmark tests")
+@unittest.skipUnless(RUN_BENCHMARKS, "Set PYPCRE_RUN_BENCHMARKS=1 to enable benchmark tests")
 class TestRegexBenchmarks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
