@@ -94,16 +94,10 @@ current limit with `pcre.get_cache_limit()`. The cache can be emptied at any tim
 with `pcre.clear_cache()`.
 
 Applications that prefer the historic global cache can opt back in before any
-compilation takes place:
-
-```python
-import pcre
-
-pcre.cache_strategy("global")  # call before compile()/match()/search()
-```
-
-Switching strategies after patterns have been compiled raises `RuntimeError`, so
-pick the desired mode during process start-up.
+compilation takes place by setting `PYPCRE_CACHE_PATTERN_GLOBAL=1` in the
+environment **before importing** `pcre`. Runtime switching is no longer
+supported; altering the value after patterns have been compiled raises
+`RuntimeError`.
 
 ### Text versus bytes defaults
 
@@ -197,7 +191,7 @@ wrapper exposes two complementary ways to adjust that behaviour:
 
 ## Pattern cache
 - `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries per thread by default.
-- Call `pcre.cache_strategy("global")` once at boot if you need a shared, process-wide cache instead of isolated thread stores.
+- Set `PYPCRE_CACHE_PATTERN_GLOBAL=1` before importing `pcre` if you need a shared, process-wide cache instead of isolated thread stores.
 - Use `pcre.clear_cache()` when you need to free the active cache proactively.
 - Non-hashable pattern objects skip the cache and are compiled each time.
 

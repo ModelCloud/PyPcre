@@ -7,25 +7,13 @@
 
 #include <string.h>
 
-typedef struct MatchDataCacheEntry {
-    pcre2_match_data *match_data;
-    uint32_t ovec_count;
-    struct MatchDataCacheEntry *next;
-} MatchDataCacheEntry;
-
-typedef struct JitStackCacheEntry {
-    pcre2_jit_stack *jit_stack;
-    struct JitStackCacheEntry *next;
-} JitStackCacheEntry;
-
 typedef struct ThreadCacheState {
-    MatchDataCacheEntry *match_head;
+    pcre2_match_data *match_cached;
+    uint32_t match_ovec_count;
     uint32_t match_capacity;
-    uint32_t match_count;
 
-    JitStackCacheEntry *jit_head;
+    pcre2_jit_stack *jit_cached;
     uint32_t jit_capacity;
-    uint32_t jit_count;
     size_t jit_start_size;
     size_t jit_max_size;
 
@@ -38,152 +26,45 @@ typedef enum CacheStrategy {
     CACHE_STRATEGY_GLOBAL = 1
 } CacheStrategy;
 
-static CacheStrategy cache_strategy = CACHE_STRATEGY_THREAD_LOCAL;
-static int cache_strategy_locked = 0;
-static PyThread_type_lock cache_state_lock = NULL;
-static int context_cache_enabled = 1;
-
-static inline void
-cache_state_lock_acquire(void)
-{
-    if (cache_state_lock != NULL) {
-        PyThread_acquire_lock(cache_state_lock, 1);
-    }
-}
-
-static inline void
-cache_state_lock_release(void)
-{
-    if (cache_state_lock != NULL) {
-        PyThread_release_lock(cache_state_lock);
-    }
-}
-
-static inline CacheStrategy
-cache_strategy_get(void)
-{
-    return cache_strategy;
-}
-
-static inline void
-cache_strategy_set(CacheStrategy strategy)
-{
-    cache_state_lock_acquire();
-    cache_strategy = strategy;
-    cache_state_lock_release();
-}
-
-static inline void
-cache_strategy_set_locked(int locked)
-{
-    cache_state_lock_acquire();
-    cache_strategy_locked = locked;
-    cache_state_lock_release();
-}
-
-static inline const char *
-cache_strategy_name(CacheStrategy strategy)
-{
-    return strategy == CACHE_STRATEGY_THREAD_LOCAL ? "thread-local" : "global";
-}
-
-static inline void
-mark_cache_strategy_locked(void)
-{
-    if (!cache_strategy_locked) {
-        cache_state_lock_acquire();
-        if (!cache_strategy_locked) {
-            cache_strategy_locked = 1;
-        }
-        cache_state_lock_release();
-    }
-}
-
-/* -------------------------------------------------------------------------- */
-/* Thread-local cache implementation                                         */
-/* -------------------------------------------------------------------------- */
+static _Atomic CacheStrategy cache_strategy = ATOMIC_VAR_INIT(CACHE_STRATEGY_THREAD_LOCAL);
+static _Atomic int cache_strategy_locked = ATOMIC_VAR_INIT(0);
 
 static Py_tss_t cache_tss = Py_tss_NEEDS_INIT;
-static int cache_tss_created = 0;
+static _Atomic int cache_tss_ready = ATOMIC_VAR_INIT(0);
 
-static inline int
-cache_tss_is_created(void)
+static _Atomic int context_cache_enabled = ATOMIC_VAR_INIT(1);
+
+static _Atomic(pcre2_match_data *) global_match_cached = ATOMIC_VAR_INIT(NULL);
+static _Atomic uint32_t global_match_ovec_count = ATOMIC_VAR_INIT(0);
+static _Atomic uint32_t global_match_capacity = ATOMIC_VAR_INIT(1);
+
+static _Atomic(pcre2_jit_stack *) global_jit_cached = ATOMIC_VAR_INIT(NULL);
+static _Atomic uint32_t global_jit_capacity = ATOMIC_VAR_INIT(1);
+static _Atomic size_t global_jit_start_size = ATOMIC_VAR_INIT(32 * 1024);
+static _Atomic size_t global_jit_max_size = ATOMIC_VAR_INIT(1024 * 1024);
+
+static inline uint32_t
+clamp_cache_capacity(unsigned long value)
 {
-    int created;
-    cache_state_lock_acquire();
-    created = cache_tss_created;
-    cache_state_lock_release();
-    return created;
+    return value == 0 ? 0u : 1u;
 }
 
-static inline void
-cache_tss_set_created(int created)
+static inline uint32_t
+required_ovector_pairs(PatternObject *self)
 {
-    cache_state_lock_acquire();
-    cache_tss_created = created;
-    cache_state_lock_release();
+    uint32_t required = self->capture_count + 1;
+    if (required == 0) {
+        required = 1;
+    }
+    return required;
 }
 
-static ThreadCacheState *thread_cache_state_get(void);
-static ThreadCacheState *thread_cache_state_get_or_create(void);
-static void thread_match_data_cache_free_all(ThreadCacheState *state);
-static void thread_match_data_cache_evict_tail(ThreadCacheState *state);
-static void thread_jit_stack_cache_free_all(ThreadCacheState *state);
-static void thread_jit_stack_cache_evict_tail(ThreadCacheState *state);
-
-static int
-thread_cache_initialize(void)
-{
-    cache_state_lock_acquire();
-    if (!cache_tss_created) {
-        if (PyThread_tss_create(&cache_tss) != 0) {
-            cache_state_lock_release();
-            PyErr_NoMemory();
-            return -1;
-        }
-        cache_tss_created = 1;
-    }
-    cache_state_lock_release();
-
-    if (thread_cache_state_get() == NULL) {
-        ThreadCacheState *state = thread_cache_state_get_or_create();
-        if (state == NULL) {
-            PyThread_tss_delete(&cache_tss);
-            cache_tss_set_created(0);
-            return -1;
-        }
-        (void)state;
-    }
-
-    return 0;
-}
-
-static void
-thread_cache_teardown(void)
-{
-    if (!cache_tss_is_created()) {
-        return;
-    }
-
-    ThreadCacheState *state = thread_cache_state_get();
-    if (state != NULL) {
-        thread_match_data_cache_free_all(state);
-        thread_jit_stack_cache_free_all(state);
-        PyMem_Free(state);
-        PyThread_tss_set(&cache_tss, NULL);
-    }
-
-    PyThread_tss_delete(&cache_tss);
-    cache_tss_set_created(0);
-}
-
-static ThreadCacheState *
+static inline ThreadCacheState *
 thread_cache_state_get(void)
 {
-    if (!cache_tss_is_created()) {
+    if (!atomic_load_explicit(&cache_tss_ready, memory_order_acquire)) {
         return NULL;
     }
-
     return (ThreadCacheState *)PyThread_tss_get(&cache_tss);
 }
 
@@ -195,7 +76,7 @@ thread_cache_state_get_or_create(void)
         return state;
     }
 
-    if (!cache_tss_is_created()) {
+    if (!atomic_load_explicit(&cache_tss_ready, memory_order_acquire)) {
         PyErr_SetString(PyExc_RuntimeError, "cache subsystem not initialized");
         return NULL;
     }
@@ -206,8 +87,8 @@ thread_cache_state_get_or_create(void)
         return NULL;
     }
 
-    state->match_capacity = 8;
-    state->jit_capacity = 4;
+    state->match_capacity = 1;
+    state->jit_capacity = 1;
     state->jit_start_size = 32 * 1024;
     state->jit_max_size = 1024 * 1024;
 
@@ -220,19 +101,34 @@ thread_cache_state_get_or_create(void)
     return state;
 }
 
-static void
-thread_match_data_cache_free_all(ThreadCacheState *state)
+static inline void
+thread_match_cache_clear(ThreadCacheState *state)
 {
-    MatchDataCacheEntry *node = state->match_head;
-    state->match_head = NULL;
-    state->match_count = 0;
-
-    while (node != NULL) {
-        MatchDataCacheEntry *next = node->next;
-        pcre2_match_data_free(node->match_data);
-        pcre_free(node);
-        node = next;
+    if (state->match_cached != NULL) {
+        pcre2_match_data_free(state->match_cached);
+        state->match_cached = NULL;
+        state->match_ovec_count = 0;
     }
+}
+
+static inline void
+thread_jit_cache_clear(ThreadCacheState *state)
+{
+    if (state->jit_cached != NULL) {
+        pcre2_jit_stack_free(state->jit_cached);
+        state->jit_cached = NULL;
+    }
+}
+
+static void
+thread_cache_state_clear(ThreadCacheState *state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    thread_match_cache_clear(state);
+    thread_jit_cache_clear(state);
 
     if (state->match_context != NULL) {
         pcre2_match_context_free(state->match_context);
@@ -245,324 +141,117 @@ thread_match_data_cache_free_all(ThreadCacheState *state)
 }
 
 static void
-thread_match_data_cache_evict_tail(ThreadCacheState *state)
+thread_cache_teardown(void)
 {
-    MatchDataCacheEntry *prev = NULL;
-    MatchDataCacheEntry *node = state->match_head;
-
-    if (node == NULL) {
+    if (!atomic_load_explicit(&cache_tss_ready, memory_order_acquire)) {
         return;
     }
 
-    while (node->next != NULL) {
-        prev = node;
-        node = node->next;
+    ThreadCacheState *state = thread_cache_state_get();
+    if (state != NULL) {
+        thread_cache_state_clear(state);
+        PyMem_Free(state);
+        PyThread_tss_set(&cache_tss, NULL);
     }
 
-    if (prev != NULL) {
-        prev->next = NULL;
-    } else {
-        state->match_head = NULL;
-    }
-
-    if (state->match_count > 0) {
-        state->match_count--;
-    }
-
-    pcre2_match_data_free(node->match_data);
-    pcre_free(node);
+    PyThread_tss_delete(&cache_tss);
+    atomic_store_explicit(&cache_tss_ready, 0, memory_order_release);
 }
 
-static void
-thread_jit_stack_cache_free_all(ThreadCacheState *state)
+static inline void
+global_match_cache_clear(void)
 {
-    JitStackCacheEntry *node = state->jit_head;
-    state->jit_head = NULL;
-    state->jit_count = 0;
-
-    while (node != NULL) {
-        JitStackCacheEntry *next = node->next;
-        pcre2_jit_stack_free(node->jit_stack);
-        pcre_free(node);
-        node = next;
+    pcre2_match_data *cached = atomic_exchange_explicit(&global_match_cached, NULL, memory_order_acq_rel);
+    if (cached != NULL) {
+        pcre2_match_data_free(cached);
     }
+    atomic_store_explicit(&global_match_ovec_count, 0, memory_order_release);
 }
 
-static void
-thread_jit_stack_cache_evict_tail(ThreadCacheState *state)
+static inline void
+global_jit_cache_clear(void)
 {
-    JitStackCacheEntry *prev = NULL;
-    JitStackCacheEntry *node = state->jit_head;
-
-    if (node == NULL) {
-        return;
+    pcre2_jit_stack *cached = atomic_exchange_explicit(&global_jit_cached, NULL, memory_order_acq_rel);
+    if (cached != NULL) {
+        pcre2_jit_stack_free(cached);
     }
-
-    while (node->next != NULL) {
-        prev = node;
-        node = node->next;
-    }
-
-    if (prev != NULL) {
-        prev->next = NULL;
-    } else {
-        state->jit_head = NULL;
-    }
-
-    if (state->jit_count > 0) {
-        state->jit_count--;
-    }
-
-    pcre2_jit_stack_free(node->jit_stack);
-    pcre_free(node);
-}
-
-/* -------------------------------------------------------------------------- */
-/* Global cache implementation                                               */
-/* -------------------------------------------------------------------------- */
-
-static MatchDataCacheEntry *global_match_head = NULL;
-static uint32_t global_match_capacity = 32;
-static uint32_t global_match_count = 0;
-static PyThread_type_lock global_match_lock = NULL;
-
-static JitStackCacheEntry *global_jit_head = NULL;
-static uint32_t global_jit_capacity = 16;
-static uint32_t global_jit_count = 0;
-static PyThread_type_lock global_jit_lock = NULL;
-static size_t global_jit_start_size = 32 * 1024;
-static size_t global_jit_max_size = 1024 * 1024;
-
-static int
-global_cache_initialize(void)
-{
-    int match_allocated = 0;
-
-    if (global_match_lock == NULL) {
-        global_match_lock = PyThread_allocate_lock();
-        if (global_match_lock == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        match_allocated = 1;
-    }
-
-    if (global_jit_lock == NULL) {
-        global_jit_lock = PyThread_allocate_lock();
-        if (global_jit_lock == NULL) {
-            PyErr_NoMemory();
-            if (match_allocated) {
-                PyThread_free_lock(global_match_lock);
-                global_match_lock = NULL;
-            }
-            return -1;
-        }
-    }
-
-    return 0;
-}
-
-static void
-global_match_data_cache_free_all_locked(void)
-{
-    MatchDataCacheEntry *node = global_match_head;
-    global_match_head = NULL;
-    global_match_count = 0;
-
-    while (node != NULL) {
-        MatchDataCacheEntry *next = node->next;
-        pcre2_match_data_free(node->match_data);
-        pcre_free(node);
-        node = next;
-    }
-}
-
-static void
-global_match_data_cache_evict_tail_locked(void)
-{
-    if (global_match_head == NULL) {
-        return;
-    }
-
-    MatchDataCacheEntry *prev = NULL;
-    MatchDataCacheEntry *node = global_match_head;
-    while (node->next != NULL) {
-        prev = node;
-        node = node->next;
-    }
-
-    if (prev != NULL) {
-        prev->next = NULL;
-    } else {
-        global_match_head = NULL;
-    }
-
-    if (global_match_count > 0) {
-        global_match_count--;
-    }
-
-    pcre2_match_data_free(node->match_data);
-    pcre_free(node);
-}
-
-static void
-global_jit_stack_cache_free_all_locked(void)
-{
-    JitStackCacheEntry *node = global_jit_head;
-    global_jit_head = NULL;
-    global_jit_count = 0;
-
-    while (node != NULL) {
-        JitStackCacheEntry *next = node->next;
-        pcre2_jit_stack_free(node->jit_stack);
-        pcre_free(node);
-        node = next;
-    }
-}
-
-static void
-global_jit_stack_cache_evict_tail_locked(void)
-{
-    if (global_jit_head == NULL) {
-        return;
-    }
-
-    JitStackCacheEntry *prev = NULL;
-    JitStackCacheEntry *node = global_jit_head;
-    while (node->next != NULL) {
-        prev = node;
-        node = node->next;
-    }
-
-    if (prev != NULL) {
-        prev->next = NULL;
-    } else {
-        global_jit_head = NULL;
-    }
-
-    if (global_jit_count > 0) {
-        global_jit_count--;
-    }
-
-    pcre2_jit_stack_free(node->jit_stack);
-    pcre_free(node);
 }
 
 static void
 global_cache_teardown(void)
 {
-    if (global_match_lock != NULL) {
-        PyThread_acquire_lock(global_match_lock, 1);
-        global_match_data_cache_free_all_locked();
-        PyThread_release_lock(global_match_lock);
-        PyThread_free_lock(global_match_lock);
-        global_match_lock = NULL;
-    } else {
-        global_match_data_cache_free_all_locked();
-    }
-
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-        global_jit_stack_cache_free_all_locked();
-        PyThread_release_lock(global_jit_lock);
-        PyThread_free_lock(global_jit_lock);
-        global_jit_lock = NULL;
-    } else {
-        global_jit_stack_cache_free_all_locked();
-    }
-
-    global_match_capacity = 32;
-    global_match_count = 0;
-    global_jit_capacity = 16;
-    global_jit_count = 0;
-    global_jit_start_size = 32 * 1024;
-    global_jit_max_size = 1024 * 1024;
+    global_match_cache_clear();
+    global_jit_cache_clear();
+    atomic_store_explicit(&global_match_capacity, 1, memory_order_release);
+    atomic_store_explicit(&global_jit_capacity, 1, memory_order_release);
+    atomic_store_explicit(&global_jit_start_size, 32 * 1024, memory_order_release);
+    atomic_store_explicit(&global_jit_max_size, 1024 * 1024, memory_order_release);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Shared entry points                                                        */
-/* -------------------------------------------------------------------------- */
-
-int
-cache_initialize(void)
+static inline CacheStrategy
+cache_strategy_get(void)
 {
-    if (cache_state_lock == NULL) {
-        cache_state_lock = PyThread_allocate_lock();
-        if (cache_state_lock == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-    }
-
-    if (thread_cache_initialize() < 0) {
-        return -1;
-    }
-    if (global_cache_initialize() < 0) {
-        thread_cache_teardown();
-        return -1;
-    }
-    return 0;
+    return atomic_load_explicit(&cache_strategy, memory_order_acquire);
 }
 
-void
-cache_teardown(void)
+static inline void
+cache_strategy_set(CacheStrategy strategy)
 {
-    thread_cache_teardown();
-    global_cache_teardown();
-    cache_strategy_set_locked(0);
-    cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
-    if (cache_state_lock != NULL) {
-        PyThread_free_lock(cache_state_lock);
-        cache_state_lock = NULL;
-    }
+    atomic_store_explicit(&cache_strategy, strategy, memory_order_release);
+}
+
+static inline void
+cache_strategy_set_locked(int locked)
+{
+    atomic_store_explicit(&cache_strategy_locked, locked ? 1 : 0, memory_order_release);
+}
+
+static inline void
+mark_cache_strategy_locked(void)
+{
+    int expected = 0;
+    (void)atomic_compare_exchange_strong_explicit(
+        &cache_strategy_locked,
+        &expected,
+        1,
+        memory_order_acq_rel,
+        memory_order_acquire
+    );
+}
+
+static inline const char *
+cache_strategy_name(CacheStrategy strategy)
+{
+    return strategy == CACHE_STRATEGY_THREAD_LOCAL ? "thread-local" : "global";
 }
 
 static pcre2_match_data *
 thread_match_data_cache_acquire(PatternObject *self)
 {
     ThreadCacheState *state = thread_cache_state_get_or_create();
-    uint32_t required_pairs;
-    pcre2_match_data *cached = NULL;
-
     if (state == NULL) {
         return NULL;
     }
 
-    required_pairs = self->capture_count + 1;
-    if (required_pairs == 0) {
-        required_pairs = 1;
-    }
+    uint32_t required_pairs = required_ovector_pairs(self);
 
-    if (state->match_capacity != 0) {
-        MatchDataCacheEntry **link = &state->match_head;
-        MatchDataCacheEntry *entry = state->match_head;
-        while (entry != NULL) {
-            if (entry->ovec_count >= required_pairs) {
-                *link = entry->next;
-                if (state->match_count > 0) {
-                    state->match_count--;
-                }
-                cached = entry->match_data;
-                pcre_free(entry);
-                break;
-            }
-            link = &entry->next;
-            entry = entry->next;
+    if (state->match_capacity != 0 && state->match_cached != NULL) {
+        if (state->match_ovec_count >= required_pairs) {
+            pcre2_match_data *cached = state->match_cached;
+            state->match_cached = NULL;
+            state->match_ovec_count = 0;
+            return cached;
         }
-
-        if (cached == NULL && state->match_count >= state->match_capacity) {
-            thread_match_data_cache_evict_tail(state);
-        }
-    }
-
-    if (cached != NULL) {
-        return cached;
+        pcre2_match_data_free(state->match_cached);
+        state->match_cached = NULL;
+        state->match_ovec_count = 0;
     }
 
     pcre2_match_data *match_data = pcre2_match_data_create(required_pairs, NULL);
     if (match_data != NULL) {
         return match_data;
     }
+
     return pcre2_match_data_create_from_pattern(self->code, NULL);
 }
 
@@ -577,77 +266,38 @@ thread_match_data_cache_release(pcre2_match_data *match_data)
         return;
     }
 
-    if (state->match_capacity == 0) {
+    if (state->match_capacity == 0 || state->match_cached != NULL) {
         pcre2_match_data_free(match_data);
         return;
     }
 
-    MatchDataCacheEntry *entry = pcre_malloc(sizeof(*entry));
-    if (entry == NULL) {
-        pcre2_match_data_free(match_data);
-        return;
-    }
-
-    entry->match_data = match_data;
-    entry->ovec_count = pcre2_get_ovector_count(match_data);
-    entry->next = state->match_head;
-    state->match_head = entry;
-    state->match_count++;
-
-    while (state->match_count > state->match_capacity) {
-        thread_match_data_cache_evict_tail(state);
-    }
+    state->match_cached = match_data;
+    state->match_ovec_count = pcre2_get_ovector_count(match_data);
 }
 
 static pcre2_match_data *
 global_match_data_cache_acquire(PatternObject *self)
 {
-    uint32_t required_pairs;
-    pcre2_match_data *cached = NULL;
+    uint32_t required_pairs = required_ovector_pairs(self);
 
-    required_pairs = self->capture_count + 1;
-    if (required_pairs == 0) {
-        required_pairs = 1;
-    }
-
-    if (global_match_lock != NULL) {
-        PyThread_acquire_lock(global_match_lock, 1);
-    }
-
-    if (global_match_capacity != 0) {
-        MatchDataCacheEntry **link = &global_match_head;
-        MatchDataCacheEntry *entry = global_match_head;
-        while (entry != NULL) {
-            if (entry->ovec_count >= required_pairs) {
-                *link = entry->next;
-                if (global_match_count > 0) {
-                    global_match_count--;
-                }
-                cached = entry->match_data;
-                pcre_free(entry);
-                break;
+    if (atomic_load_explicit(&global_match_capacity, memory_order_acquire) != 0) {
+        pcre2_match_data *cached = atomic_exchange_explicit(&global_match_cached, NULL, memory_order_acq_rel);
+        if (cached != NULL) {
+            uint32_t cached_pairs = atomic_load_explicit(&global_match_ovec_count, memory_order_acquire);
+            if (cached_pairs >= required_pairs) {
+                atomic_store_explicit(&global_match_ovec_count, 0, memory_order_release);
+                return cached;
             }
-            link = &entry->next;
-            entry = entry->next;
+            pcre2_match_data_free(cached);
+            atomic_store_explicit(&global_match_ovec_count, 0, memory_order_release);
         }
-
-        if (cached == NULL && global_match_count >= global_match_capacity) {
-            global_match_data_cache_evict_tail_locked();
-        }
-    }
-
-    if (global_match_lock != NULL) {
-        PyThread_release_lock(global_match_lock);
-    }
-
-    if (cached != NULL) {
-        return cached;
     }
 
     pcre2_match_data *match_data = pcre2_match_data_create(required_pairs, NULL);
     if (match_data != NULL) {
         return match_data;
     }
+
     return pcre2_match_data_create_from_pattern(self->code, NULL);
 }
 
@@ -658,64 +308,38 @@ global_match_data_cache_release(pcre2_match_data *match_data)
         return;
     }
 
-    if (global_match_lock != NULL) {
-        PyThread_acquire_lock(global_match_lock, 1);
-    }
-
-    if (global_match_capacity == 0) {
-        if (global_match_lock != NULL) {
-            PyThread_release_lock(global_match_lock);
-        }
+    if (atomic_load_explicit(&global_match_capacity, memory_order_acquire) == 0) {
         pcre2_match_data_free(match_data);
         return;
     }
 
-    MatchDataCacheEntry *entry = pcre_malloc(sizeof(*entry));
-    if (entry == NULL) {
-        if (global_match_lock != NULL) {
-            PyThread_release_lock(global_match_lock);
-        }
-        pcre2_match_data_free(match_data);
+    pcre2_match_data *expected = NULL;
+    if (atomic_compare_exchange_strong_explicit(
+            &global_match_cached,
+            &expected,
+            match_data,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        uint32_t ovec_count = pcre2_get_ovector_count(match_data);
+        atomic_store_explicit(&global_match_ovec_count, ovec_count, memory_order_release);
         return;
     }
 
-    entry->match_data = match_data;
-    entry->ovec_count = pcre2_get_ovector_count(match_data);
-    entry->next = global_match_head;
-    global_match_head = entry;
-    global_match_count++;
-
-    while (global_match_count > global_match_capacity) {
-        global_match_data_cache_evict_tail_locked();
-    }
-
-    if (global_match_lock != NULL) {
-        PyThread_release_lock(global_match_lock);
-    }
+    pcre2_match_data_free(match_data);
 }
 
 static pcre2_jit_stack *
 thread_jit_stack_cache_acquire(void)
 {
     ThreadCacheState *state = thread_cache_state_get_or_create();
-    pcre2_jit_stack *stack = NULL;
-
     if (state == NULL) {
         return NULL;
     }
 
-    if (state->jit_head != NULL) {
-        JitStackCacheEntry *entry = state->jit_head;
-        state->jit_head = entry->next;
-        if (state->jit_count > 0) {
-            state->jit_count--;
-        }
-        stack = entry->jit_stack;
-        pcre_free(entry);
-    }
-
-    if (stack != NULL) {
-        return stack;
+    if (state->jit_capacity != 0 && state->jit_cached != NULL) {
+        pcre2_jit_stack *cached = state->jit_cached;
+        state->jit_cached = NULL;
+        return cached;
     }
 
     return pcre2_jit_stack_create(state->jit_start_size, state->jit_max_size, NULL);
@@ -724,68 +348,32 @@ thread_jit_stack_cache_acquire(void)
 static void
 thread_jit_stack_cache_release(pcre2_jit_stack *jit_stack)
 {
+    if (jit_stack == NULL) {
+        return;
+    }
+
     ThreadCacheState *state = thread_cache_state_get();
-    if (state == NULL || jit_stack == NULL) {
-        if (jit_stack != NULL) {
-            pcre2_jit_stack_free(jit_stack);
-        }
-        return;
-    }
-
-    if (state->jit_capacity == 0) {
+    if (state == NULL || state->jit_capacity == 0 || state->jit_cached != NULL) {
         pcre2_jit_stack_free(jit_stack);
         return;
     }
 
-    JitStackCacheEntry *entry = pcre_malloc(sizeof(*entry));
-    if (entry == NULL) {
-        pcre2_jit_stack_free(jit_stack);
-        return;
-    }
-
-    entry->jit_stack = jit_stack;
-    entry->next = state->jit_head;
-    state->jit_head = entry;
-    state->jit_count++;
-
-    while (state->jit_count > state->jit_capacity) {
-        thread_jit_stack_cache_evict_tail(state);
-    }
+    state->jit_cached = jit_stack;
 }
 
 static pcre2_jit_stack *
 global_jit_stack_cache_acquire(void)
 {
-    pcre2_jit_stack *stack = NULL;
-    size_t start_size = 0;
-    size_t max_size = 0;
-
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-
-    if (global_jit_head != NULL) {
-        JitStackCacheEntry *entry = global_jit_head;
-        global_jit_head = entry->next;
-        if (global_jit_count > 0) {
-            global_jit_count--;
+    if (atomic_load_explicit(&global_jit_capacity, memory_order_acquire) != 0) {
+        pcre2_jit_stack *cached = atomic_exchange_explicit(&global_jit_cached, NULL, memory_order_acq_rel);
+        if (cached != NULL) {
+            return cached;
         }
-        stack = entry->jit_stack;
-        pcre_free(entry);
     }
 
-    start_size = global_jit_start_size;
-    max_size = global_jit_max_size;
-
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
-    }
-
-    if (stack != NULL) {
-        return stack;
-    }
-
-    return pcre2_jit_stack_create(start_size, max_size, NULL);
+    size_t start = atomic_load_explicit(&global_jit_start_size, memory_order_acquire);
+    size_t max = atomic_load_explicit(&global_jit_max_size, memory_order_acquire);
+    return pcre2_jit_stack_create(start, max, NULL);
 }
 
 static void
@@ -795,39 +383,55 @@ global_jit_stack_cache_release(pcre2_jit_stack *jit_stack)
         return;
     }
 
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-
-    if (global_jit_capacity == 0) {
-        if (global_jit_lock != NULL) {
-            PyThread_release_lock(global_jit_lock);
-        }
+    if (atomic_load_explicit(&global_jit_capacity, memory_order_acquire) == 0) {
         pcre2_jit_stack_free(jit_stack);
         return;
     }
 
-    JitStackCacheEntry *entry = pcre_malloc(sizeof(*entry));
-    if (entry == NULL) {
-        if (global_jit_lock != NULL) {
-            PyThread_release_lock(global_jit_lock);
-        }
-        pcre2_jit_stack_free(jit_stack);
+    pcre2_jit_stack *expected = NULL;
+    if (atomic_compare_exchange_strong_explicit(
+            &global_jit_cached,
+            &expected,
+            jit_stack,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
         return;
     }
 
-    entry->jit_stack = jit_stack;
-    entry->next = global_jit_head;
-    global_jit_head = entry;
-    global_jit_count++;
+    pcre2_jit_stack_free(jit_stack);
+}
 
-    while (global_jit_count > global_jit_capacity) {
-        global_jit_stack_cache_evict_tail_locked();
+int
+cache_initialize(void)
+{
+    if (!atomic_load_explicit(&cache_tss_ready, memory_order_acquire)) {
+        if (PyThread_tss_create(&cache_tss) != 0) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        atomic_store_explicit(&cache_tss_ready, 1, memory_order_release);
     }
 
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
-    }
+    cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
+    cache_strategy_set_locked(0);
+    atomic_store_explicit(&context_cache_enabled, 1, memory_order_release);
+
+    global_match_cache_clear();
+    global_jit_cache_clear();
+    atomic_store_explicit(&global_match_capacity, 1, memory_order_release);
+    atomic_store_explicit(&global_jit_capacity, 1, memory_order_release);
+    atomic_store_explicit(&global_jit_start_size, 32 * 1024, memory_order_release);
+    atomic_store_explicit(&global_jit_max_size, 1024 * 1024, memory_order_release);
+    return 0;
+}
+
+void
+cache_teardown(void)
+{
+    thread_cache_teardown();
+    global_cache_teardown();
+    cache_strategy_set_locked(0);
+    cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
 }
 
 pcre2_match_data *
@@ -847,7 +451,7 @@ match_data_cache_release(pcre2_match_data *match_data)
     if (match_data == NULL) {
         return;
     }
-    mark_cache_strategy_locked();
+
     CacheStrategy strategy = cache_strategy_get();
     if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         thread_match_data_cache_release(match_data);
@@ -859,7 +463,7 @@ match_data_cache_release(pcre2_match_data *match_data)
 pcre2_match_context *
 match_context_cache_acquire(int use_offset_limit)
 {
-    if (!context_cache_enabled) {
+    if (!atomic_load_explicit(&context_cache_enabled, memory_order_acquire)) {
         pcre2_match_context *context = pcre2_match_context_create(NULL);
         if (context == NULL) {
             PyErr_NoMemory();
@@ -873,7 +477,10 @@ match_context_cache_acquire(int use_offset_limit)
         return NULL;
     }
 
-    pcre2_match_context **slot = use_offset_limit ? &state->offset_match_context : &state->match_context;
+    pcre2_match_context **slot = use_offset_limit ?
+        &state->offset_match_context :
+        &state->match_context;
+
     if (*slot == NULL) {
         *slot = pcre2_match_context_create(NULL);
         if (*slot == NULL) {
@@ -902,7 +509,7 @@ match_context_cache_release(pcre2_match_context *context, int had_offset_limit)
     (void)had_offset_limit;
 #endif
 
-    if (!context_cache_enabled) {
+    if (!atomic_load_explicit(&context_cache_enabled, memory_order_acquire)) {
         pcre2_match_context_free(context);
     }
 }
@@ -910,7 +517,7 @@ match_context_cache_release(pcre2_match_context *context, int had_offset_limit)
 void
 cache_set_context_cache_enabled(int enabled)
 {
-    context_cache_enabled = enabled ? 1 : 0;
+    atomic_store_explicit(&context_cache_enabled, enabled ? 1 : 0, memory_order_release);
 }
 
 pcre2_jit_stack *
@@ -930,7 +537,7 @@ jit_stack_cache_release(pcre2_jit_stack *jit_stack)
     if (jit_stack == NULL) {
         return;
     }
-    mark_cache_strategy_locked();
+
     CacheStrategy strategy = cache_strategy_get();
     if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         thread_jit_stack_cache_release(jit_stack);
@@ -951,15 +558,7 @@ module_get_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSE
         return PyLong_FromUnsignedLong((unsigned long)state->match_capacity);
     }
 
-    unsigned long value = 0;
-    if (global_match_lock != NULL) {
-        PyThread_acquire_lock(global_match_lock, 1);
-    }
-    value = global_match_capacity;
-    if (global_match_lock != NULL) {
-        PyThread_release_lock(global_match_lock);
-    }
-    return PyLong_FromUnsignedLong(value);
+    return PyLong_FromUnsignedLong((unsigned long)atomic_load_explicit(&global_match_capacity, memory_order_acquire));
 }
 
 PyObject *
@@ -970,30 +569,23 @@ module_set_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
         return NULL;
     }
 
+    uint32_t capacity = clamp_cache_capacity(size);
     CacheStrategy strategy = cache_strategy_get();
     if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
         }
-        state->match_capacity = (uint32_t)size;
-        while (state->match_count > state->match_capacity) {
-            thread_match_data_cache_evict_tail(state);
+        state->match_capacity = capacity;
+        if (capacity == 0) {
+            thread_match_cache_clear(state);
         }
         Py_RETURN_NONE;
     }
 
-    if (global_match_lock != NULL) {
-        PyThread_acquire_lock(global_match_lock, 1);
-    }
-
-    global_match_capacity = (uint32_t)size;
-    while (global_match_count > global_match_capacity) {
-        global_match_data_cache_evict_tail_locked();
-    }
-
-    if (global_match_lock != NULL) {
-        PyThread_release_lock(global_match_lock);
+    atomic_store_explicit(&global_match_capacity, capacity, memory_order_release);
+    if (capacity == 0) {
+        global_match_cache_clear();
     }
 
     Py_RETURN_NONE;
@@ -1008,18 +600,11 @@ module_clear_match_data_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(a
         if (state == NULL) {
             return NULL;
         }
-        thread_match_data_cache_free_all(state);
+        thread_match_cache_clear(state);
         Py_RETURN_NONE;
     }
 
-    if (global_match_lock != NULL) {
-        PyThread_acquire_lock(global_match_lock, 1);
-    }
-    global_match_data_cache_free_all_locked();
-    if (global_match_lock != NULL) {
-        PyThread_release_lock(global_match_lock);
-    }
-
+    global_match_cache_clear();
     Py_RETURN_NONE;
 }
 
@@ -1032,17 +617,11 @@ module_get_match_data_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUS
         if (state == NULL) {
             return NULL;
         }
-        return PyLong_FromUnsignedLong((unsigned long)state->match_count);
+        unsigned long count = state->match_cached != NULL ? 1ul : 0ul;
+        return PyLong_FromUnsignedLong(count);
     }
 
-    unsigned long count = 0;
-    if (global_match_lock != NULL) {
-        PyThread_acquire_lock(global_match_lock, 1);
-    }
-    count = global_match_count;
-    if (global_match_lock != NULL) {
-        PyThread_release_lock(global_match_lock);
-    }
+    unsigned long count = atomic_load_explicit(&global_match_cached, memory_order_acquire) != NULL ? 1ul : 0ul;
     return PyLong_FromUnsignedLong(count);
 }
 
@@ -1058,15 +637,7 @@ module_get_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED
         return PyLong_FromUnsignedLong((unsigned long)state->jit_capacity);
     }
 
-    unsigned long value = 0;
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-    value = global_jit_capacity;
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
-    }
-    return PyLong_FromUnsignedLong(value);
+    return PyLong_FromUnsignedLong((unsigned long)atomic_load_explicit(&global_jit_capacity, memory_order_acquire));
 }
 
 PyObject *
@@ -1077,30 +648,23 @@ module_set_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
         return NULL;
     }
 
+    uint32_t capacity = clamp_cache_capacity(size);
     CacheStrategy strategy = cache_strategy_get();
     if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
         }
-        state->jit_capacity = (uint32_t)size;
-        while (state->jit_count > state->jit_capacity) {
-            thread_jit_stack_cache_evict_tail(state);
+        state->jit_capacity = capacity;
+        if (capacity == 0) {
+            thread_jit_cache_clear(state);
         }
         Py_RETURN_NONE;
     }
 
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-
-    global_jit_capacity = (uint32_t)size;
-    while (global_jit_count > global_jit_capacity) {
-        global_jit_stack_cache_evict_tail_locked();
-    }
-
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
+    atomic_store_explicit(&global_jit_capacity, capacity, memory_order_release);
+    if (capacity == 0) {
+        global_jit_cache_clear();
     }
 
     Py_RETURN_NONE;
@@ -1115,18 +679,11 @@ module_clear_jit_stack_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(ar
         if (state == NULL) {
             return NULL;
         }
-        thread_jit_stack_cache_free_all(state);
+        thread_jit_cache_clear(state);
         Py_RETURN_NONE;
     }
 
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-    global_jit_stack_cache_free_all_locked();
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
-    }
-
+    global_jit_cache_clear();
     Py_RETURN_NONE;
 }
 
@@ -1139,17 +696,11 @@ module_get_jit_stack_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSE
         if (state == NULL) {
             return NULL;
         }
-        return PyLong_FromUnsignedLong((unsigned long)state->jit_count);
+        unsigned long count = state->jit_cached != NULL ? 1ul : 0ul;
+        return PyLong_FromUnsignedLong(count);
     }
 
-    unsigned long count = 0;
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-    count = global_jit_count;
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
-    }
+    unsigned long count = atomic_load_explicit(&global_jit_cached, memory_order_acquire) != NULL ? 1ul : 0ul;
     return PyLong_FromUnsignedLong(count);
 }
 
@@ -1169,17 +720,8 @@ module_get_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(arg
         );
     }
 
-    unsigned long start = 0;
-    unsigned long max = 0;
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-    start = (unsigned long)global_jit_start_size;
-    max = (unsigned long)global_jit_max_size;
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
-    }
-
+    unsigned long start = (unsigned long)atomic_load_explicit(&global_jit_start_size, memory_order_acquire);
+    unsigned long max = (unsigned long)atomic_load_explicit(&global_jit_max_size, memory_order_acquire);
     return Py_BuildValue("kk", start, max);
 }
 
@@ -1211,21 +753,13 @@ module_set_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *args)
         }
         state->jit_start_size = (size_t)start;
         state->jit_max_size = (size_t)max;
-        thread_jit_stack_cache_free_all(state);
+        thread_jit_cache_clear(state);
         Py_RETURN_NONE;
     }
 
-    if (global_jit_lock != NULL) {
-        PyThread_acquire_lock(global_jit_lock, 1);
-    }
-
-    global_jit_start_size = (size_t)start;
-    global_jit_max_size = (size_t)max;
-    global_jit_stack_cache_free_all_locked();
-
-    if (global_jit_lock != NULL) {
-        PyThread_release_lock(global_jit_lock);
-    }
+    atomic_store_explicit(&global_jit_start_size, (size_t)start, memory_order_release);
+    atomic_store_explicit(&global_jit_max_size, (size_t)max, memory_order_release);
+    global_jit_cache_clear();
 
     Py_RETURN_NONE;
 }
@@ -1240,12 +774,11 @@ PyObject *
 module_set_cache_strategy(PyObject *Py_UNUSED(module), PyObject *args)
 {
     const char *name = NULL;
-    CacheStrategy desired = CACHE_STRATEGY_THREAD_LOCAL;
-
     if (!PyArg_ParseTuple(args, "s", &name)) {
         return NULL;
     }
 
+    CacheStrategy desired;
     if (strcmp(name, "thread-local") == 0) {
         desired = CACHE_STRATEGY_THREAD_LOCAL;
     } else if (strcmp(name, "global") == 0) {
@@ -1255,20 +788,16 @@ module_set_cache_strategy(PyObject *Py_UNUSED(module), PyObject *args)
         return NULL;
     }
 
-    cache_state_lock_acquire();
-    int locked = cache_strategy_locked;
-    CacheStrategy current = cache_strategy;
-    if (locked && desired != current) {
-        cache_state_lock_release();
-        PyErr_Format(
-            PyExc_RuntimeError,
-            "cache strategy already locked to '%s'",
-            cache_strategy_name(current)
-        );
-        return NULL;
+    CacheStrategy current = cache_strategy_get();
+    if (desired == current) {
+        Py_RETURN_NONE;
     }
 
-    cache_strategy = desired;
-    cache_state_lock_release();
-    Py_RETURN_NONE;
+    PyErr_Format(
+        PyExc_RuntimeError,
+        "cache strategy already locked to '%s'; set PYPCRE_CACHE_PATTERN_GLOBAL=1 "
+        "before importing pcre to enable the global cache",
+        cache_strategy_name(current)
+    );
+    return NULL;
 }
