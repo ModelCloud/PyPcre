@@ -20,7 +20,7 @@ import pcre_ext_c as _backend
 
 
 pcre_ext_c = _backend
-from .cache import get_cache_limit, set_cache_limit
+from .cache import cache_strategy, get_cache_limit, set_cache_limit
 from .flags import PY_ONLY_FLAG_MEMBERS
 from .pcre import (
     Match,
@@ -122,6 +122,7 @@ __all__ = [
     "configure",
     "configure_threads",
     "configure_thread_pool",
+    "cache_strategy",
     "set_cache_limit",
     "get_cache_limit",
     "compile",

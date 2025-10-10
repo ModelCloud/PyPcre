@@ -83,6 +83,8 @@ PyObject *module_clear_jit_stack_cache(PyObject *module, PyObject *args);
 PyObject *module_get_jit_stack_cache_count(PyObject *module, PyObject *args);
 PyObject *module_get_jit_stack_limits(PyObject *module, PyObject *args);
 PyObject *module_set_jit_stack_limits(PyObject *module, PyObject *args);
+PyObject *module_get_cache_strategy(PyObject *module, PyObject *args);
+PyObject *module_set_cache_strategy(PyObject *module, PyObject *args);
 
 /* Utilities */
 PyObject *bytes_from_text(PyObject *obj);

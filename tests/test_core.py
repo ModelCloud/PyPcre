@@ -552,7 +552,7 @@ def test_module_clear_cache_invokes_helper(monkeypatch):
 
 
 def test_cached_compile_caches_hashable_patterns(monkeypatch):
-    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
+    cache_mod._THREAD_LOCAL.pattern_cache = OrderedDict()
     compiled_calls = []
 
     def fake_compile(pattern, *, flags=0, jit=True):
@@ -576,7 +576,7 @@ def test_cached_compile_caches_hashable_patterns(monkeypatch):
 
 
 def test_cached_compile_handles_unhashable(monkeypatch):
-    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
+    cache_mod._THREAD_LOCAL.pattern_cache = OrderedDict()
     compiled_results = []
 
     def fake_compile(pattern, *, flags=0, jit=False):
@@ -597,8 +597,7 @@ def test_cached_compile_handles_unhashable(monkeypatch):
 
 
 def test_cached_compile_enforces_cache_limit(monkeypatch):
-    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
-    monkeypatch.setattr(cache_mod, "_CACHE_LIMIT", 1, raising=False)
+    cache_mod._THREAD_LOCAL.pattern_cache = OrderedDict()
     compile_calls = []
 
     def fake_compile(pattern, *, flags=0, jit=False):
@@ -610,22 +609,27 @@ def test_cached_compile_enforces_cache_limit(monkeypatch):
     def wrapper(raw):
         return raw
 
-    first = cache_mod.cached_compile("a", 0, wrapper, jit=False)
-    second = cache_mod.cached_compile("b", 0, wrapper, jit=False)
+    original_limit = cache_mod.get_cache_limit()
+    cache_mod.set_cache_limit(1)
+    try:
+        first = cache_mod.cached_compile("a", 0, wrapper, jit=False)
+        second = cache_mod.cached_compile("b", 0, wrapper, jit=False)
 
-    assert list(cache_mod._PATTERN_CACHE.keys()) == [("b", 0, False)]
+        assert list(cache_mod._THREAD_LOCAL.pattern_cache.keys()) == [("b", 0, False)]
 
-    third = cache_mod.cached_compile("a", 0, wrapper, jit=False)
+        third = cache_mod.cached_compile("a", 0, wrapper, jit=False)
 
-    assert first == "compiled:a:0:False"
-    assert second == "compiled:b:0:False"
-    assert third == "compiled:a:0:False"
-    assert compile_calls == [("a", 0, False), ("b", 0, False), ("a", 0, False)]
+        assert first == "compiled:a:0:False"
+        assert second == "compiled:b:0:False"
+        assert third == "compiled:a:0:False"
+        assert compile_calls == [("a", 0, False), ("b", 0, False), ("a", 0, False)]
+    finally:
+        cache_mod.set_cache_limit(original_limit)
 
 
 def test_cache_clear_cache_empties_store(monkeypatch):
     store = OrderedDict({("expr", 0, True): "value"})
-    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", store)
+    cache_mod._THREAD_LOCAL.pattern_cache = store
 
     cache_mod.clear_cache()
 
@@ -633,7 +637,7 @@ def test_cache_clear_cache_empties_store(monkeypatch):
 
 
 def test_set_cache_limit_zero_disables_cache(monkeypatch, request):
-    monkeypatch.setattr(cache_mod, "_PATTERN_CACHE", OrderedDict())
+    cache_mod._THREAD_LOCAL.pattern_cache = OrderedDict()
     original_limit = cache_mod.get_cache_limit()
     request.addfinalizer(lambda: cache_mod.set_cache_limit(original_limit))
 
