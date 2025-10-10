@@ -523,7 +523,8 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             "libpcre2-8.a",
             "libpcre2-8.dylib",
             "libpcre2-8.lib",
-            "pcre2-8.dll",
+            #"pcre2-8.dll",
+            "pcre2-8-static.dll",
         ]
         for root in build_roots:
             if not root.exists():
