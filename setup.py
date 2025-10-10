@@ -86,6 +86,15 @@ setup_utils.configure_environment(
     library_search_patterns=LIBRARY_SEARCH_PATTERNS,
 )
 
+def filter_with_real_path(paths: list[str]) -> list[str]:
+    unique_libs = []
+    seen_realpaths = set()
+    for path in paths:
+        real = os.path.realpath(path)
+        if real not in seen_realpaths:
+            seen_realpaths.add(real)
+            unique_libs.append(path)
+    return unique_libs
 
 def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]]:
     include_dirs: list[str] = []
@@ -232,12 +241,13 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         if extra_link_args_x64:
             extra_link_args = extra_link_args_x64
 
+    extra_link_args = filter_with_real_path(extra_link_args)
     config = {
         "include_dirs": include_dirs,
         "library_dirs": library_dirs,
         "libraries": libraries,
         "extra_compile_args": extra_compile_args,
-        "extra_link_args": ['-lpcre2-8'],
+        "extra_link_args": extra_link_args,
         "define_macros": define_macros,
     }
 
