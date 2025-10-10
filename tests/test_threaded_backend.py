@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 import threading
 import time
 import unittest
@@ -176,6 +177,13 @@ class TestThreadedBackend(unittest.TestCase):
                     slower_lengths,
                     msg=f"{method} had no lengths where parallel execution was slower",
                 )
+                if not faster_lengths:
+                    cpu_cores = os.cpu_count() or 0
+                    print(
+                        f"threaded backend warning: {method} saw no faster lengths; "
+                        f"detected {cpu_cores} CPU cores"
+                    )
+
                 self.assertTrue(
                     faster_lengths,
                     msg=f"{method} had no lengths where parallel execution was faster",
