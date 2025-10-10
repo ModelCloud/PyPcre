@@ -157,8 +157,8 @@ bytes.
   | Env var                        | Effect (per-call, `pattern.match("fo")`) |
   |--------------------------------|------------------------------------------|
   | _(baseline)_                   | 0.60 µs                                  |
-  | `PYPCRE_DISABLE_CONTEXT_CACHE=1` *(was `PCRE2_DISABLE_CONTEXT_CACHE`)* | 0.60 µs |
-  | `PYPCRE_FORCE_JIT_LOCK=1` *(was `PCRE2_FORCE_JIT_LOCK`)*       | 0.60 µs |
+  | `PYPCRE_DISABLE_CONTEXT_CACHE=1` | 0.60 µs |
+  | `PYPCRE_FORCE_JIT_LOCK=1`       | 0.60 µs |
   | `pcre.match()` helper          | 4.43 µs                                  |
 
   The toggles reintroduce the legacy GIL hand-off, per-call match-context
@@ -224,14 +224,14 @@ If the headers or library live in a non-standard location you can export one
 or more of the following environment variables prior to invoking the build
 (`pip install .`, `python -m build`, etc.):
 
-- `PCRE2_ROOT`
-- `PCRE2_INCLUDE_DIR`
-- `PCRE2_LIBRARY_DIR`
-- `PCRE2_LIBRARY_PATH` *(pathsep-separated directories or explicit library files to
+- `PYPCRE_ROOT`
+- `PYPCRE_INCLUDE_DIR`
+- `PYPCRE_LIBRARY_DIR`
+- `PYPCRE_LIBRARY_PATH` *(pathsep-separated directories or explicit library files to
   prioritise when resolving `libpcre2-8`)*
-- `PCRE2_LIBRARIES`
-- `PCRE2_CFLAGS`
-- `PCRE2_LDFLAGS`
+- `PYPCRE_LIBRARIES`
+- `PYPCRE_CFLAGS`
+- `PYPCRE_LDFLAGS`
 
 When `pkg-config` is available the build will automatically pick up the
 required include and link flags via `pkg-config --cflags/--libs libpcre2-8`.
@@ -241,6 +241,6 @@ FreeBSD, macOS (including Homebrew), and Solaris to locate the headers and
 libraries.
 
 If your system ships `libpcre2-8` under `/usr` but you also maintain a
-manually built copy under `/usr/local`, export `PCRE2_LIBRARY_PATH` (and, if
-needed, a matching `PCRE2_INCLUDE_DIR`) so the build links against the desired
+manually built copy under `/usr/local`, export `PYPCRE_LIBRARY_PATH` (and, if
+needed, a matching `PYPCRE_INCLUDE_DIR`) so the build links against the desired
 location.

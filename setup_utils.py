@@ -432,9 +432,9 @@ def _clean_previous_build(destination: Path, build_dir: Path, build_roots: list[
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if _is_windows_platform() and not _is_wsl_environment():
-        os.environ["PCRE2_BUILD_FROM_SOURCE"] = "1"
+        os.environ["PYPCRE_BUILD_FROM_SOURCE"] = "1"
 
-    if not _is_truthy_env("PCRE2_BUILD_FROM_SOURCE"):
+    if not _is_truthy_env("PYPCRE_BUILD_FROM_SOURCE"):
         return ([], [], [])
 
     destination = _get_pcre_ext_dir() / _get_repo_tag()
@@ -462,7 +462,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         try:
             subprocess.run(clone_command, check=True)
         except FileNotFoundError as exc:  # pragma: no cover - git missing on build host
-            raise RuntimeError("git is required to fetch PCRE2 sources when PCRE2_BUILD_FROM_SOURCE=1") from exc
+            raise RuntimeError("git is required to fetch PCRE2 sources when PYPCRE_BUILD_FROM_SOURCE=1") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 "Failed to clone PCRE2 source from official repository; see the output above for details"
@@ -758,13 +758,13 @@ def _compiler_supports_flag(flag: str) -> bool:
 
 
 def _augment_compile_flags(flags: list[str]) -> None:
-    if _is_truthy_env("PCRE2_DISABLE_OPT_FLAGS"):
+    if _is_truthy_env("PYPCRE_DISABLE_OPT_FLAGS"):
         return
 
     if _is_windows_platform():
         return
 
-    disable_native = _is_truthy_env("PCRE2_DISABLE_NATIVE_FLAGS")
+    disable_native = _is_truthy_env("PYPCRE_DISABLE_NATIVE_FLAGS")
     compiler = _get_test_compiler()
     if not disable_native and _should_disable_native_flags_for_macos(compiler):
         # Apple universal builds (arm64 + x86_64) and arm64-only builds reject x86 specific flags.
@@ -825,7 +825,7 @@ def _linux_multiarch_dirs() -> list[str]:
 def _platform_prefixes() -> list[Path]:
     prefixes: list[Path] = []
 
-    env_root = os.environ.get("PCRE2_ROOT")
+    env_root = os.environ.get("PYPCRE_ROOT")
     if env_root:
         for value in env_root.split(os.pathsep):
             path = Path(value)

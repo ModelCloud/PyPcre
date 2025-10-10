@@ -134,10 +134,10 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         else:
             extra_link_args.append(flag)
 
-    extend_env_paths(include_dirs, "PCRE2_INCLUDE_DIR")
-    extend_env_paths(library_dirs, "PCRE2_LIBRARY_DIR")
+    extend_env_paths(include_dirs, "PYPCRE_INCLUDE_DIR")
+    extend_env_paths(library_dirs, "PYPCRE_LIBRARY_DIR")
 
-    env_lib_path = os.environ.get("PCRE2_LIBRARY_PATH")
+    env_lib_path = os.environ.get("PYPCRE_LIBRARY_PATH")
     if env_lib_path:
         for raw_path in env_lib_path.split(os.pathsep):
             candidate = raw_path.strip()
@@ -152,7 +152,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
             else:
                 extend_unique(library_dirs, candidate)
 
-    extend_env_paths(libraries, "PCRE2_LIBRARIES")
+    extend_env_paths(libraries, "PYPCRE_LIBRARIES")
 
     directory_candidates = [Path(p) for p in library_dirs]
     directory_candidates.extend(Path(p) for p in discover_library_dirs())
@@ -170,11 +170,11 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     for path in find_library_with_brew():
         extend_unique(library_files, path)
 
-    env_cflags = os.environ.get("PCRE2_CFLAGS")
+    env_cflags = os.environ.get("PYPCRE_CFLAGS")
     if env_cflags:
         extra_compile_args.extend(shlex.split(env_cflags))
 
-    env_ldflags = os.environ.get("PCRE2_LDFLAGS")
+    env_ldflags = os.environ.get("PYPCRE_LDFLAGS")
     if env_ldflags:
         extra_link_args.extend(shlex.split(env_ldflags))
 
@@ -238,7 +238,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
 
     if is_windows_platform():
         has_runtime_dll = any(path.lower().endswith(".dll") for path in runtime_libraries)
-        force_static_env = is_truthy_env("PCRE2_FORCE_STATIC")
+        force_static_env = is_truthy_env("PYPCRE_FORCE_STATIC")
         if (force_static_env or (library_files and not has_runtime_dll)) and not any(
             macro[0] == "PCRE2_STATIC" for macro in define_macros
         ):
