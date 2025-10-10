@@ -554,7 +554,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                 "-DPCRE2_BUILD_PCRE2GREP=OFF",
                 "-DPCRE2_BUILD_PCRE2TEST=OFF",
                 "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
-                "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
+                #"-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
             ]
             if ninja_executable:
                 cmake_args.extend(["-G", "Ninja"])
