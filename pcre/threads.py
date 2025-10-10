@@ -144,11 +144,7 @@ def configure_threads(*, enabled: bool | None = None, threshold: int | None = No
     global _THREAD_AUTO_THRESHOLD
 
     if enabled is not None:
-        requested = bool(enabled)
-        if requested and not threading_supported():
-            _THREADS_DEFAULT = False
-        else:
-            _THREADS_DEFAULT = requested
+        _THREADS_DEFAULT = bool(enabled)
 
     if threshold is not None:
         try:
