@@ -147,6 +147,35 @@ bytes.
   `preload=True` to spin the pool up eagerly, and `shutdown_thread_pool()`
   to tear it down manually if needed.
 
+### Performance considerations
+
+- **Precompile for hot loops.** The module-level helpers mirror the `re`
+  API and route through the shared compilation cache, but the extra call
+  plumbing still adds overhead. With a simple pattern like `"fo"`, using
+  the low-level `pcre_ext_c.Pattern` directly costs ~0.60 µs per call,
+  whereas the high-level `pcre.match()` helper lands at ~4.4 µs per call
+  under the same workload. For sustained loops, create a `Pattern` object
+  once and reuse it.
+- **Benchmark toggles.** The extension defaults to the fastest safe
+  configuration, but you can flip individual knobs back to the legacy
+  behaviour by setting environment variables *before* importing `pcre`:
+
+  | Env var                        | Effect (per-call, `pattern.match("fo")`) |
+  |--------------------------------|------------------------------------------|
+  | _(baseline)_                   | 0.60 µs                                  |
+  | `PCRE2_FORCE_GIL_RELEASE=1`    | 0.61 µs                                  |
+  | `PCRE2_DISABLE_CONTEXT_CACHE=1`| 0.60 µs                                  |
+  | `PCRE2_FORCE_JIT_LOCK=1`       | 0.60 µs                                  |
+  | `pcre.match()` helper          | 4.43 µs                                  |
+
+  The toggles reintroduce the legacy GIL hand-off, per-call match-context
+  allocation, and explicit locks so you can quantify the impact of each
+  optimisation on your workload. Measurements were taken on CPython 3.14 (rc3)
+  with 200 000 evaluations of `pcre_ext_c.compile("fo").match("foobar")`; absolute
+  values will vary by platform, but the relative differences are
+  representative. Leave the variables unset in production to keep the new fast
+  paths active.
+
 ### JIT Pattern Compilation and Execution
 
 Pcre2’s JIT compiler is enabled by default for every compiled pattern. The

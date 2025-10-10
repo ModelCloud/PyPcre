@@ -28,6 +28,9 @@ typedef struct ThreadCacheState {
     uint32_t jit_count;
     size_t jit_start_size;
     size_t jit_max_size;
+
+    pcre2_match_context *match_context;
+    pcre2_match_context *offset_match_context;
 } ThreadCacheState;
 
 typedef enum CacheStrategy {
@@ -38,6 +41,7 @@ typedef enum CacheStrategy {
 static CacheStrategy cache_strategy = CACHE_STRATEGY_THREAD_LOCAL;
 static int cache_strategy_locked = 0;
 static PyThread_type_lock cache_state_lock = NULL;
+static int context_cache_enabled = 1;
 
 static inline void
 cache_state_lock_acquire(void)
@@ -226,6 +230,15 @@ thread_match_data_cache_free_all(ThreadCacheState *state)
         pcre2_match_data_free(node->match_data);
         pcre_free(node);
         node = next;
+    }
+
+    if (state->match_context != NULL) {
+        pcre2_match_context_free(state->match_context);
+        state->match_context = NULL;
+    }
+    if (state->offset_match_context != NULL) {
+        pcre2_match_context_free(state->offset_match_context);
+        state->offset_match_context = NULL;
     }
 }
 
@@ -839,6 +852,63 @@ match_data_cache_release(pcre2_match_data *match_data)
     } else {
         global_match_data_cache_release(match_data);
     }
+}
+
+pcre2_match_context *
+match_context_cache_acquire(int use_offset_limit)
+{
+    if (!context_cache_enabled) {
+        pcre2_match_context *context = pcre2_match_context_create(NULL);
+        if (context == NULL) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+        return context;
+    }
+
+    ThreadCacheState *state = thread_cache_state_get_or_create();
+    if (state == NULL) {
+        return NULL;
+    }
+
+    pcre2_match_context **slot = use_offset_limit ? &state->offset_match_context : &state->match_context;
+    if (*slot == NULL) {
+        *slot = pcre2_match_context_create(NULL);
+        if (*slot == NULL) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+    }
+
+    return *slot;
+}
+
+void
+match_context_cache_release(pcre2_match_context *context, int had_offset_limit)
+{
+    if (context == NULL) {
+        return;
+    }
+
+    pcre2_jit_stack_assign(context, NULL, NULL);
+
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    if (had_offset_limit) {
+        (void)pcre2_set_offset_limit(context, PCRE2_UNSET);
+    }
+#else
+    (void)had_offset_limit;
+#endif
+
+    if (!context_cache_enabled) {
+        pcre2_match_context_free(context);
+    }
+}
+
+void
+cache_set_context_cache_enabled(int enabled)
+{
+    context_cache_enabled = enabled ? 1 : 0;
 }
 
 pcre2_jit_stack *
