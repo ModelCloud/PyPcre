@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 import os
-from collections import OrderedDict
 from enum import Enum
 from threading import RLock, local
-from typing import Any, Callable, Tuple, TypeVar, cast
+from typing import Any, Callable, Dict, Tuple, TypeVar, cast
 
 import pcre_ext_c as _pcre2
 
@@ -32,7 +31,7 @@ class _ThreadCacheState(local):
 
     def __init__(self) -> None:
         self.cache_limit: int | None = _DEFAULT_THREAD_CACHE_LIMIT
-        self.pattern_cache: OrderedDict[Tuple[Any, int, bool], Any] = OrderedDict()
+        self.pattern_cache: Dict[Tuple[Any, int, bool], Any] = {}
 
 
 class _GlobalCacheState:
@@ -42,7 +41,7 @@ class _GlobalCacheState:
 
     def __init__(self) -> None:
         self.cache_limit: int | None = _DEFAULT_GLOBAL_CACHE_LIMIT
-        self.pattern_cache: OrderedDict[Tuple[Any, int, bool], Any] = OrderedDict()
+        self.pattern_cache: Dict[Tuple[Any, int, bool], Any] = {}
         self.lock = RLock()
 
 
@@ -120,13 +119,12 @@ def _cached_compile_thread_local(
         compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
         if cache_limit != 0:
             if cache_limit is not None and len(cache) >= cache_limit:
-                cache.popitem(last=False)
+                cache.pop(next(iter(cache)))
             cache[key] = compiled
         return compiled
     except TypeError:
         return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
     else:
-        cache.move_to_end(key)
         return cast(T, cached)
 
 
@@ -151,7 +149,6 @@ def _cached_compile_global(
         except TypeError:
             return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
         else:
-            _GLOBAL_STATE.pattern_cache.move_to_end(key)
             return cast(T, cached)
 
     compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
@@ -163,12 +160,11 @@ def _cached_compile_global(
             existing = _GLOBAL_STATE.pattern_cache[key]
         except KeyError:
             if _GLOBAL_STATE.cache_limit is not None and len(_GLOBAL_STATE.pattern_cache) >= _GLOBAL_STATE.cache_limit:
-                _GLOBAL_STATE.pattern_cache.popitem(last=False)
+                _GLOBAL_STATE.pattern_cache.pop(next(iter(_GLOBAL_STATE.pattern_cache)))
             _GLOBAL_STATE.pattern_cache[key] = compiled
         except TypeError:
             return compiled
         else:
-            _GLOBAL_STATE.pattern_cache.move_to_end(key)
             return cast(T, existing)
         return compiled
 
@@ -222,7 +218,7 @@ def set_cache_limit(limit: int | None) -> None:
             cache.clear()
         elif new_limit is not None:
             while len(cache) > new_limit:
-                cache.popitem(last=False)
+                cache.pop(next(iter(cache)))
     else:
         with _GLOBAL_STATE.lock:
             _GLOBAL_STATE.cache_limit = new_limit
@@ -231,7 +227,7 @@ def set_cache_limit(limit: int | None) -> None:
                 cache.clear()
             elif new_limit is not None:
                 while len(cache) > new_limit:
-                    cache.popitem(last=False)
+                    cache.pop(next(iter(cache)))
 
 
 def get_cache_limit() -> int | None:
