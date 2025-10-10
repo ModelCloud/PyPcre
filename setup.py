@@ -229,7 +229,6 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     RUNTIME_LIBRARY_FILES.clear()
     RUNTIME_LIBRARY_FILES.extend(runtime_libraries)
 
-    print(f"eeeeeeee extra_link_args: {extra_link_args}")
     if (sys.platform.startswith("sunos") or sys.platform.startswith("solaris")) and platform.architecture()[0] == "64bit":
         extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
         if extra_link_args_x64:
