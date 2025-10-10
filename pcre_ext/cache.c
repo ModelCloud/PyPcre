@@ -19,7 +19,10 @@ typedef struct ThreadCacheState {
 
     pcre2_match_context *match_context;
     pcre2_match_context *offset_match_context;
+    PyObject *cleanup_token;
 } ThreadCacheState;
+
+static void thread_cache_state_clear(ThreadCacheState *state);
 
 typedef enum CacheStrategy {
     CACHE_STRATEGY_THREAD_LOCAL = 0,
@@ -43,6 +46,14 @@ static _Atomic uint32_t global_jit_capacity = ATOMIC_VAR_INIT(1);
 static _Atomic size_t global_jit_start_size = ATOMIC_VAR_INIT(32 * 1024);
 static _Atomic size_t global_jit_max_size = ATOMIC_VAR_INIT(1024 * 1024);
 
+static _Atomic int debug_thread_cache_count = ATOMIC_VAR_INIT(0);
+static int debug_thread_cache_enabled = 0;
+
+static PyObject *thread_cache_cleanup_key = NULL;
+#define THREAD_CACHE_CAPSULE_NAME "pcre.cache.thread_state"
+
+static void thread_cache_capsule_destructor(PyObject *capsule);
+
 static inline uint32_t
 clamp_cache_capacity(unsigned long value)
 {
@@ -57,6 +68,24 @@ required_ovector_pairs(PatternObject *self)
         required = 1;
     }
     return required;
+}
+
+static int
+env_flag_is_true(const char *value)
+{
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+    switch (value[0]) {
+        case '0':
+        case 'f':
+        case 'F':
+        case 'n':
+        case 'N':
+            return 0;
+        default:
+            return 1;
+    }
 }
 
 static inline ThreadCacheState *
@@ -96,6 +125,34 @@ thread_cache_state_get_or_create(void)
         PyMem_Free(state);
         PyErr_SetString(PyExc_RuntimeError, "failed to store thread cache state");
         return NULL;
+    }
+
+    if (debug_thread_cache_enabled) {
+        atomic_fetch_add_explicit(&debug_thread_cache_count, 1, memory_order_relaxed);
+    }
+
+    PyObject *dict = PyThreadState_GetDict();
+    if (dict != NULL) {
+        PyObject *key = thread_cache_cleanup_key;
+        if (key == NULL) {
+            key = PyUnicode_FromString("_pcre2_cache_state");
+            if (key == NULL) {
+                PyThread_tss_set(&cache_tss, NULL);
+                thread_cache_state_clear(state);
+                PyMem_Free(state);
+                return NULL;
+            }
+            thread_cache_cleanup_key = key;
+        }
+        PyObject *capsule = PyCapsule_New(state, THREAD_CACHE_CAPSULE_NAME, thread_cache_capsule_destructor);
+        if (capsule != NULL) {
+            if (PyDict_SetItem(dict, key, capsule) == 0) {
+                state->cleanup_token = capsule;
+            } else {
+                PyErr_Clear();
+            }
+            Py_DECREF(capsule);
+        }
     }
 
     return state;
@@ -140,6 +197,40 @@ thread_cache_state_clear(ThreadCacheState *state)
     }
 }
 
+static inline void
+thread_cache_state_free(ThreadCacheState *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    thread_cache_state_clear(state);
+    if (debug_thread_cache_enabled) {
+        atomic_fetch_sub_explicit(&debug_thread_cache_count, 1, memory_order_relaxed);
+    }
+    PyMem_Free(state);
+}
+
+static void
+thread_cache_capsule_destructor(PyObject *capsule)
+{
+    ThreadCacheState *state = PyCapsule_GetPointer(capsule, THREAD_CACHE_CAPSULE_NAME);
+    if (state == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    if (state->cleanup_token != capsule) {
+        return;
+    }
+    state->cleanup_token = NULL;
+    if (atomic_load_explicit(&cache_tss_ready, memory_order_acquire)) {
+        ThreadCacheState *current = (ThreadCacheState *)PyThread_tss_get(&cache_tss);
+        if (current == state) {
+            (void)PyThread_tss_set(&cache_tss, NULL);
+        }
+    }
+    thread_cache_state_free(state);
+}
+
 static void
 thread_cache_teardown(void)
 {
@@ -149,9 +240,19 @@ thread_cache_teardown(void)
 
     ThreadCacheState *state = thread_cache_state_get();
     if (state != NULL) {
-        thread_cache_state_clear(state);
-        PyMem_Free(state);
-        PyThread_tss_set(&cache_tss, NULL);
+        if (state->cleanup_token != NULL) {
+            PyObject *dict = PyThreadState_GetDict();
+            if (dict != NULL && thread_cache_cleanup_key != NULL) {
+                if (PyDict_DelItem(dict, thread_cache_cleanup_key) < 0) {
+                    PyErr_Clear();
+                }
+            }
+            PyThread_tss_set(&cache_tss, NULL);
+        } else {
+            thread_cache_state_free(state);
+            PyThread_tss_set(&cache_tss, NULL);
+            state = NULL;
+        }
     }
 
     PyThread_tss_delete(&cache_tss);
@@ -412,6 +513,18 @@ cache_initialize(void)
         atomic_store_explicit(&cache_tss_ready, 1, memory_order_release);
     }
 
+    if (thread_cache_cleanup_key == NULL) {
+        thread_cache_cleanup_key = PyUnicode_FromString("_pcre2_cache_state");
+        if (thread_cache_cleanup_key == NULL) {
+            return -1;
+        }
+    }
+
+    debug_thread_cache_enabled = env_flag_is_true(Py_GETENV("PYPCRE_DEBUG"));
+    if (!debug_thread_cache_enabled) {
+        atomic_store_explicit(&debug_thread_cache_count, 0, memory_order_relaxed);
+    }
+
     cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
     cache_strategy_set_locked(0);
     atomic_store_explicit(&context_cache_enabled, 1, memory_order_release);
@@ -432,6 +545,7 @@ cache_teardown(void)
     global_cache_teardown();
     cache_strategy_set_locked(0);
     cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
+    Py_CLEAR(thread_cache_cleanup_key);
 }
 
 pcre2_match_data *
@@ -518,6 +632,16 @@ void
 cache_set_context_cache_enabled(int enabled)
 {
     atomic_store_explicit(&context_cache_enabled, enabled ? 1 : 0, memory_order_release);
+}
+
+PyObject *
+module_debug_thread_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    if (!debug_thread_cache_enabled) {
+        return PyLong_FromLong(-1);
+    }
+    int value = atomic_load_explicit(&debug_thread_cache_count, memory_order_relaxed);
+    return PyLong_FromLong(value);
 }
 
 pcre2_jit_stack *

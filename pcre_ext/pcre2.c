@@ -2607,6 +2607,7 @@ static PyMethodDef module_methods[] = {
     {"get_library_version", (PyCFunction)module_get_pcre2_version, METH_NOARGS, PyDoc_STR("Return the PCRE2 library version string." )},
     {"get_allocator", (PyCFunction)module_memory_allocator, METH_NOARGS, PyDoc_STR("Return the name of the active heap allocator (tcmalloc/jemalloc/malloc)." )},
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
+    {"_debug_thread_cache_count", (PyCFunction)module_debug_thread_cache_count, METH_NOARGS, PyDoc_STR("Return the number of live thread cache states (requires PYPCRE_DEBUG=1)." )},
     {"translate_unicode_escapes", (PyCFunction)module_translate_unicode_escapes, METH_O, PyDoc_STR("Translate literal \\uXXXX/\\UXXXXXXXX escapes to PCRE2-compatible \\x{...} sequences." )},
     {NULL, NULL, 0, NULL},
 };
