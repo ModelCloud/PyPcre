@@ -72,7 +72,7 @@ LIBRARY_SEARCH_PATTERNS = [
     f"**/{LIBRARY_BASENAME}.so.*",
     f"**/{LIBRARY_BASENAME}.dylib",
     "**/pcre2-8.lib",
-    "**/pcre2-8.dll",
+    #"**/pcre2-8.dll",
     "**/pcre2-8-static.lib",
     "**/pcre2-8-static.dll",
 ]
