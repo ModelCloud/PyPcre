@@ -136,9 +136,9 @@ thread_cache_state_get_or_create(void)
         return NULL;
     }
 
-    state->match_capacity = 128;
-    state->jit_capacity = 32;
-    state->jit_start_size = 64 * 1024;
+    state->match_capacity = 8;
+    state->jit_capacity = 4;
+    state->jit_start_size = 32 * 1024;
     state->jit_max_size = 1024 * 1024;
 
     if (PyThread_tss_set(&cache_tss, state) != 0) {
@@ -243,15 +243,15 @@ thread_jit_stack_cache_evict_tail(ThreadCacheState *state)
 /* -------------------------------------------------------------------------- */
 
 static MatchDataCacheEntry *global_match_head = NULL;
-static uint32_t global_match_capacity = 128;
+static uint32_t global_match_capacity = 32;
 static uint32_t global_match_count = 0;
 static PyThread_type_lock global_match_lock = NULL;
 
 static JitStackCacheEntry *global_jit_head = NULL;
-static uint32_t global_jit_capacity = 32;
+static uint32_t global_jit_capacity = 16;
 static uint32_t global_jit_count = 0;
 static PyThread_type_lock global_jit_lock = NULL;
-static size_t global_jit_start_size = 64 * 1024;
+static size_t global_jit_start_size = 32 * 1024;
 static size_t global_jit_max_size = 1024 * 1024;
 
 static int
@@ -392,11 +392,11 @@ global_cache_teardown(void)
         global_jit_stack_cache_free_all_locked();
     }
 
-    global_match_capacity = 128;
+    global_match_capacity = 32;
     global_match_count = 0;
-    global_jit_capacity = 32;
+    global_jit_capacity = 16;
     global_jit_count = 0;
-    global_jit_start_size = 64 * 1024;
+    global_jit_start_size = 32 * 1024;
     global_jit_max_size = 1024 * 1024;
 }
 
@@ -1105,4 +1105,3 @@ module_set_cache_strategy(PyObject *Py_UNUSED(module), PyObject *args)
     cache_strategy = desired;
     Py_RETURN_NONE;
 }
-

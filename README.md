@@ -86,10 +86,24 @@ the conversion without repeating the flag.
 ### Automatic pattern caching
 
 `pcre.compile()` caches the final `Pattern` wrapper for up to 128
-unique `(pattern, flags)` pairs when the pattern object is hashable. Adjust the capacity with `pcre.set_cache_limit(n)`—pass
-`0` to disable caching completely or `None` for an unlimited cache—and
-check the current limit with `pcre.get_cache_limit()`. The cache can be
-emptied at any time with `pcre.clear_cache()`.
+unique `(pattern, flags)` pairs when the pattern object is hashable. By default
+the cache is **thread-local**, keeping per-thread LRU stores so workers do not
+contend with one another. Adjust the capacity with `pcre.set_cache_limit(n)`—pass
+`0` to disable caching completely or `None` for an unlimited cache—and check the
+current limit with `pcre.get_cache_limit()`. The cache can be emptied at any time
+with `pcre.clear_cache()`.
+
+Applications that prefer the historic global cache can opt back in before any
+compilation takes place:
+
+```python
+import pcre
+
+pcre.cache_strategy("global")  # call before compile()/match()/search()
+```
+
+Switching strategies after patterns have been compiled raises `RuntimeError`, so
+pick the desired mode during process start-up.
 
 ### Text versus bytes defaults
 
@@ -154,8 +168,9 @@ wrapper exposes two complementary ways to adjust that behaviour:
   ```
 
 ## Pattern cache
-- `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries.
-- Use `pcre.clear_cache()` when you need to free the cache proactively.
+- `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries per thread by default.
+- Call `pcre.cache_strategy("global")` once at boot if you need a shared, process-wide cache instead of isolated thread stores.
+- Use `pcre.clear_cache()` when you need to free the active cache proactively.
 - Non-hashable pattern objects skip the cache and are compiled each time.
 
 ## Default flags for text patterns

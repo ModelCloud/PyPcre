@@ -17,7 +17,7 @@ import pcre_ext_c as _pcre2
 
 T = TypeVar("T")
 
-_DEFAULT_THREAD_CACHE_LIMIT = 16
+_DEFAULT_THREAD_CACHE_LIMIT = 32
 _DEFAULT_GLOBAL_CACHE_LIMIT = 128
 
 
