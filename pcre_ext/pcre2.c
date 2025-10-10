@@ -6,7 +6,7 @@
 #include "pcre2_module.h"
 #include <stdio.h>
 #include <string.h>
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
 #include <immintrin.h>
 #endif
 
@@ -943,6 +943,71 @@ ascii_prefix_length_sse2(const char *data, Py_ssize_t max_len)
     return offset + ascii_prefix_length_scalar(data + offset, max_len - offset);
 }
 #endif
+
+#elif defined(_M_X64) || defined(_M_AMD64)
+
+static inline int
+ascii_vector_mode(void)
+{
+    static ATOMIC_VAR(int) cached = ATOMIC_VAR_INIT(-1);
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+    if (value != -1) {
+        return value;
+    }
+
+    int detected = 0;
+    int cpu_info[4] = {0};
+
+    __cpuid(cpu_info, 0);
+    int max_leaf = cpu_info[0];
+
+    if (max_leaf >= 1) {
+        __cpuid(cpu_info, 1);
+
+        const int has_sse2 = (cpu_info[3] & (1 << 26)) != 0;
+        if (has_sse2) {
+            detected = 1;
+        }
+
+        const int has_osxsave = (cpu_info[2] & (1 << 27)) != 0;
+        const int has_avx = (cpu_info[2] & (1 << 28)) != 0;
+
+        unsigned long long xcr0 = 0;
+        if (has_osxsave) {
+            xcr0 = _xgetbv(0);
+        }
+
+        const unsigned long long xcr0_avx_mask = (1ull << 1) | (1ull << 2);
+
+        if (has_osxsave && has_avx && (xcr0 & xcr0_avx_mask) == xcr0_avx_mask && max_leaf >= 7) {
+            __cpuidex(cpu_info, 7, 0);
+
+            const int has_avx2 = (cpu_info[1] & (1 << 5)) != 0;
+            if (has_avx2) {
+                detected = 2;
+            }
+
+            const int has_avx512f = (cpu_info[1] & (1 << 16)) != 0;
+            const int has_avx512bw = (cpu_info[1] & (1 << 30)) != 0;
+            const unsigned long long xcr0_avx512_mask = (1ull << 1) | (1ull << 2) | (1ull << 5) | (1ull << 6) | (1ull << 7);
+            if (has_avx512f && has_avx512bw && (xcr0 & xcr0_avx512_mask) == xcr0_avx512_mask) {
+                detected = 3;
+            }
+        }
+    }
+
+    int expected = -1;
+    if (!atomic_compare_exchange_strong_explicit(
+            &cached,
+            &expected,
+            detected,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        detected = atomic_load_explicit(&cached, memory_order_acquire);
+    }
+
+    return detected;
+}
 
 #endif
 
@@ -2825,7 +2890,7 @@ error_locks:
 static PyObject *
 module_cpu_ascii_vector_mode(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-#if defined(__x86_64__) && defined(__GNUC__)
+#if (defined(__x86_64__) && defined(__GNUC__)) || defined(_M_X64) || defined(_M_AMD64)
     return PyLong_FromLong(ascii_vector_mode());
 #else
     return PyLong_FromLong(0);
