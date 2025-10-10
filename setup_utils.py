@@ -1029,6 +1029,7 @@ locate_library_file = _locate_library_file
 header_exists = _header_exists
 library_exists = _library_exists
 augment_compile_flags = _augment_compile_flags
+compiler_supports_flag = _compiler_supports_flag
 has_header = _has_header
 has_library = _has_library
 is_truthy_env = _is_truthy_env
@@ -1050,6 +1051,7 @@ __all__ = [
     "header_exists",
     "library_exists",
     "augment_compile_flags",
+    "compiler_supports_flag",
     "has_header",
     "has_library",
     "is_truthy_env",

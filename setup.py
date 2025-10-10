@@ -22,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
 import setup_utils
 from setup_utils import (
     augment_compile_flags,
+    compiler_supports_flag,
     discover_include_dirs,
     discover_library_dirs,
     extend_env_paths,
@@ -177,8 +178,27 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if env_ldflags:
         extra_link_args.extend(shlex.split(env_ldflags))
 
-    if not is_windows_platform() and not any(flag.startswith("-std=") for flag in extra_compile_args):
-        extra_compile_args.append("-std=c99")
+    has_std_flag = any(
+        flag.lower().startswith("/std:") or flag.startswith("-std=") for flag in extra_compile_args
+    )
+
+    if is_windows_platform():
+        if not has_std_flag:
+            selected_std = None
+            for candidate in ("/std:c17", "/std:c11"):
+                if compiler_supports_flag(candidate):
+                    selected_std = candidate
+                    break
+            if selected_std is None:
+                raise RuntimeError(
+                    "MSVC does not support /std:c11 or /std:c17; upgrade to a compiler with C11 atomics"
+                )
+            extra_compile_args.append(selected_std)
+    elif not has_std_flag:
+        if compiler_supports_flag("-std=c11"):
+            extra_compile_args.append("-std=c11")
+        else:
+            extra_compile_args.append("-std=c99")
 
     if not has_header(include_dirs):
         include_dirs.extend(discover_include_dirs())
@@ -256,4 +276,3 @@ EXTENSION = Extension(
 )
 
 setup(ext_modules=[EXTENSION], cmdclass={"build_ext": build_ext})
-
