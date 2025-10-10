@@ -6,16 +6,21 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
 import threading
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 
 import pcre.cache as cache_mod
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -38,37 +43,147 @@ def _fresh_thread_cache() -> OrderedDict[Any, Any]:
 
 
 def _run_cache_script(source: str) -> Dict[str, Any]:
+    env = os.environ.copy()
+    pythonpath_entries = [str(PROJECT_ROOT)]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+
     completed = subprocess.run(
         [sys.executable, "-c", source],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
     if completed.stderr:
         raise AssertionError(f"unexpected stderr output: {completed.stderr}")
     return json.loads(completed.stdout)
 
 
-def _benchmark_strategy(strategy: str, iterations: int = 5000) -> Dict[str, Any]:
+def _format_table(headers: List[str], rows: List[List[str]]) -> List[str]:
+    display_rows = [headers] + rows
+    widths = [max(len(row[idx]) for row in display_rows) for idx in range(len(headers))]
+
+    def _format(row: List[str]) -> str:
+        return " | ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(row))
+
+    separator = "-+-".join("-" * width for width in widths)
+    lines = [_format(headers), separator]
+    lines.extend(_format(row) for row in rows)
+    return lines
+
+
+def _emit_table(pytestconfig: pytest.Config, title: str, headers: List[str], rows: List[List[str]]) -> None:
+    lines = _format_table(headers, rows)
+    reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - fallback for unusual runners
+        print(f"\n{title}")
+        for line in lines:
+            print(line)
+        return
+
+    writer = getattr(reporter, "_tw", None)
+    original_hasmarkup = None
+    if writer is not None:
+        original_hasmarkup = writer.hasmarkup
+        writer.hasmarkup = False
+
+    try:
+        reporter.write_sep("-", title)
+        for line in lines:
+            reporter.write_line(line)
+    finally:
+        if writer is not None and original_hasmarkup is not None:
+            writer.hasmarkup = original_hasmarkup
+
+
+def _benchmark_strategy(strategy: str, iterations: int = 20000, threads: int = 1) -> Dict[str, Any]:
     script = textwrap.dedent(
         f"""
         import json
+        import threading
         import time
         import pcre.cache as cache_mod
 
         def wrapper(compiled):
             return compiled
 
-        cache_mod.cache_strategy({strategy!r})
+        STRATEGY = {strategy!r}
+        ITERATIONS = {iterations}
+        THREAD_COUNT = {threads}
+        REPEATS = 5
+
+        cache_mod.cache_strategy(STRATEGY)
         cache_mod.clear_cache()
         cache_mod.cached_compile("expr", 0, wrapper, jit=False)
 
-        start = time.perf_counter()
-        for _ in range({iterations}):
-            cache_mod.cached_compile("expr", 0, wrapper, jit=False)
-        elapsed = time.perf_counter() - start
+        def run_single():
+            best = float("inf")
+            for _ in range(REPEATS):
+                start = time.perf_counter()
+                for _ in range(ITERATIONS):
+                    cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+                elapsed = time.perf_counter() - start
+                if elapsed < best:
+                    best = elapsed
+            return best
 
-        print(json.dumps({{"strategy": {strategy!r}, "iterations": {iterations}, "elapsed": elapsed}}))
+        def run_threaded():
+            best = float("inf")
+            for _ in range(REPEATS):
+                errors = []
+                start_barrier = threading.Barrier(THREAD_COUNT + 1)
+                stop_barrier = threading.Barrier(THREAD_COUNT + 1)
+
+                def worker() -> None:
+                    try:
+                        cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+                        start_barrier.wait()
+                        for _ in range(ITERATIONS):
+                            cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+                        stop_barrier.wait()
+                    except BaseException as exc:  # pragma: no cover - surfaced in main thread
+                        errors.append(repr(exc))
+                        raise
+
+                workers = [threading.Thread(target=worker, name=f"bench-worker-{{idx}}") for idx in range(THREAD_COUNT)]
+                for thread in workers:
+                    thread.start()
+
+                start_barrier.wait()
+                start = time.perf_counter()
+                stop_barrier.wait()
+                elapsed = time.perf_counter() - start
+
+                for thread in workers:
+                    thread.join()
+
+                if errors:
+                    raise RuntimeError("worker thread failed", errors)
+
+                if elapsed < best:
+                    best = elapsed
+
+            return best
+
+        if THREAD_COUNT == 1:
+            elapsed = run_single()
+        else:
+            elapsed = run_threaded()
+
+        print(
+            json.dumps(
+                dict(
+                    strategy=STRATEGY,
+                    iterations=ITERATIONS,
+                    threads=THREAD_COUNT,
+                    elapsed=elapsed,
+                    total_calls=ITERATIONS * THREAD_COUNT,
+                )
+            )
+        )
         """
     )
     return _run_cache_script(script)
@@ -306,11 +421,70 @@ def test_cache_strategy_global_shares_cache_across_threads() -> None:
     assert result["main_result"] == result["worker_result"] == "compiled:1"
 
 
-def test_cache_strategy_benchmark() -> None:
-    thread_stats = _benchmark_strategy("thread-local", iterations=2000)
-    global_stats = _benchmark_strategy("global", iterations=2000)
+def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
+    iterations = 20_000
+    scenarios = [
+        ("thread-local", 1),
+        ("global", 1),
+        ("thread-local", 2),
+        ("global", 2),
+    ]
 
-    assert thread_stats["strategy"] == "thread-local"
-    assert global_stats["strategy"] == "global"
-    assert thread_stats["elapsed"] >= 0.0
-    assert global_stats["elapsed"] >= 0.0
+    results: Dict[tuple[str, int], Dict[str, Any]] = {}
+    for strategy, thread_count in scenarios:
+        stats = _benchmark_strategy(strategy, iterations=iterations, threads=thread_count)
+        key = (strategy, thread_count)
+        results[key] = stats
+        assert stats["strategy"] == strategy
+        assert stats["threads"] == thread_count
+        assert stats["elapsed"] >= 0.0
+
+    single_thread_local = results[("thread-local", 1)]
+    single_global = results[("global", 1)]
+    threaded_local = results[("thread-local", 2)]
+    threaded_global = results[("global", 2)]
+
+    # Allow a small tolerance for measurement noise but enforce thread-local is not slower.
+    assert single_thread_local["elapsed"] <= single_global["elapsed"] * 1.10
+    assert threaded_local["elapsed"] <= threaded_global["elapsed"] * 1.10
+
+    headers = ["strategy", "threads", "total calls", "total ms", "per call ns", "relative"]
+
+    single_rows: List[List[str]] = []
+    baseline_single = single_thread_local["elapsed"] or 1.0
+    for key in [("thread-local", 1), ("global", 1)]:
+        stats = results[key]
+        total_calls = stats.get("total_calls", stats["iterations"] * stats.get("threads", 1))
+        per_call_ns = (stats["elapsed"] / total_calls) * 1e9 if total_calls else float("nan")
+        relative = stats["elapsed"] / baseline_single if baseline_single else float("nan")
+        single_rows.append(
+            [
+                stats["strategy"],
+                str(stats["threads"]),
+                str(total_calls),
+                f"{stats['elapsed'] * 1000:.3f}",
+                f"{per_call_ns:.1f}",
+                f"{relative:.2f}x",
+            ]
+        )
+
+    threaded_rows: List[List[str]] = []
+    baseline_threaded = threaded_local["elapsed"] or 1.0
+    for key in [("thread-local", 2), ("global", 2)]:
+        stats = results[key]
+        total_calls = stats.get("total_calls", stats["iterations"] * stats.get("threads", 1))
+        per_call_ns = (stats["elapsed"] / total_calls) * 1e9 if total_calls else float("nan")
+        relative = stats["elapsed"] / baseline_threaded if baseline_threaded else float("nan")
+        threaded_rows.append(
+            [
+                stats["strategy"],
+                str(stats["threads"]),
+                str(total_calls),
+                f"{stats['elapsed'] * 1000:.3f}",
+                f"{per_call_ns:.1f}",
+                f"{relative:.2f}x",
+            ]
+        )
+
+    _emit_table(pytestconfig, "Cache strategy benchmark (single-thread)", headers, single_rows)
+    _emit_table(pytestconfig, "Cache strategy benchmark (threads=2)", headers, threaded_rows)
