@@ -185,13 +185,13 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     if is_windows_platform():
         if not has_std_flag:
             selected_std = None
-            for candidate in ("/std:c17", "/std:c11"):
+            for candidate in ("/std:c11",):
                 if compiler_supports_flag(candidate):
                     selected_std = candidate
                     break
             if selected_std is None:
                 raise RuntimeError(
-                    "MSVC does not support /std:c11 or /std:c17; upgrade to a compiler with C11 atomics"
+                    "MSVC does not support /std:c11; upgrade to a compiler with C11 atomics"
                 )
             extra_compile_args.append(selected_std)
     elif not has_std_flag:
