@@ -112,34 +112,22 @@ def _cached_compile_thread_local(
     if cache_limit == 0:
         return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
+    key = (pattern, flags, bool(jit))
+    cache = _THREAD_LOCAL.pattern_cache
     try:
-        key = (pattern, flags, bool(jit))
-        hash(key)
+        cached = cache[key]
+    except KeyError:
+        compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
+        if cache_limit != 0:
+            if cache_limit is not None and len(cache) >= cache_limit:
+                cache.popitem(last=False)
+            cache[key] = compiled
+        return compiled
     except TypeError:
         return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
-
-    cache = _THREAD_LOCAL.pattern_cache
-    cached = cache.get(key)
-    if cached is not None:
+    else:
         cache.move_to_end(key)
         return cast(T, cached)
-
-    compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
-
-    cache_limit = _THREAD_LOCAL.cache_limit
-    if cache_limit == 0:
-        return compiled
-
-    cache = _THREAD_LOCAL.pattern_cache
-    existing = cache.get(key)
-    if existing is not None:
-        cache.move_to_end(key)
-        return cast(T, existing)
-
-    cache[key] = compiled
-    if (cache_limit is not None) and len(cache) > cache_limit:
-        cache.popitem(last=False)
-    return compiled
 
 
 def _cached_compile_global(
@@ -153,16 +141,16 @@ def _cached_compile_global(
     if cache_limit == 0:
         return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
-    try:
-        key = (pattern, flags, bool(jit))
-        hash(key)
-    except TypeError:
-        return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
-
+    key = (pattern, flags, bool(jit))
     lock = _GLOBAL_STATE.lock
     with lock:
-        cached = _GLOBAL_STATE.pattern_cache.get(key)
-        if cached is not None:
+        try:
+            cached = _GLOBAL_STATE.pattern_cache[key]
+        except KeyError:
+            pass
+        except TypeError:
+            return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
+        else:
             _GLOBAL_STATE.pattern_cache.move_to_end(key)
             return cast(T, cached)
 
@@ -171,16 +159,17 @@ def _cached_compile_global(
     with lock:
         if _GLOBAL_STATE.cache_limit == 0:
             return compiled
-        existing = _GLOBAL_STATE.pattern_cache.get(key)
-        if existing is not None:
+        try:
+            existing = _GLOBAL_STATE.pattern_cache[key]
+        except KeyError:
+            if _GLOBAL_STATE.cache_limit is not None and len(_GLOBAL_STATE.pattern_cache) >= _GLOBAL_STATE.cache_limit:
+                _GLOBAL_STATE.pattern_cache.popitem(last=False)
+            _GLOBAL_STATE.pattern_cache[key] = compiled
+        except TypeError:
+            return compiled
+        else:
             _GLOBAL_STATE.pattern_cache.move_to_end(key)
             return cast(T, existing)
-        _GLOBAL_STATE.pattern_cache[key] = compiled
-        if (
-            _GLOBAL_STATE.cache_limit is not None
-            and len(_GLOBAL_STATE.pattern_cache) > _GLOBAL_STATE.cache_limit
-        ):
-            _GLOBAL_STATE.pattern_cache.popitem(last=False)
         return compiled
 
 
