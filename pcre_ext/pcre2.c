@@ -65,9 +65,6 @@ static void detect_offset_limit_support(void);
 static PyObject *module_compile_cache = NULL;
 static PyObject *module_compile_order = NULL;
 
-#if !defined(Py_GIL_DISABLED)
-static int pcre_force_gil_release = 0;
-#endif
 static int pcre_force_jit_lock = 0;
 
 #if defined(PCRE_EXT_HAVE_ATOMICS)
@@ -77,7 +74,6 @@ static int default_jit_enabled = 1;
 static PyThread_type_lock default_jit_lock = NULL;
 #endif
 
-#if !defined(Py_GIL_DISABLED)
 static int
 env_flag_is_true(const char *value)
 {
@@ -95,45 +91,11 @@ env_flag_is_true(const char *value)
             return 1;
     }
 }
-#else
-static int
-env_flag_is_true(const char *value)
-{
-    if (value == NULL || value[0] == '\0') {
-        return 0;
-    }
-    switch (value[0]) {
-        case '0':
-        case 'f':
-        case 'F':
-        case 'n':
-        case 'N':
-            return 0;
-        default:
-            return 1;
-    }
-}
-#endif
 
-#if defined(Py_GIL_DISABLED)
 #define PCRE2_CALL_WITHOUT_GIL(call)     \
     do {                                 \
-        Py_BEGIN_ALLOW_THREADS           \
         rc = (call);                     \
-        Py_END_ALLOW_THREADS             \
     } while (0)
-#else
-#define PCRE2_CALL_WITHOUT_GIL(call)     \
-    do {                                 \
-        if (pcre_force_gil_release) {     \
-            Py_BEGIN_ALLOW_THREADS       \
-            rc = (call);                 \
-            Py_END_ALLOW_THREADS         \
-        } else {                         \
-            rc = (call);                 \
-        }                                \
-    } while (0)
-#endif
 
 static inline void
 module_state_lock_acquire(void)
@@ -2337,13 +2299,6 @@ PyInit_pcre_ext_c(void)
 
     const char *context_cache_env = Py_GETENV("PCRE2_DISABLE_CONTEXT_CACHE");
     cache_set_context_cache_enabled(env_flag_is_true(context_cache_env) ? 0 : 1);
-
-#if !defined(Py_GIL_DISABLED)
-    const char *force_gil_env = Py_GETENV("PCRE2_FORCE_GIL_RELEASE");
-    if (env_flag_is_true(force_gil_env)) {
-        pcre_force_gil_release = 1;
-    }
-#endif
 
     module_state_lock_acquire();
     if (module_compile_cache == NULL) {

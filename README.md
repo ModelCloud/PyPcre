@@ -163,7 +163,6 @@ bytes.
   | Env var                        | Effect (per-call, `pattern.match("fo")`) |
   |--------------------------------|------------------------------------------|
   | _(baseline)_                   | 0.60 µs                                  |
-  | `PCRE2_FORCE_GIL_RELEASE=1`    | 0.61 µs                                  |
   | `PCRE2_DISABLE_CONTEXT_CACHE=1`| 0.60 µs                                  |
   | `PCRE2_FORCE_JIT_LOCK=1`       | 0.60 µs                                  |
   | `pcre.match()` helper          | 4.43 µs                                  |
