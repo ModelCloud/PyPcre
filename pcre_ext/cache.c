@@ -62,11 +62,7 @@ cache_state_lock_release(void)
 static inline CacheStrategy
 cache_strategy_get(void)
 {
-    CacheStrategy strategy;
-    cache_state_lock_acquire();
-    strategy = cache_strategy;
-    cache_state_lock_release();
-    return strategy;
+    return cache_strategy;
 }
 
 static inline void
@@ -94,7 +90,13 @@ cache_strategy_name(CacheStrategy strategy)
 static inline void
 mark_cache_strategy_locked(void)
 {
-    cache_strategy_set_locked(1);
+    if (!cache_strategy_locked) {
+        cache_state_lock_acquire();
+        if (!cache_strategy_locked) {
+            cache_strategy_locked = 1;
+        }
+        cache_state_lock_release();
+    }
 }
 
 /* -------------------------------------------------------------------------- */
