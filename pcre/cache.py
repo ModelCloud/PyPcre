@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from threading import local
+from enum import Enum
+from threading import RLock, local
 from typing import Any, Callable, Tuple, TypeVar, cast
 
 import pcre_ext_c as _pcre2
@@ -16,29 +17,90 @@ import pcre_ext_c as _pcre2
 
 T = TypeVar("T")
 
-_DEFAULT_CACHE_LIMIT = 16
+_DEFAULT_THREAD_CACHE_LIMIT = 16
+_DEFAULT_GLOBAL_CACHE_LIMIT = 128
 
 
-class _CacheState(local):
+class _CacheStrategy(str, Enum):
+    THREAD_LOCAL = "thread-local"
+    GLOBAL = "global"
+
+
+class _ThreadCacheState(local):
     """Thread-local cache state holding the cache store and limit."""
 
     def __init__(self) -> None:
-        self.cache_limit: int | None = _DEFAULT_CACHE_LIMIT
+        self.cache_limit: int | None = _DEFAULT_THREAD_CACHE_LIMIT
         self.pattern_cache: OrderedDict[Tuple[Any, int, bool], Any] = OrderedDict()
 
 
-_THREAD_LOCAL = _CacheState()
+class _GlobalCacheState:
+    """Process-wide cache state mirroring the historic global cache."""
+
+    __slots__ = ("cache_limit", "pattern_cache", "lock")
+
+    def __init__(self) -> None:
+        self.cache_limit: int | None = _DEFAULT_GLOBAL_CACHE_LIMIT
+        self.pattern_cache: OrderedDict[Tuple[Any, int, bool], Any] = OrderedDict()
+        self.lock = RLock()
 
 
-def cached_compile(
+_THREAD_LOCAL = _ThreadCacheState()
+_GLOBAL_STATE = _GlobalCacheState()
+_CACHE_STRATEGY = _CacheStrategy.THREAD_LOCAL
+_CACHE_STRATEGY_LOCKED = False
+
+
+def _lock_cache_strategy() -> None:
+    global _CACHE_STRATEGY_LOCKED
+    if not _CACHE_STRATEGY_LOCKED:
+        _CACHE_STRATEGY_LOCKED = True
+
+
+def _normalize_strategy(value: str) -> _CacheStrategy:
+    try:
+        return _CacheStrategy(value)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise ValueError("cache strategy must be 'thread-local' or 'global'") from exc
+
+
+def cache_strategy(strategy: str | None = None) -> str:
+    """Select or query the caching strategy.
+
+    Passing ``None`` returns the active strategy name. Supported strategies are
+    ``"thread-local"`` (default) and ``"global"``.
+
+    Switching strategies after cache usage is not supported and will raise a
+    :class:`RuntimeError`.
+    """
+
+    global _CACHE_STRATEGY
+
+    if strategy is None:
+        return _CACHE_STRATEGY.value
+
+    desired = _normalize_strategy(strategy)
+    if _CACHE_STRATEGY_LOCKED and desired is not _CACHE_STRATEGY:
+        raise RuntimeError(
+            "cache strategy already locked to '" f"{_CACHE_STRATEGY.value}'"
+            "; call cache_strategy() before compiling patterns"
+        )
+
+    if desired is _CACHE_STRATEGY:
+        return _CACHE_STRATEGY.value
+
+    _pcre2.set_cache_strategy(desired.value)
+    _CACHE_STRATEGY = desired
+    return _CACHE_STRATEGY.value
+
+
+def _cached_compile_thread_local(
     pattern: Any,
     flags: int,
     wrapper: Callable[["_pcre2.Pattern"], T],
     *,
     jit: bool,
 ) -> T:
-    """Compile *pattern* with *flags*, caching wrapper results when hashable."""
-
     cache_limit = _THREAD_LOCAL.cache_limit
     if cache_limit == 0:
         return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
@@ -73,17 +135,79 @@ def cached_compile(
     return compiled
 
 
-def clear_cache() -> None:
-    """Clear the cached compiled patterns for the current thread."""
+def _cached_compile_global(
+    pattern: Any,
+    flags: int,
+    wrapper: Callable[["_pcre2.Pattern"], T],
+    *,
+    jit: bool,
+) -> T:
+    cache_limit = _GLOBAL_STATE.cache_limit
+    if cache_limit == 0:
+        return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
 
-    _THREAD_LOCAL.pattern_cache.clear()
+    try:
+        key = (pattern, flags, bool(jit))
+        hash(key)
+    except TypeError:
+        return wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
+
+    lock = _GLOBAL_STATE.lock
+    with lock:
+        cached = _GLOBAL_STATE.pattern_cache.get(key)
+        if cached is not None:
+            _GLOBAL_STATE.pattern_cache.move_to_end(key)
+            return cast(T, cached)
+
+    compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
+
+    with lock:
+        if _GLOBAL_STATE.cache_limit == 0:
+            return compiled
+        existing = _GLOBAL_STATE.pattern_cache.get(key)
+        if existing is not None:
+            _GLOBAL_STATE.pattern_cache.move_to_end(key)
+            return cast(T, existing)
+        _GLOBAL_STATE.pattern_cache[key] = compiled
+        if (
+            _GLOBAL_STATE.cache_limit is not None
+            and len(_GLOBAL_STATE.pattern_cache) > _GLOBAL_STATE.cache_limit
+        ):
+            _GLOBAL_STATE.pattern_cache.popitem(last=False)
+        return compiled
+
+
+def cached_compile(
+    pattern: Any,
+    flags: int,
+    wrapper: Callable[["_pcre2.Pattern"], T],
+    *,
+    jit: bool,
+) -> T:
+    """Compile *pattern* with *flags*, caching wrapper results when hashable."""
+
+    _lock_cache_strategy()
+
+    if _CACHE_STRATEGY is _CacheStrategy.THREAD_LOCAL:
+        return _cached_compile_thread_local(pattern, flags, wrapper, jit=jit)
+    return _cached_compile_global(pattern, flags, wrapper, jit=jit)
+
+
+def clear_cache() -> None:
+    """Clear the cached compiled patterns and backend caches for the active strategy."""
+
+    if _CACHE_STRATEGY is _CacheStrategy.THREAD_LOCAL:
+        _THREAD_LOCAL.pattern_cache.clear()
+    else:
+        with _GLOBAL_STATE.lock:
+            _GLOBAL_STATE.pattern_cache.clear()
+
+    _pcre2.clear_match_data_cache()
+    _pcre2.clear_jit_stack_cache()
 
 
 def set_cache_limit(limit: int | None) -> None:
-    """Adjust the maximum number of cached patterns.
-
-    Passing ``None`` removes the limit. ``0`` disables caching entirely.
-    """
+    """Adjust the maximum number of cached patterns for the active strategy."""
 
     if limit is None:
         new_limit: int | None = None
@@ -95,17 +219,32 @@ def set_cache_limit(limit: int | None) -> None:
         if new_limit < 0:
             raise ValueError("cache limit must be >= 0 or None")
 
-    _THREAD_LOCAL.cache_limit = new_limit
-
-    cache = _THREAD_LOCAL.pattern_cache
-    if new_limit == 0:
-        cache.clear()
-    elif new_limit is not None:
-        while len(cache) > new_limit:
-            cache.popitem(last=False)
+    if _CACHE_STRATEGY is _CacheStrategy.THREAD_LOCAL:
+        _THREAD_LOCAL.cache_limit = new_limit
+        cache = _THREAD_LOCAL.pattern_cache
+        if new_limit == 0:
+            cache.clear()
+        elif new_limit is not None:
+            while len(cache) > new_limit:
+                cache.popitem(last=False)
+    else:
+        with _GLOBAL_STATE.lock:
+            _GLOBAL_STATE.cache_limit = new_limit
+            cache = _GLOBAL_STATE.pattern_cache
+            if new_limit == 0:
+                cache.clear()
+            elif new_limit is not None:
+                while len(cache) > new_limit:
+                    cache.popitem(last=False)
 
 
 def get_cache_limit() -> int | None:
     """Return the current cache limit (``None`` means unlimited)."""
 
-    return _THREAD_LOCAL.cache_limit
+    if _CACHE_STRATEGY is _CacheStrategy.THREAD_LOCAL:
+        return _THREAD_LOCAL.cache_limit
+    return _GLOBAL_STATE.cache_limit
+
+
+# Ensure the backend aligns with the default strategy.
+_pcre2.set_cache_strategy(_CACHE_STRATEGY.value)

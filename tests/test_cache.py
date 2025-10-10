@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import textwrap
 import threading
 from collections import OrderedDict
 from typing import Any, Dict, List
@@ -14,10 +18,60 @@ import pytest
 import pcre.cache as cache_mod
 
 
+@pytest.fixture(autouse=True)
+def _reset_cache_state() -> None:
+    cache_mod.cache_strategy("thread-local")
+    original_limit = cache_mod.get_cache_limit()
+    cache_mod.clear_cache()
+    try:
+        yield
+    finally:
+        cache_mod.cache_strategy("thread-local")
+        cache_mod.set_cache_limit(original_limit)
+        cache_mod.clear_cache()
+
+
 def _fresh_thread_cache() -> OrderedDict[Any, Any]:
     store: OrderedDict[Any, Any] = OrderedDict()
     cache_mod._THREAD_LOCAL.pattern_cache = store
     return store
+
+
+def _run_cache_script(source: str) -> Dict[str, Any]:
+    completed = subprocess.run(
+        [sys.executable, "-c", source],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if completed.stderr:
+        raise AssertionError(f"unexpected stderr output: {completed.stderr}")
+    return json.loads(completed.stdout)
+
+
+def _benchmark_strategy(strategy: str, iterations: int = 5000) -> Dict[str, Any]:
+    script = textwrap.dedent(
+        f"""
+        import json
+        import time
+        import pcre.cache as cache_mod
+
+        def wrapper(compiled):
+            return compiled
+
+        cache_mod.cache_strategy({strategy!r})
+        cache_mod.clear_cache()
+        cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+
+        start = time.perf_counter()
+        for _ in range({iterations}):
+            cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+        elapsed = time.perf_counter() - start
+
+        print(json.dumps({{"strategy": {strategy!r}, "iterations": {iterations}, "elapsed": elapsed}}))
+        """
+    )
+    return _run_cache_script(script)
 
 
 def test_cached_compile_thread_local_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,3 +231,86 @@ def test_cache_limit_thread_local_isolated() -> None:
     assert worker_after == [2]
     assert cache_mod.get_cache_limit() == main_original_limit
     assert list(main_store.keys()) == []
+
+
+def test_cache_strategy_query_returns_active() -> None:
+    assert cache_mod.cache_strategy() == "thread-local"
+    assert cache_mod.cache_strategy("thread-local") == "thread-local"
+
+
+def test_cache_strategy_invalid_value() -> None:
+    with pytest.raises(ValueError):
+        cache_mod.cache_strategy("totally-invalid")
+
+
+def test_cache_strategy_cannot_switch_after_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern)
+
+    def wrapper(raw: Any) -> Any:
+        return raw
+
+    cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+    with pytest.raises(RuntimeError):
+        cache_mod.cache_strategy("global")
+
+
+def test_cache_strategy_global_shares_cache_across_threads() -> None:
+    script = textwrap.dedent(
+        """
+        import json
+        import threading
+        import pcre.cache as cache_mod
+
+        cache_mod.cache_strategy("global")
+        cache_mod.clear_cache()
+
+        compile_calls = []
+
+        def fake_compile(pattern, *, flags=0, jit=False):
+            compile_calls.append((pattern, flags, bool(jit)))
+            return f"compiled:{len(compile_calls)}"
+
+        cache_mod._pcre2.compile = fake_compile
+
+        def wrapper(raw):
+            return raw
+
+        main_result = cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+
+        worker_results = []
+
+        def worker():
+            worker_results.append(cache_mod.cached_compile("expr", 0, wrapper, jit=False))
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+
+        if not worker_results:
+            raise RuntimeError("worker failed to produce a result")
+
+        print(
+            json.dumps(
+                {
+                    "calls": len(compile_calls),
+                    "main_result": main_result,
+                    "worker_result": worker_results[0],
+                }
+            )
+        )
+        """
+    )
+
+    result = _run_cache_script(script)
+    assert result["calls"] == 1
+    assert result["main_result"] == result["worker_result"] == "compiled:1"
+
+
+def test_cache_strategy_benchmark() -> None:
+    thread_stats = _benchmark_strategy("thread-local", iterations=2000)
+    global_stats = _benchmark_strategy("global", iterations=2000)
+
+    assert thread_stats["strategy"] == "thread-local"
+    assert global_stats["strategy"] == "global"
+    assert thread_stats["elapsed"] >= 0.0
+    assert global_stats["elapsed"] >= 0.0
