@@ -223,7 +223,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
 
     if sys.platform.startswith("sunos") or sys.platform.startswith("solaris"):
         extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
-        if not platform.machine() in ['x86_64', 'AMD64', 'amd64', 'x64'] and extra_link_args_x64:
+        if platform.machine() in ['x86_64', 'AMD64', 'amd64', 'x64'] and extra_link_args_x64:
             extra_link_args = extra_link_args_x64
 
     config = {
