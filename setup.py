@@ -22,6 +22,8 @@ if str(ROOT_DIR) not in sys.path:
 import setup_utils
 from setup_utils import (
     augment_compile_flags,
+    compiler_supports_flag,
+    compiler_supports_flags,
     discover_include_dirs,
     discover_library_dirs,
     extend_env_paths,
@@ -52,28 +54,33 @@ PCRE_EXT_DIR = ROOT_DIR / "pcre_ext"
 PCRE2_REPO_URL = "https://github.com/PCRE2Project/pcre2.git"
 PCRE2_TAG = "pcre2-10.46"
 
-LIB_EXTENSIONS = [
-    ".so",
-    ".so.0",
-    ".so.1",
-    ".a",
-    ".dylib",
-    ".sl",
-]
-
-LIBRARY_BASENAME = "libpcre2-8"
-
-LIBRARY_SEARCH_PATTERNS = [
-    f"**/{LIBRARY_BASENAME}.lib",
-    f"**/{LIBRARY_BASENAME}.a",
-    f"**/{LIBRARY_BASENAME}.so",
-    f"**/{LIBRARY_BASENAME}.so.*",
-    f"**/{LIBRARY_BASENAME}.dylib",
-    "**/pcre2-8.lib",
-    "**/pcre2-8.dll",
-    "**/pcre2-8-static.lib",
-    "**/pcre2-8-static.dll",
-]
+# Platform-specific library naming/selection
+if os.name == "nt":
+    # Only accept MSVC libraries on Windows; never consider .a
+    LIB_EXTENSIONS = [".lib"]
+    # Prefer the static library when we build PCRE2 ourselves; fall back to import lib
+    LIBRARY_BASENAME = "pcre2-8-static"
+    LIBRARY_SEARCH_PATTERNS = [
+        "**/pcre2-8-static.lib",
+        "**/pcre2-8.lib",
+        "**/pcre2-8.dll",  # runtime (for packaging/copying), not for linking
+    ]
+else:
+    LIB_EXTENSIONS = [
+        ".so",
+        ".so.0",
+        ".so.1",
+        ".a",
+        ".dylib",
+        ".sl",
+    ]
+    LIBRARY_BASENAME = "libpcre2-8"
+    LIBRARY_SEARCH_PATTERNS = [
+        f"**/{LIBRARY_BASENAME}.a",
+        f"**/{LIBRARY_BASENAME}.so",
+        f"**/{LIBRARY_BASENAME}.so.*",
+        f"**/{LIBRARY_BASENAME}.dylib",
+    ]
 
 RUNTIME_LIBRARY_FILES: list[str] = []
 
@@ -86,6 +93,7 @@ setup_utils.configure_environment(
     library_search_patterns=LIBRARY_SEARCH_PATTERNS,
 )
 
+
 def filter_with_real_path(paths: list[str]) -> list[str]:
     unique_libs = []
     seen_realpaths = set()
@@ -95,6 +103,7 @@ def filter_with_real_path(paths: list[str]) -> list[str]:
             seen_realpaths.add(real)
             unique_libs.append(path)
     return unique_libs
+
 
 def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]]:
     include_dirs: list[str] = []
@@ -133,10 +142,10 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         else:
             extra_link_args.append(flag)
 
-    extend_env_paths(include_dirs, "PCRE2_INCLUDE_DIR")
-    extend_env_paths(library_dirs, "PCRE2_LIBRARY_DIR")
+    extend_env_paths(include_dirs, "PYPCRE_INCLUDE_DIR")
+    extend_env_paths(library_dirs, "PYPCRE_LIBRARY_DIR")
 
-    env_lib_path = os.environ.get("PCRE2_LIBRARY_PATH")
+    env_lib_path = os.environ.get("PYPCRE_LIBRARY_PATH")
     if env_lib_path:
         for raw_path in env_lib_path.split(os.pathsep):
             candidate = raw_path.strip()
@@ -151,7 +160,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
             else:
                 extend_unique(library_dirs, candidate)
 
-    extend_env_paths(libraries, "PCRE2_LIBRARIES")
+    extend_env_paths(libraries, "PYPCRE_LIBRARIES")
 
     directory_candidates = [Path(p) for p in library_dirs]
     directory_candidates.extend(Path(p) for p in discover_library_dirs())
@@ -169,16 +178,42 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     for path in find_library_with_brew():
         extend_unique(library_files, path)
 
-    env_cflags = os.environ.get("PCRE2_CFLAGS")
+    env_cflags = os.environ.get("PYPCRE_CFLAGS")
     if env_cflags:
         extra_compile_args.extend(shlex.split(env_cflags))
 
-    env_ldflags = os.environ.get("PCRE2_LDFLAGS")
+    env_ldflags = os.environ.get("PYPCRE_LDFLAGS")
     if env_ldflags:
         extra_link_args.extend(shlex.split(env_ldflags))
 
-    if not is_windows_platform() and not any(flag.startswith("-std=") for flag in extra_compile_args):
-        extra_compile_args.append("-std=c99")
+    has_std_flag = any(
+        flag.lower().startswith("/std:") or flag.startswith("-std=") for flag in extra_compile_args
+    )
+    has_msvc_atomics_flag = any(flag.lower() == "/experimental:c11atomics" for flag in extra_compile_args)
+    if is_windows_platform():
+        if not has_std_flag:
+            c11_probe = (
+                "#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L\n"
+                "#error C11 support required\n"
+                "#endif\n"
+                "int main(void) {\n"
+                "    int value = 1;\n"
+                "    return _Generic(value, int: 0, default: 1);\n"
+                "}\n"
+            )
+            if compiler_supports_flags(["/std:c11"], code=c11_probe):
+                extra_compile_args.append("/std:c11")
+            elif compiler_supports_flags(["/std:clatest"], code=c11_probe):
+                extra_compile_args.append("/std:clatest")
+            else:
+                raise RuntimeError("MSVC requires /std:c11 or newer for atomics support")
+        if not has_msvc_atomics_flag and compiler_supports_flag("/experimental:c11atomics"):
+            extra_compile_args.append("/experimental:c11atomics")
+    elif not has_std_flag:
+        if compiler_supports_flag("-std=c11"):
+            extra_compile_args.append("-std=c11")
+        else:
+            extra_compile_args.append("-std=c99")
 
     if not has_header(include_dirs):
         include_dirs.extend(discover_include_dirs())
@@ -218,7 +253,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
 
     if is_windows_platform():
         has_runtime_dll = any(path.lower().endswith(".dll") for path in runtime_libraries)
-        force_static_env = is_truthy_env("PCRE2_FORCE_STATIC")
+        force_static_env = is_truthy_env("PYPCRE_FORCE_STATIC")
         if (force_static_env or (library_files and not has_runtime_dll)) and not any(
             macro[0] == "PCRE2_STATIC" for macro in define_macros
         ):
@@ -233,6 +268,10 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
         if extra_link_args_x64:
             extra_link_args = extra_link_args_x64
+
+    # On Windows, only keep .lib paths in extra_link_args (drop accidental .a)
+    if os.name == "nt":
+        extra_link_args = [p for p in extra_link_args if p.lower().endswith(".lib")]
 
     extra_link_args = filter_with_real_path(extra_link_args)
     config = {
@@ -256,4 +295,3 @@ EXTENSION = Extension(
 )
 
 setup(ext_modules=[EXTENSION], cmdclass={"build_ext": build_ext})
-

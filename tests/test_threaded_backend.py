@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 import threading
 import time
 import unittest
@@ -17,6 +18,10 @@ class TestThreadedBackend(unittest.TestCase):
     def setUp(self):
         pcre.clear_cache()
         pcre.configure_threads(enabled=True, threshold=60_000)
+
+    def _skip_if_thread_barred(self) -> None:
+        if not thread_utils.threading_supported():
+            self.skipTest("threaded backend requires >=8 CPU cores")
 
     def test_parallel_map_disabled_via_flag(self):
         pattern = pcre.compile(r"requires-flag", Flag.NO_THREADS)
@@ -36,6 +41,7 @@ class TestThreadedBackend(unittest.TestCase):
         self.assertEqual(pattern.thread_mode, "auto")
 
     def test_parallel_map_auto_default_threads_above_threshold(self):
+        self._skip_if_thread_barred()
         pattern = pcre.compile(r"seq")
         subjects = ["a" * 70_000, "b" * 70_000]
 
@@ -107,6 +113,7 @@ class TestThreadedBackend(unittest.TestCase):
         self.assertGreaterEqual(par_elapsed, 0.0)
 
     def test_parallel_cross_over_lengths(self):
+        self._skip_if_thread_barred()
         base_delay = 1e-05
         thread_penalty = 0.005
         tolerance = 0.003
@@ -176,6 +183,13 @@ class TestThreadedBackend(unittest.TestCase):
                     slower_lengths,
                     msg=f"{method} had no lengths where parallel execution was slower",
                 )
+                if not faster_lengths:
+                    cpu_cores = os.cpu_count() or 0
+                    print(
+                        f"threaded backend warning: {method} saw no faster lengths; "
+                        f"detected {cpu_cores} CPU cores"
+                    )
+
                 self.assertTrue(
                     faster_lengths,
                     msg=f"{method} had no lengths where parallel execution was faster",

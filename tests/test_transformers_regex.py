@@ -36,7 +36,7 @@ class TestTransformersRegex(unittest.TestCase):
         for i, obj in enumerate(json_list):
             pattern_text = obj["pattern"]
             subject = obj["test_string"]
-            print(f"index: {i} pattern_text: {pattern_text} subject: {subject}")
+            print(f"index: {i} pattern_text: {pattern_text!r} subject: {subject!r}")
             try:
                 with self.subTest(pattern=pattern_text, subject=subject):
                     re_pattern = regex.compile(pattern_text)

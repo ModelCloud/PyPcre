@@ -31,6 +31,20 @@ _LIBRARY_BASENAME: str | None = None
 _LIBRARY_SEARCH_PATTERNS: tuple[str, ...] = ()
 
 
+def _ensure_macos_archflags() -> None:
+    if sys.platform != "darwin":
+        return
+    if os.environ.get("ARCHFLAGS"):
+        return
+    machine = platform.machine()
+    if not machine:
+        return
+    normalized = machine.lower()
+    if normalized == "aarch64":
+        normalized = "arm64"
+    os.environ["ARCHFLAGS"] = f"-arch {normalized}"
+
+
 def configure_environment(
     *,
     pcre_ext_dir: Path,
@@ -51,6 +65,8 @@ def configure_environment(
     _LIB_EXTENSIONS = tuple(lib_extensions)
     _LIBRARY_BASENAME = library_basename
     _LIBRARY_SEARCH_PATTERNS = tuple(library_search_patterns)
+
+    _ensure_macos_archflags()
 
 
 def _require_config(value: object, name: str) -> object:
@@ -352,6 +368,7 @@ def _resolve_cmake_executable() -> str | None:
 _COMPILER_INITIALIZED = False
 _COMPILER_INSTANCE: CCompiler | None = None
 _COMPILER_FLAG_CACHE: dict[str, bool] = {}
+_COMPILER_FLAG_COMBO_CACHE: dict[tuple[tuple[str, ...], str], bool] = {}
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -432,9 +449,9 @@ def _clean_previous_build(destination: Path, build_dir: Path, build_roots: list[
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if _is_windows_platform() and not _is_wsl_environment():
-        os.environ["PCRE2_BUILD_FROM_SOURCE"] = "1"
+        os.environ["PYPCRE_BUILD_FROM_SOURCE"] = "1"
 
-    if not _is_truthy_env("PCRE2_BUILD_FROM_SOURCE"):
+    if not _is_truthy_env("PYPCRE_BUILD_FROM_SOURCE"):
         return ([], [], [])
 
     destination = _get_pcre_ext_dir() / _get_repo_tag()
@@ -462,7 +479,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         try:
             subprocess.run(clone_command, check=True)
         except FileNotFoundError as exc:  # pragma: no cover - git missing on build host
-            raise RuntimeError("git is required to fetch PCRE2 sources when PCRE2_BUILD_FROM_SOURCE=1") from exc
+            raise RuntimeError("git is required to fetch PCRE2 sources when PYPCRE_BUILD_FROM_SOURCE=1") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 "Failed to clone PCRE2 source from official repository; see the output above for details"
@@ -501,11 +518,14 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
     def _has_built_library() -> bool:
         patterns = [
+            # POSIX/Mac
             "libpcre2-8.so",
             "libpcre2-8.so.*",
             "libpcre2-8.a",
             "libpcre2-8.dylib",
-            "libpcre2-8.lib",
+            # Windows (MSVC)
+            "pcre2-8.lib",
+            "pcre2-8-static.lib",
             "pcre2-8.dll",
         ]
         for root in build_roots:
@@ -522,42 +542,40 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
 
         cmake_executable = _resolve_cmake_executable()
         if cmake_executable:
-            ninja_executable = shutil.which("ninja")
             sys.stderr.write(f"Using CMake at {cmake_executable}\n")
             cmake_args = [
                 cmake_executable,
-                "-S",
-                str(destination),
-                "-B",
-                str(build_dir),
+                "-S", str(destination),
+                "-B", str(build_dir),
                 "-DPCRE2_SUPPORT_JIT=ON",
                 "-DPCRE2_BUILD_PCRE2_8=ON",
                 "-DPCRE2_BUILD_TESTS=OFF",
-                "-DBUILD_SHARED_LIBS=OFF",   # don't build DLLs
-                "-DPCRE2_STATIC=ON",         # ensure static linking symbols are used
+                "-DPCRE2_BUILD_PCRE2GREP=OFF",
+                "-DPCRE2_BUILD_PCRE2TEST=OFF",
+                "-DBUILD_SHARED_LIBS=OFF",   # build a static lib
             ]
-            if ninja_executable:
-                cmake_args.extend(["-G", "Ninja"])
-                env.setdefault("CMAKE_MAKE_PROGRAM", ninja_executable)
-            if not _is_windows_platform():
-                cmake_args.append("-DCMAKE_BUILD_TYPE=Release")
+            # On Windows, force MSVC and the /MD runtime. Never let CMake pick MinGW.
+            if _is_windows_platform():
+                cmake_args += [
+                    "-G", "Visual Studio 17 2022",
+                    "-A", "x64",
+                    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
+                ]
+            else:
+                ninja = shutil.which("ninja")
+                if ninja:
+                    cmake_args += ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"]
+                    env.setdefault("CMAKE_MAKE_PROGRAM", ninja)
+                else:
+                    cmake_args += ["-DCMAKE_BUILD_TYPE=Release"]
+
             try:
                 subprocess.run(cmake_args, cwd=destination, env=env, check=True)
-
-                build_command = [
-                    cmake_executable,
-                    "--build",
-                    str(build_dir),
-                ]
-                if _is_windows_platform() and not ninja_executable:
-                    build_command.extend(["--config", "Release"])
-
-                if ninja_executable:
-                    build_command.extend(["--parallel", "8"])
-                elif _is_windows_platform():
-                    build_command.extend(["--parallel", "8"])
+                build_command = [cmake_executable, "--build", str(build_dir)]
+                if _is_windows_platform():
+                    build_command += ["--config", "Release", "--parallel", "8"]
                 else:
-                    build_command.extend(["--", "-j8"])
+                    build_command += ["--parallel", "8"]
                 subprocess.run(build_command, cwd=destination, env=env, check=True)
             except (FileNotFoundError, subprocess.CalledProcessError) as exc:
                 raise RuntimeError(
@@ -578,6 +596,8 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                         "--enable-jit",
                         "--enable-pcre2-8",
                         "--disable-tests",
+                        "--disable-pcre2grep",
+                        "--disable-pcre2test",
                         "--enable-static",
                         "--disable-shared",
                     ]
@@ -658,6 +678,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             for path in root.glob(pattern):
                 _add_library_file(path)
 
+    # On Windows, never feed GCC/MinGW archives to MSVC.
+    if _is_windows_platform():
+        library_files = [p for p in library_files if p.lower().endswith(".lib")]
+
     if not library_files:
         raise RuntimeError(
             "PCRE2 build did not produce any libpcre2-8 artifacts; check the build output for errors"
@@ -731,40 +755,57 @@ def _should_disable_native_flags_for_macos(compiler: CCompiler | None) -> bool:
     return not _is_x86_architecture(arch)
 
 
-def _compiler_supports_flag(flag: str) -> bool:
-    cached = _COMPILER_FLAG_CACHE.get(flag)
+def _compiler_supports_flags(
+    flags: Iterable[str], *, code: str | None = None
+) -> bool:
+    normalized = tuple(str(flag) for flag in flags if flag)
+    source_code = code or "int main(void) { return 0; }\n"
+    cache_key = (normalized, source_code)
+
+    cached = _COMPILER_FLAG_COMBO_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     compiler = _get_test_compiler()
     if compiler is None:
-        _COMPILER_FLAG_CACHE[flag] = False
+        _COMPILER_FLAG_COMBO_CACHE[cache_key] = False
         return False
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        source = Path(tmpdir) / "flag_check.c"
-        source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        source_path = Path(tmpdir) / "flag_check.c"
+        source_path.write_text(source_code, encoding="utf-8")
         try:
             compiler.compile(
-                [str(source)],
+                [str(source_path)],
                 output_dir=tmpdir,
-                extra_postargs=[flag],
+                extra_postargs=list(normalized),
             )
         except (CCompilerError, DistutilsExecError, OSError):
-            _COMPILER_FLAG_CACHE[flag] = False
+            _COMPILER_FLAG_COMBO_CACHE[cache_key] = False
         else:
-            _COMPILER_FLAG_CACHE[flag] = True
-    return _COMPILER_FLAG_CACHE[flag]
+            _COMPILER_FLAG_COMBO_CACHE[cache_key] = True
+
+    return _COMPILER_FLAG_COMBO_CACHE[cache_key]
+
+
+def _compiler_supports_flag(flag: str) -> bool:
+    cached = _COMPILER_FLAG_CACHE.get(flag)
+    if cached is not None:
+        return cached
+
+    result = _compiler_supports_flags([flag])
+    _COMPILER_FLAG_CACHE[flag] = result
+    return result
 
 
 def _augment_compile_flags(flags: list[str]) -> None:
-    if _is_truthy_env("PCRE2_DISABLE_OPT_FLAGS"):
+    if _is_truthy_env("PYPCRE_DISABLE_OPT_FLAGS"):
         return
 
     if _is_windows_platform():
         return
 
-    disable_native = _is_truthy_env("PCRE2_DISABLE_NATIVE_FLAGS")
+    disable_native = _is_truthy_env("PYPCRE_DISABLE_NATIVE_FLAGS")
     compiler = _get_test_compiler()
     if not disable_native and _should_disable_native_flags_for_macos(compiler):
         # Apple universal builds (arm64 + x86_64) and arm64-only builds reject x86 specific flags.
@@ -825,7 +866,7 @@ def _linux_multiarch_dirs() -> list[str]:
 def _platform_prefixes() -> list[Path]:
     prefixes: list[Path] = []
 
-    env_root = os.environ.get("PCRE2_ROOT")
+    env_root = os.environ.get("PYPCRE_ROOT")
     if env_root:
         for value in env_root.split(os.pathsep):
             path = Path(value)
@@ -1029,6 +1070,8 @@ locate_library_file = _locate_library_file
 header_exists = _header_exists
 library_exists = _library_exists
 augment_compile_flags = _augment_compile_flags
+compiler_supports_flag = _compiler_supports_flag
+compiler_supports_flags = _compiler_supports_flags
 has_header = _has_header
 has_library = _has_library
 is_truthy_env = _is_truthy_env
@@ -1050,6 +1093,8 @@ __all__ = [
     "header_exists",
     "library_exists",
     "augment_compile_flags",
+    "compiler_supports_flag",
+    "compiler_supports_flags",
     "has_header",
     "has_library",
     "is_truthy_env",

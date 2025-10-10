@@ -29,24 +29,24 @@ typedef enum CacheStrategy {
     CACHE_STRATEGY_GLOBAL = 1
 } CacheStrategy;
 
-static _Atomic CacheStrategy cache_strategy = ATOMIC_VAR_INIT(CACHE_STRATEGY_THREAD_LOCAL);
-static _Atomic int cache_strategy_locked = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(int) cache_strategy = ATOMIC_VAR_INIT(CACHE_STRATEGY_THREAD_LOCAL);
+static ATOMIC_VAR(int) cache_strategy_locked = ATOMIC_VAR_INIT(0);
 
 static Py_tss_t cache_tss = Py_tss_NEEDS_INIT;
-static _Atomic int cache_tss_ready = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(int) cache_tss_ready = ATOMIC_VAR_INIT(0);
 
-static _Atomic int context_cache_enabled = ATOMIC_VAR_INIT(1);
+static ATOMIC_VAR(int) context_cache_enabled = ATOMIC_VAR_INIT(1);
 
-static _Atomic(pcre2_match_data *) global_match_cached = ATOMIC_VAR_INIT(NULL);
-static _Atomic uint32_t global_match_ovec_count = ATOMIC_VAR_INIT(0);
-static _Atomic uint32_t global_match_capacity = ATOMIC_VAR_INIT(1);
+static ATOMIC_VAR(pcre2_match_data *) global_match_cached = ATOMIC_VAR_INIT(NULL);
+static ATOMIC_VAR(uint32_t) global_match_ovec_count = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(uint32_t) global_match_capacity = ATOMIC_VAR_INIT(1);
 
-static _Atomic(pcre2_jit_stack *) global_jit_cached = ATOMIC_VAR_INIT(NULL);
-static _Atomic uint32_t global_jit_capacity = ATOMIC_VAR_INIT(1);
-static _Atomic size_t global_jit_start_size = ATOMIC_VAR_INIT(32 * 1024);
-static _Atomic size_t global_jit_max_size = ATOMIC_VAR_INIT(1024 * 1024);
+static ATOMIC_VAR(pcre2_jit_stack *) global_jit_cached = ATOMIC_VAR_INIT(NULL);
+static ATOMIC_VAR(uint32_t) global_jit_capacity = ATOMIC_VAR_INIT(1);
+static ATOMIC_VAR(size_t) global_jit_start_size = ATOMIC_VAR_INIT(32 * 1024);
+static ATOMIC_VAR(size_t) global_jit_max_size = ATOMIC_VAR_INIT(1024 * 1024);
 
-static _Atomic int debug_thread_cache_count = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(int) debug_thread_cache_count = ATOMIC_VAR_INIT(0);
 static int debug_thread_cache_enabled = 0;
 
 static PyObject *thread_cache_cleanup_key = NULL;
@@ -292,13 +292,13 @@ global_cache_teardown(void)
 static inline CacheStrategy
 cache_strategy_get(void)
 {
-    return atomic_load_explicit(&cache_strategy, memory_order_acquire);
+    return (CacheStrategy)atomic_load_explicit(&cache_strategy, memory_order_acquire);
 }
 
 static inline void
 cache_strategy_set(CacheStrategy strategy)
 {
-    atomic_store_explicit(&cache_strategy, strategy, memory_order_release);
+    atomic_store_explicit(&cache_strategy, (int)strategy, memory_order_release);
 }
 
 static inline void
