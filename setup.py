@@ -181,11 +181,14 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     has_std_flag = any(
         flag.lower().startswith("/std:") or flag.startswith("-std=") for flag in extra_compile_args
     )
+    has_c11_atomics_flag = any(
+        flag.lower() == "/experimental:c11atomics" for flag in extra_compile_args
+    )
 
     if is_windows_platform():
         if not has_std_flag:
             selected_std = None
-            for candidate in ("/std:c11",):
+            for candidate in ("/std:clatest", "/std:c11"):
                 if compiler_supports_flag(candidate):
                     selected_std = candidate
                     break
@@ -194,6 +197,8 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
                     "MSVC does not support /std:c11; upgrade to a compiler with C11 atomics"
                 )
             extra_compile_args.append(selected_std)
+        if not has_c11_atomics_flag and compiler_supports_flag("/experimental:c11atomics"):
+            extra_compile_args.append("/experimental:c11atomics")
     elif not has_std_flag:
         if compiler_supports_flag("-std=c11"):
             extra_compile_args.append("-std=c11")
