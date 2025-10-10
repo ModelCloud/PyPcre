@@ -37,6 +37,49 @@ typedef enum CacheStrategy {
 
 static CacheStrategy cache_strategy = CACHE_STRATEGY_THREAD_LOCAL;
 static int cache_strategy_locked = 0;
+static PyThread_type_lock cache_state_lock = NULL;
+
+static inline void
+cache_state_lock_acquire(void)
+{
+    if (cache_state_lock != NULL) {
+        PyThread_acquire_lock(cache_state_lock, 1);
+    }
+}
+
+static inline void
+cache_state_lock_release(void)
+{
+    if (cache_state_lock != NULL) {
+        PyThread_release_lock(cache_state_lock);
+    }
+}
+
+static inline CacheStrategy
+cache_strategy_get(void)
+{
+    CacheStrategy strategy;
+    cache_state_lock_acquire();
+    strategy = cache_strategy;
+    cache_state_lock_release();
+    return strategy;
+}
+
+static inline void
+cache_strategy_set(CacheStrategy strategy)
+{
+    cache_state_lock_acquire();
+    cache_strategy = strategy;
+    cache_state_lock_release();
+}
+
+static inline void
+cache_strategy_set_locked(int locked)
+{
+    cache_state_lock_acquire();
+    cache_strategy_locked = locked;
+    cache_state_lock_release();
+}
 
 static inline const char *
 cache_strategy_name(CacheStrategy strategy)
@@ -47,7 +90,7 @@ cache_strategy_name(CacheStrategy strategy)
 static inline void
 mark_cache_strategy_locked(void)
 {
-    cache_strategy_locked = 1;
+    cache_strategy_set_locked(1);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -56,6 +99,24 @@ mark_cache_strategy_locked(void)
 
 static Py_tss_t cache_tss = Py_tss_NEEDS_INIT;
 static int cache_tss_created = 0;
+
+static inline int
+cache_tss_is_created(void)
+{
+    int created;
+    cache_state_lock_acquire();
+    created = cache_tss_created;
+    cache_state_lock_release();
+    return created;
+}
+
+static inline void
+cache_tss_set_created(int created)
+{
+    cache_state_lock_acquire();
+    cache_tss_created = created;
+    cache_state_lock_release();
+}
 
 static ThreadCacheState *thread_cache_state_get(void);
 static ThreadCacheState *thread_cache_state_get_or_create(void);
@@ -67,19 +128,22 @@ static void thread_jit_stack_cache_evict_tail(ThreadCacheState *state);
 static int
 thread_cache_initialize(void)
 {
+    cache_state_lock_acquire();
     if (!cache_tss_created) {
         if (PyThread_tss_create(&cache_tss) != 0) {
+            cache_state_lock_release();
             PyErr_NoMemory();
             return -1;
         }
         cache_tss_created = 1;
     }
+    cache_state_lock_release();
 
     if (thread_cache_state_get() == NULL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             PyThread_tss_delete(&cache_tss);
-            cache_tss_created = 0;
+            cache_tss_set_created(0);
             return -1;
         }
         (void)state;
@@ -91,7 +155,7 @@ thread_cache_initialize(void)
 static void
 thread_cache_teardown(void)
 {
-    if (!cache_tss_created) {
+    if (!cache_tss_is_created()) {
         return;
     }
 
@@ -104,13 +168,13 @@ thread_cache_teardown(void)
     }
 
     PyThread_tss_delete(&cache_tss);
-    cache_tss_created = 0;
+    cache_tss_set_created(0);
 }
 
 static ThreadCacheState *
 thread_cache_state_get(void)
 {
-    if (!cache_tss_created) {
+    if (!cache_tss_is_created()) {
         return NULL;
     }
 
@@ -125,7 +189,7 @@ thread_cache_state_get_or_create(void)
         return state;
     }
 
-    if (!cache_tss_created) {
+    if (!cache_tss_is_created()) {
         PyErr_SetString(PyExc_RuntimeError, "cache subsystem not initialized");
         return NULL;
     }
@@ -407,6 +471,14 @@ global_cache_teardown(void)
 int
 cache_initialize(void)
 {
+    if (cache_state_lock == NULL) {
+        cache_state_lock = PyThread_allocate_lock();
+        if (cache_state_lock == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
+
     if (thread_cache_initialize() < 0) {
         return -1;
     }
@@ -422,8 +494,12 @@ cache_teardown(void)
 {
     thread_cache_teardown();
     global_cache_teardown();
-    cache_strategy_locked = 0;
-    cache_strategy = CACHE_STRATEGY_THREAD_LOCAL;
+    cache_strategy_set_locked(0);
+    cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
+    if (cache_state_lock != NULL) {
+        PyThread_free_lock(cache_state_lock);
+        cache_state_lock = NULL;
+    }
 }
 
 static pcre2_match_data *
@@ -743,7 +819,8 @@ pcre2_match_data *
 match_data_cache_acquire(PatternObject *self)
 {
     mark_cache_strategy_locked();
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         return thread_match_data_cache_acquire(self);
     }
     return global_match_data_cache_acquire(self);
@@ -756,7 +833,8 @@ match_data_cache_release(pcre2_match_data *match_data)
         return;
     }
     mark_cache_strategy_locked();
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         thread_match_data_cache_release(match_data);
     } else {
         global_match_data_cache_release(match_data);
@@ -767,7 +845,8 @@ pcre2_jit_stack *
 jit_stack_cache_acquire(void)
 {
     mark_cache_strategy_locked();
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         return thread_jit_stack_cache_acquire();
     }
     return global_jit_stack_cache_acquire();
@@ -780,7 +859,8 @@ jit_stack_cache_release(pcre2_jit_stack *jit_stack)
         return;
     }
     mark_cache_strategy_locked();
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         thread_jit_stack_cache_release(jit_stack);
     } else {
         global_jit_stack_cache_release(jit_stack);
@@ -790,7 +870,8 @@ jit_stack_cache_release(pcre2_jit_stack *jit_stack)
 PyObject *
 module_get_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -817,7 +898,8 @@ module_set_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
         return NULL;
     }
 
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -848,7 +930,8 @@ module_set_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
 PyObject *
 module_clear_match_data_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -871,7 +954,8 @@ module_clear_match_data_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(a
 PyObject *
 module_get_match_data_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -893,7 +977,8 @@ module_get_match_data_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUS
 PyObject *
 module_get_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -920,7 +1005,8 @@ module_set_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
         return NULL;
     }
 
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -951,7 +1037,8 @@ module_set_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
 PyObject *
 module_clear_jit_stack_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -974,7 +1061,8 @@ module_clear_jit_stack_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(ar
 PyObject *
 module_get_jit_stack_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -996,7 +1084,8 @@ module_get_jit_stack_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSE
 PyObject *
 module_get_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -1042,7 +1131,8 @@ module_set_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *args)
         return NULL;
     }
 
-    if (cache_strategy == CACHE_STRATEGY_THREAD_LOCAL) {
+    CacheStrategy strategy = cache_strategy_get();
+    if (strategy == CACHE_STRATEGY_THREAD_LOCAL) {
         ThreadCacheState *state = thread_cache_state_get_or_create();
         if (state == NULL) {
             return NULL;
@@ -1071,7 +1161,7 @@ module_set_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *args)
 PyObject *
 module_get_cache_strategy(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
-    return PyUnicode_FromString(cache_strategy_name(cache_strategy));
+    return PyUnicode_FromString(cache_strategy_name(cache_strategy_get()));
 }
 
 PyObject *
@@ -1093,15 +1183,20 @@ module_set_cache_strategy(PyObject *Py_UNUSED(module), PyObject *args)
         return NULL;
     }
 
-    if (cache_strategy_locked && desired != cache_strategy) {
+    cache_state_lock_acquire();
+    int locked = cache_strategy_locked;
+    CacheStrategy current = cache_strategy;
+    if (locked && desired != current) {
+        cache_state_lock_release();
         PyErr_Format(
             PyExc_RuntimeError,
             "cache strategy already locked to '%s'",
-            cache_strategy_name(cache_strategy)
+            cache_strategy_name(current)
         );
         return NULL;
     }
 
     cache_strategy = desired;
+    cache_state_lock_release();
     Py_RETURN_NONE;
 }

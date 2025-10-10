@@ -53,6 +53,7 @@ resolve_pcre2_prerelease(void)
 static int default_jit_enabled = 1;
 static PyThread_type_lock default_jit_lock = NULL;
 static PyThread_type_lock cpu_feature_lock = NULL;
+static PyThread_type_lock module_state_lock = NULL;
 static char pcre2_library_version[64] = "unknown";
 static int pcre2_version_initialized = 0;
 #if defined(PCRE2_USE_OFFSET_LIMIT)
@@ -60,6 +61,22 @@ static int offset_limit_support = -1;
 #endif
 
 static void detect_offset_limit_support(void);
+
+static inline void
+module_state_lock_acquire(void)
+{
+    if (module_state_lock != NULL) {
+        PyThread_acquire_lock(module_state_lock, 1);
+    }
+}
+
+static inline void
+module_state_lock_release(void)
+{
+    if (module_state_lock != NULL) {
+        PyThread_release_lock(module_state_lock);
+    }
+}
 
 static inline int
 default_jit_get(void)
@@ -2046,15 +2063,19 @@ static void
 detect_offset_limit_support(void)
 {
 #if defined(PCRE2_USE_OFFSET_LIMIT)
+    module_state_lock_acquire();
     if (offset_limit_support != -1) {
+        module_state_lock_release();
         return;
     }
 
+    int support = 0;
     int error_code = 0;
     PCRE2_SIZE error_offset = 0;
     pcre2_code *code = pcre2_compile((PCRE2_SPTR)".", 1, 0, &error_code, &error_offset, NULL);
     if (code == NULL) {
         offset_limit_support = 0;
+        module_state_lock_release();
         return;
     }
 
@@ -2062,6 +2083,7 @@ detect_offset_limit_support(void)
     if (match_data == NULL) {
         pcre2_code_free(code);
         offset_limit_support = 0;
+        module_state_lock_release();
         return;
     }
 
@@ -2070,13 +2092,12 @@ detect_offset_limit_support(void)
         pcre2_match_data_free(match_data);
         pcre2_code_free(code);
         offset_limit_support = 0;
+        module_state_lock_release();
         return;
     }
 
     int rc = pcre2_set_offset_limit(match_context, 0);
-    if (rc < 0) {
-        offset_limit_support = 0;
-    } else {
+    if (rc >= 0) {
         rc = pcre2_match(code,
                          (PCRE2_SPTR)"a",
                          1,
@@ -2084,22 +2105,31 @@ detect_offset_limit_support(void)
                          PCRE2_USE_OFFSET_LIMIT,
                          match_data,
                          match_context);
-        if (rc == PCRE2_ERROR_BADOPTION) {
-            offset_limit_support = 0;
-        } else {
-            offset_limit_support = 1;
+        if (rc != PCRE2_ERROR_BADOPTION) {
+            support = 1;
         }
     }
 
     pcre2_match_context_free(match_context);
     pcre2_match_data_free(match_data);
     pcre2_code_free(code);
+
+    offset_limit_support = support;
+    module_state_lock_release();
 #endif
 }
 
 PyMODINIT_FUNC
 PyInit_pcre_ext_c(void)
 {
+    if (module_state_lock == NULL) {
+        module_state_lock = PyThread_allocate_lock();
+        if (module_state_lock == NULL) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+    }
+
     if (PyType_Ready(&PatternType) < 0) {
         return NULL;
     }
@@ -2187,6 +2217,10 @@ error:
     pcre_memory_teardown();
     cache_teardown();
     pcre_error_teardown();
+    if (module_state_lock != NULL) {
+        PyThread_free_lock(module_state_lock);
+        module_state_lock = NULL;
+    }
     if (cpu_feature_lock != NULL) {
         PyThread_free_lock(cpu_feature_lock);
         cpu_feature_lock = NULL;
@@ -2226,7 +2260,9 @@ module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 static void
 initialize_pcre2_version(void)
 {
+    module_state_lock_acquire();
     if (pcre2_version_initialized) {
+        module_state_lock_release();
         return;
     }
 
@@ -2256,4 +2292,5 @@ initialize_pcre2_version(void)
         }
     }
     pcre2_version_initialized = 1;
+    module_state_lock_release();
 }

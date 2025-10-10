@@ -26,6 +26,32 @@ static alloc_fn current_alloc = malloc;
 static free_fn current_free = free;
 static const char *current_name = "malloc";
 static int allocator_initialized = 0;
+static PyThread_type_lock allocator_lock = NULL;
+
+static int
+ensure_allocator_lock(void)
+{
+    if (allocator_lock != NULL) {
+        return 0;
+    }
+    allocator_lock = PyThread_allocate_lock();
+    if (allocator_lock == NULL) {
+        return -1;
+    }
+    return 0;
+}
+
+static inline void
+allocator_lock_acquire(void)
+{
+    PyThread_acquire_lock(allocator_lock, 1);
+}
+
+static inline void
+allocator_lock_release(void)
+{
+    PyThread_release_lock(allocator_lock);
+}
 
 #if defined(_WIN32)
 static int
@@ -95,7 +121,14 @@ equals_ignore_case(const char *value, const char *target)
 int
 pcre_memory_initialize(void)
 {
+    if (ensure_allocator_lock() < 0) {
+        PyErr_NoMemory();
+        return -1;
+    }
+
+    allocator_lock_acquire();
     if (allocator_initialized) {
+        allocator_lock_release();
         return 0;
     }
 
@@ -138,20 +171,22 @@ pcre_memory_initialize(void)
         size_t pos = 0;
 
         if (equals_ignore_case(forced, "malloc")) {
-            allocator_initialized = 1;
             current_handle = NULL;
             current_alloc = malloc;
             current_free = free;
             current_name = "malloc";
+            allocator_initialized = 1;
+            allocator_lock_release();
             return 0;
         }
 
         if (equals_ignore_case(forced, "pymem")) {
-            allocator_initialized = 1;
             current_handle = NULL;
             current_alloc = (alloc_fn)PyMem_Malloc;
             current_free = (free_fn)PyMem_Free;
             current_name = "pymem";
+            allocator_initialized = 1;
+            allocator_lock_release();
             return 0;
         }
 
@@ -176,42 +211,66 @@ pcre_memory_initialize(void)
     for (size_t i = 0; candidates[i] != NULL; ++i) {
         if (load_allocator(candidates[i]) == 0) {
             allocator_initialized = 1;
+            allocator_lock_release();
             return 0;
         }
     }
 
-    allocator_initialized = 1;
     current_handle = NULL;
     current_alloc = malloc;
     current_free = free;
     current_name = "malloc";
+    allocator_initialized = 1;
+    allocator_lock_release();
     return 0;
 }
 
 void
 pcre_memory_teardown(void)
 {
-#if !defined(_WIN32)
-    if (current_handle != NULL) {
-        dlclose(current_handle);
-        current_handle = NULL;
+    if (ensure_allocator_lock() < 0) {
+        return;
     }
+
+    allocator_lock_acquire();
+#if !defined(_WIN32)
+    void *handle_to_close = current_handle;
+    current_handle = NULL;
 #endif
     current_alloc = malloc;
     current_free = free;
     current_name = "malloc";
     allocator_initialized = 0;
+    allocator_lock_release();
+
+#if !defined(_WIN32)
+    if (handle_to_close != NULL) {
+        dlclose(handle_to_close);
+    }
+#endif
 }
 
 void *
 pcre_malloc(size_t size)
 {
-    if (!allocator_initialized) {
+    if (ensure_allocator_lock() < 0) {
+        return NULL;
+    }
+
+    allocator_lock_acquire();
+    int initialized = allocator_initialized;
+    allocator_lock_release();
+
+    if (!initialized) {
         if (pcre_memory_initialize() != 0) {
             return NULL;
         }
     }
-    return current_alloc(size);
+
+    allocator_lock_acquire();
+    alloc_fn alloc = current_alloc;
+    allocator_lock_release();
+    return alloc(size);
 }
 
 void
@@ -220,11 +279,27 @@ pcre_free(void *ptr)
     if (ptr == NULL) {
         return;
     }
-    current_free(ptr);
+
+    if (ensure_allocator_lock() < 0) {
+        current_free(ptr);
+        return;
+    }
+
+    allocator_lock_acquire();
+    free_fn free_fn_ptr = current_free;
+    allocator_lock_release();
+    free_fn_ptr(ptr);
 }
 
 const char *
 pcre_memory_allocator_name(void)
 {
-    return current_name;
+    if (ensure_allocator_lock() < 0) {
+        return current_name;
+    }
+
+    allocator_lock_acquire();
+    const char *name = current_name;
+    allocator_lock_release();
+    return name;
 }
