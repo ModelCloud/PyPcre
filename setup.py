@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shlex
 import sys
 from pathlib import Path
@@ -85,6 +86,15 @@ setup_utils.configure_environment(
     library_search_patterns=LIBRARY_SEARCH_PATTERNS,
 )
 
+def filter_with_real_path(paths: list[str]) -> list[str]:
+    unique_libs = []
+    seen_realpaths = set()
+    for path in paths:
+        real = os.path.realpath(path)
+        if real not in seen_realpaths:
+            seen_realpaths.add(real)
+            unique_libs.append(path)
+    return unique_libs
 
 def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]]:
     include_dirs: list[str] = []
@@ -143,26 +153,21 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
 
     extend_env_paths(libraries, "PCRE2_LIBRARIES")
 
-    if not library_files:
-        for path in find_library_with_pkg_config():
-            extend_unique(library_files, path)
+    directory_candidates = [Path(p) for p in library_dirs]
+    directory_candidates.extend(Path(p) for p in discover_library_dirs())
+    for directory in directory_candidates:
+        located = locate_library_file(directory)
+        if located is not None:
+            extend_unique(library_files, str(located))
 
-    if not library_files:
-        directory_candidates = [Path(p) for p in library_dirs]
-        directory_candidates.extend(Path(p) for p in discover_library_dirs())
-        for directory in directory_candidates:
-            located = locate_library_file(directory)
-            if located is not None:
-                extend_unique(library_files, str(located))
-                break
+    for path in find_library_with_pkg_config():
+        extend_unique(library_files, path)
 
-    if not library_files:
-        for path in find_library_with_ldconfig():
-            extend_unique(library_files, path)
+    for path in find_library_with_ldconfig():
+        extend_unique(library_files, path)
 
-    if not library_files:
-        for path in find_library_with_brew():
-            extend_unique(library_files, path)
+    for path in find_library_with_brew():
+        extend_unique(library_files, path)
 
     env_cflags = os.environ.get("PCRE2_CFLAGS")
     if env_cflags:
@@ -224,7 +229,13 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     RUNTIME_LIBRARY_FILES.clear()
     RUNTIME_LIBRARY_FILES.extend(runtime_libraries)
 
-    return {
+    if (sys.platform.startswith("sunos") or sys.platform.startswith("solaris")) and platform.architecture()[0] == "64bit":
+        extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
+        if extra_link_args_x64:
+            extra_link_args = extra_link_args_x64
+
+    extra_link_args = filter_with_real_path(extra_link_args)
+    config = {
         "include_dirs": include_dirs,
         "library_dirs": library_dirs,
         "libraries": libraries,
@@ -232,6 +243,10 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         "extra_link_args": extra_link_args,
         "define_macros": define_macros,
     }
+
+    print(f"build config: {config}")
+
+    return config
 
 
 EXTENSION = Extension(
@@ -241,3 +256,4 @@ EXTENSION = Extension(
 )
 
 setup(ext_modules=[EXTENSION], cmdclass={"build_ext": build_ext})
+

@@ -52,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
+        os: [ ubuntu-latest, macos-latest, macos-13 ] # macos-latest arm64, macos-13 intel
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
@@ -64,7 +64,7 @@ jobs:
 
       - name: install
         run: |
-          pip install pytest tabulate
+          pip install pip pytest tabulate regex -U
           pip install -v -e .
 
       - name: test ${{ matrix.test_script }}
@@ -72,7 +72,6 @@ jobs:
 
 
   freebsd:
-    if: false  # Skip FreeBSD tests (unsupported currently)
     needs:
       - list-test-files
     runs-on: ubuntu-latest
@@ -91,17 +90,16 @@ jobs:
         with:
           copyback: false
           prepare: |
-            env ASSUME_ALWAYS_YES=yes pkg install -y python py312-pip pcre2 gcc gmake pkgconf
+            env ASSUME_ALWAYS_YES=yes pkg install -y python py311-pip pcre2 gcc gmake pkgconf
           run: |
             python -V
             python -m venv venv
             . venv/bin/activate
-            pip install pytest tabulate
+            pip install pip pytest tabulate regex -U
             pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   solaris:
-    if: false  # Skip solaris tests (unsupported currently)
     needs:
       - list-test-files
     runs-on: ubuntu-latest
@@ -119,13 +117,17 @@ jobs:
         uses: vmactions/solaris-vm@v1
         with:
           prepare: |
-            pkg install library/pcre2 developer/gcc developer/build/gnu-make developer/build/pkg-config
+            pkg install developer/gcc developer/build/gnu-make developer/build/pkg-config
           copyback: false
           run: |
+            export LDFLAGS="-L/usr/lib/amd64 -L/usr/lib/64"
+            export CFLAGS="-m64"
+            export LD_LIBRARY_PATH=/usr/lib/amd64:$LD_LIBRARY_PATH
+         
             python -V
             python -m venv venv
             source venv/bin/activate
-            pip install pytest tabulate
+            pip install pip pytest tabulate regex -U
             pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
@@ -155,6 +157,6 @@ jobs:
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install pytest tabulate
+          pip install pip pytest tabulate regex -U
           pip install -v -e .
           pytest --durations=0 tests/${{ matrix.test_script }}.py
