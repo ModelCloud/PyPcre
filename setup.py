@@ -150,16 +150,18 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         located = locate_library_file(directory)
         if located is not None:
             extend_unique(library_files, str(located))
-            break
+            print(f"eeeeeeeee locate_library_file library_files _extend_unique {located}")
 
     for path in find_library_with_pkg_config():
         extend_unique(library_files, path)
 
     for path in find_library_with_ldconfig():
         extend_unique(library_files, path)
+        print(f"eeeeeeeee find_library_with_ldconfig library_files _extend_unique {path}")
 
     for path in find_library_with_brew():
         extend_unique(library_files, path)
+        print(f"eeeeeeeee find_library_with_brew library_files _extend_unique {path}")
 
     env_cflags = os.environ.get("PCRE2_CFLAGS")
     if env_cflags:
@@ -180,11 +182,13 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
 
     runtime_libraries: list[str] = []
 
+    print(f"eeeeeeeee library_files: {library_files}")
     if library_files:
         for runtime_path in library_files:
             lower_name = runtime_path.lower()
             if lower_name.endswith(".dll") or lower_name.endswith(".dylib") or ".so" in Path(runtime_path).name:
                 extend_unique(runtime_libraries, runtime_path)
+                print(f"eeeeeeeee runtime_libraries _extend_unique {runtime_path}")
 
         linkable_files: list[str] = []
         for path in library_files:
@@ -200,6 +204,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
                 parent = str(Path(path).parent)
                 if parent:
                     extend_unique(library_dirs, parent)
+                    print(f"eeeeeeeee library_dirs _extend_unique {parent}")
         elif "pcre2-8" not in libraries:
             libraries.append("pcre2-8")
     elif "pcre2-8" not in libraries:
@@ -221,6 +226,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     RUNTIME_LIBRARY_FILES.clear()
     RUNTIME_LIBRARY_FILES.extend(runtime_libraries)
 
+    print(f"eeeeeeee extra_link_args: {extra_link_args}")
     if (sys.platform.startswith("sunos") or sys.platform.startswith("solaris")) and platform.architecture()[0] == "64bit":
         extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
         if extra_link_args_x64:
