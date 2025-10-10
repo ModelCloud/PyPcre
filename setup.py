@@ -237,7 +237,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
         "library_dirs": library_dirs,
         "libraries": libraries,
         "extra_compile_args": extra_compile_args,
-        "extra_link_args": extra_link_args,
+        "extra_link_args": ['-lpcre2-8'],
         "define_macros": define_macros,
     }
 
