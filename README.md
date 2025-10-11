@@ -21,6 +21,14 @@ Python bindings for the system PCRE2 library with a familiar `re`-style API.
 * 10/11/2025 [0.2.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.0): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance for all api. Expanded ci testing coverage. FreeBSD, Solaris, and Windows compatibility validated.
 * 10/09/2025 [0.1.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.1.0): 🎉 First release. Thread safe, auto JIT, auto pattern caching and optimistic linking to system library for fast install.
 
+## Why PyPcre:
+
+PyPcre is a modern Pcre2 binding designed to be both super fast and thread-safe in the `GIL=0` world. In the old days of global interpreter locks, Python had real threads but mostly fake concurrency (with the exception of some low-level apis and packages). In 2025, Python is moving toward full `GIl=0` design which will unlock true multi-threaded concurrency and finally bring Python in parity with other modern languages. 
+
+Many Python regular expression packages will either out-right segfault due to safety under `GIL=0` or suffer sub-optimal performance due to non-threaded design mindset. 
+
+PyPcre is fully ci tested where every single api and Pcre2 flag is tested in a continuous development environment backed by the ModelCloud.AI team. Fuzz (clobber) tests are also performed to catch any memory safety, accuracy, or memory leak regressions. 
+
 ## Installation
 
 ```bash
@@ -47,6 +55,10 @@ numbers = pattern.findall(b"line 1\nline 22")
 `match`, `search`, `fullmatch`, `finditer`, `findall`, and `compile`—while
 exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 (`Flag.CASELESS`, `Flag.MULTILINE`, `Flag.UTF`, ...).
+
+### Platform Support:
+
+Linux, MacOS, Windows, WSL, FreeBSD, Solaris
 
 ### Stdlib `re` compatibility
 
