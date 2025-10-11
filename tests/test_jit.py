@@ -9,6 +9,16 @@ from pcre import Flag
 from pcre import pcre as core
 
 
+_BAD_OPTION_SENTINEL = 0xFFFFFFFF
+
+
+@pytest.fixture
+def require_jit_backend():
+    if not pcre.configure():
+        pytest.skip("PCRE2 JIT support unavailable on this platform")
+    yield
+
+
 def _make_fake_cpattern(pattern_text: str, flags: int, jit: bool):
     return types.SimpleNamespace(
         pattern=pattern_text,
@@ -145,3 +155,29 @@ def test_flag_no_jit_does_not_change_global_default(monkeypatch):
     assert first.jit is True
     assert second.jit is False
     assert third.jit is True
+
+
+def test_compile_with_jit_uses_backend(require_jit_backend):
+    compiled = pcre.compile("a+", flags=Flag.JIT)
+
+    assert isinstance(compiled, pcre.Pattern)
+    assert compiled.jit is True
+    assert compiled.match("aaa").group(0) == "aaa"
+
+
+def test_clear_cache_discards_degraded_jit_state(require_jit_backend):
+    pattern = pcre.compile("a+", flags=Flag.JIT)
+    assert pattern.jit is True
+
+    for _ in range(2):
+        with pytest.raises(pcre.PcreError):
+            pattern.match("aaa", options=_BAD_OPTION_SENTINEL)
+
+    assert pattern.jit is False
+
+    pcre.clear_cache()
+    refresher = pcre.compile("a+", flags=Flag.JIT)
+    assert refresher.jit is True
+
+    alt = pcre.compile("b+", flags=Flag.JIT)
+    assert alt.jit is True
