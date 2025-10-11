@@ -29,7 +29,7 @@ Many Python regular expression packages will either out-right segfault due to sa
 
 PyPcre is fully ci tested where every single api and Pcre2 flag is tested in a continuous development environment backed by the ModelCloud.AI team. Fuzz (clobber) tests are also performed to catch any memory safety, accuracy, or memory leak regressions. 
 
-Safety fist: PyPcre will optimistically link to the os provided `libpcre2` package for maximum safetey since PyPcre will automatically enjoy upstream security patches. You can force full source compile via `PYPCRE_BUILD_FROM_SOURCE=1` env toggle.
+Safety first: PyPcre will optimistically link to the os provided `libpcre2` package for maximum safetey since PyPcre will automatically enjoy upstream security patches. You can force full source compile via `PYPCRE_BUILD_FROM_SOURCE=1` env toggle.
 
 ## Installation
 
