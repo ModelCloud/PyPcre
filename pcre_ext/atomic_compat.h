@@ -18,6 +18,23 @@ extern "C" {
 /* ===================================================================== */
 #if defined(_MSC_VER)
 
+#if defined(__has_include)
+#  if !defined(__STDC_NO_ATOMICS__) && __has_include(<stdatomic.h>)
+#    include <stdatomic.h>
+#    define ATOMIC_COMPAT_USE_NATIVE_ATOMICS 1
+#  endif
+#endif
+
+#if defined(ATOMIC_COMPAT_USE_NATIVE_ATOMICS)
+
+#define ATOMIC_COMPAT_HAVE_ATOMICS 1
+#define ATOMIC_VAR(type) _Atomic(type)
+#ifndef ATOMIC_VAR_INIT
+#  define ATOMIC_VAR_INIT(value) (value)
+#endif
+
+#else /* !ATOMIC_COMPAT_USE_NATIVE_ATOMICS */
+
 #include <windows.h>
 #include <intrin.h>
 
@@ -310,16 +327,10 @@ static __forceinline int   ac_cas_ptr  (void * volatile *p, void **e, void *d) {
 #  define ATOMIC_FLAG_INIT { 0 }
 #endif
 
-/* If the type isn't present, declare a minimal one. */
-#ifndef __has_include
-#  define __has_include(x) 0
-#endif
-
-#if __has_include(<stdatomic.h>)
-/* Likely brings a typedef for atomic_flag; don't redefine the type. Just APIs. */
-#else
-typedef struct { volatile LONG _v; } atomic_flag;
-#endif
+/* Minimal atomic_flag replacement for the compatibility path. */
+typedef struct {
+    volatile LONG _v;
+} atomic_flag;
 
 static __forceinline int atomic_flag_test_and_set_explicit(atomic_flag *obj, memory_order order) {
     (void)order;
@@ -333,6 +344,8 @@ static __forceinline void atomic_flag_clear_explicit(atomic_flag *obj, memory_or
 }
 #define atomic_flag_test_and_set(obj) atomic_flag_test_and_set_explicit((obj), memory_order_seq_cst)
 #define atomic_flag_clear(obj)        atomic_flag_clear_explicit((obj), memory_order_seq_cst)
+
+#endif /* ATOMIC_COMPAT_USE_NATIVE_ATOMICS */
 
 /* ===================================================================== */
 /*                         NON-MSVC (use real C11)                        */
