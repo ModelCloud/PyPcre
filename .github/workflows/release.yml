@@ -33,6 +33,7 @@ on:
 jobs:
   release-source:
     runs-on: ubuntu-latest
+    if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
 
     steps:
       - uses: actions/checkout@v5
