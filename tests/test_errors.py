@@ -66,3 +66,24 @@ def test_low_level_compile_reports_bad_options():
     assert exc.macro == "PCRE2_ERROR_BAD_OPTIONS"
     assert exc.code == getattr(BACKEND, "PCRE2_ERROR_BAD_OPTIONS")
     assert exc.error_code is pcre.PcreErrorCode.BAD_OPTIONS
+
+
+def test_substitution_with_invalid_numeric_group_reference_raises():
+    # Regression test: patterns that only expose numeric group names through
+    # DUPNAMES should still reject ``\1`` substitutions when no real capture
+    # exists instead of crashing.
+    pattern = rb"\D\w?\(?#comment)(?=foo)(?#comment)(?P<1>abc)"
+    flags = (
+        pcre.Flag.NO_UCP
+        | pcre.Flag.NO_JIT
+        | pcre.Flag.ANCHORED
+        | pcre.Flag.DUPNAMES
+        | pcre.Flag.EXTENDED
+        | pcre.Flag.UNGREEDY
+    )
+    compiled = pcre.compile(pattern, flags=flags)
+
+    with pytest.raises(pcre.PcreError) as info:
+        compiled.sub(b"\\1", b"Zfooabc")
+
+    assert "invalid group reference" in str(info.value)

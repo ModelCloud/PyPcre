@@ -175,8 +175,11 @@ class Pattern:
 
     def __init__(self, pattern: _CPattern) -> None:
         self._pattern = pattern
-        self._groups_hint = maybe_infer_group_count(pattern.pattern)
         self._thread_mode = _THREAD_MODE_DISABLED
+        try:
+            self._groups_hint = pattern.capture_count
+        except AttributeError:  # pragma: no cover - older extension fallback
+            self._groups_hint = maybe_infer_group_count(pattern.pattern)
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -199,9 +202,7 @@ class Pattern:
 
     @property
     def groups(self) -> int:
-        if self._groups_hint is None:
-            self._groups_hint = count_capturing_groups(self.pattern)
-        return self._groups_hint
+        return self._pattern.capture_count
 
     @property
     def thread_mode(self) -> str:
