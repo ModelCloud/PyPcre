@@ -537,11 +537,16 @@ def test_cache_strategy_global_shares_cache_across_threads() -> None:
 
 def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
     iterations = 20_000
+    cpu_count = os.cpu_count() or 1
+    desired_thread_counts = [1, 2, 4, 8, 16, 32]
+    max_threads = max(1, cpu_count // 2)
+    # Limit concurrency to half of the visible cores to avoid full-saturation regressions while still
+    # covering progressively larger thread counts when possible.
+    thread_counts = [count for count in desired_thread_counts if count == 1 or count <= max_threads]
     scenarios = [
-        ("thread-local", 1),
-        ("global", 1),
-        ("thread-local", 2),
-        ("global", 2),
+        (strategy, thread_count)
+        for thread_count in thread_counts
+        for strategy in ("thread-local", "global")
     ]
 
     results: Dict[tuple[str, int], Dict[str, Any]] = {}
@@ -553,52 +558,32 @@ def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
         assert stats["threads"] == thread_count
         assert stats["elapsed"] >= 0.0
 
-    single_thread_local = results[("thread-local", 1)]
-    single_global = results[("global", 1)]
-    threaded_local = results[("thread-local", 2)]
-    threaded_global = results[("global", 2)]
-
-    # Allow a small tolerance for measurement noise but enforce thread-local is not slower.
-    assert single_thread_local["elapsed"] <= single_global["elapsed"] * 1.10
-    assert threaded_local["elapsed"] <= threaded_global["elapsed"] * 1.10
-
     headers = ["strategy", "threads", "total calls", "total ms", "per call ns", "relative"]
+    for thread_count in thread_counts:
+        local_stats = results[("thread-local", thread_count)]
+        global_stats = results[("global", thread_count)]
+        # Allow a small tolerance for measurement noise but enforce thread-local is not slower for
+        # thread counts within the practical coverage window (up to half the cores or 8 threads).
+        if thread_count <= min(max_threads, 8):
+            assert local_stats["elapsed"] <= global_stats["elapsed"] * 1.10
 
-    single_rows: List[List[str]] = []
-    baseline_single = single_thread_local["elapsed"] or 1.0
-    for key in [("thread-local", 1), ("global", 1)]:
-        stats = results[key]
-        total_calls = stats.get("total_calls", stats["iterations"] * stats.get("threads", 1))
-        per_call_ns = (stats["elapsed"] / total_calls) * 1e9 if total_calls else float("nan")
-        relative = stats["elapsed"] / baseline_single if baseline_single else float("nan")
-        single_rows.append(
-            [
-                stats["strategy"],
-                str(stats["threads"]),
-                str(total_calls),
-                f"{stats['elapsed'] * 1000:.3f}",
-                f"{per_call_ns:.1f}",
-                f"{relative:.2f}x",
-            ]
-        )
+        rows: List[List[str]] = []
+        baseline = local_stats["elapsed"] or 1.0
+        for strategy in ("thread-local", "global"):
+            stats = results[(strategy, thread_count)]
+            total_calls = stats.get("total_calls", stats["iterations"] * stats.get("threads", 1))
+            per_call_ns = (stats["elapsed"] / total_calls) * 1e9 if total_calls else float("nan")
+            relative = stats["elapsed"] / baseline if baseline else float("nan")
+            rows.append(
+                [
+                    stats["strategy"],
+                    str(stats["threads"]),
+                    str(total_calls),
+                    f"{stats['elapsed'] * 1000:.3f}",
+                    f"{per_call_ns:.1f}",
+                    f"{relative:.2f}x",
+                ]
+            )
 
-    threaded_rows: List[List[str]] = []
-    baseline_threaded = threaded_local["elapsed"] or 1.0
-    for key in [("thread-local", 2), ("global", 2)]:
-        stats = results[key]
-        total_calls = stats.get("total_calls", stats["iterations"] * stats.get("threads", 1))
-        per_call_ns = (stats["elapsed"] / total_calls) * 1e9 if total_calls else float("nan")
-        relative = stats["elapsed"] / baseline_threaded if baseline_threaded else float("nan")
-        threaded_rows.append(
-            [
-                stats["strategy"],
-                str(stats["threads"]),
-                str(total_calls),
-                f"{stats['elapsed'] * 1000:.3f}",
-                f"{per_call_ns:.1f}",
-                f"{relative:.2f}x",
-            ]
-        )
-
-    _emit_table(pytestconfig, "Cache strategy benchmark (single-thread)", headers, single_rows)
-    _emit_table(pytestconfig, "Cache strategy benchmark (threads=2)", headers, threaded_rows)
+        title = "Cache strategy benchmark (single-thread)" if thread_count == 1 else f"Cache strategy benchmark (threads={thread_count})"
+        _emit_table(pytestconfig, title, headers, rows)
