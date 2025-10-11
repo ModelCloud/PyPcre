@@ -419,6 +419,27 @@ pattern_cache_teardown(void)
     atomic_store_explicit(&pattern_cache_global_mode, 0, memory_order_release);
 }
 
+static PyObject *
+module_clear_pattern_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    if (pattern_cache_is_global()) {
+        if (global_pattern_cache_lock != NULL) {
+            PyThread_acquire_lock(global_pattern_cache_lock, 1);
+        }
+        pattern_cache_state_clear(&global_pattern_cache);
+        if (global_pattern_cache_lock != NULL) {
+            PyThread_release_lock(global_pattern_cache_lock);
+        }
+    } else if (atomic_load_explicit(&pattern_cache_tss_ready, memory_order_acquire)) {
+        PatternCacheState *state = thread_pattern_cache_state_get();
+        if (state != NULL) {
+            pattern_cache_state_clear(state);
+        }
+    }
+
+    Py_RETURN_NONE;
+}
+
 static inline int
 default_jit_get(void)
 {
@@ -2664,6 +2685,7 @@ static PyMethodDef module_methods[] = {
     {"get_match_data_cache_count", (PyCFunction)module_get_match_data_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached match-data buffers currently stored." )},
     {"get_cache_strategy", (PyCFunction)module_get_cache_strategy, METH_NOARGS, PyDoc_STR("Return the active caching strategy ('thread-local' or 'global')." )},
     {"set_cache_strategy", (PyCFunction)module_set_cache_strategy, METH_VARARGS, PyDoc_STR("Set the caching strategy to 'thread-local' (default) or 'global'." )},
+    {"clear_pattern_cache", (PyCFunction)module_clear_pattern_cache, METH_NOARGS, PyDoc_STR("Release cached compiled pattern objects." )},
     {"get_jit_stack_cache_size", (PyCFunction)module_get_jit_stack_cache_size, METH_NOARGS, PyDoc_STR("Return the capacity of the reusable JIT stack cache." )},
     {"set_jit_stack_cache_size", (PyCFunction)module_set_jit_stack_cache_size, METH_VARARGS, PyDoc_STR("Set the capacity of the reusable JIT stack cache." )},
     {"clear_jit_stack_cache", (PyCFunction)module_clear_jit_stack_cache, METH_NOARGS, PyDoc_STR("Release all cached PCRE2 JIT stacks." )},
