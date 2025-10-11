@@ -90,7 +90,9 @@ jobs:
           cache: 'pip'
 
       - name: Install requirements
-        run: pip install pip build setuptools twine packaging -U
+        run:  |
+          python -V
+          pip install pip build setuptools twine packaging -U
 
       - name: Compile
         run: |
@@ -99,6 +101,8 @@ jobs:
 
       - name: Test install
         run: |
+          python -V
+
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
