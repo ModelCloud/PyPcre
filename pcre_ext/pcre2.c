@@ -1094,6 +1094,31 @@ utf8_index_to_offset_fast(const char *data, Py_ssize_t data_len, Py_ssize_t inde
     return offset;
 }
 
+static int
+ensure_valid_utf8_for_bytes_subject(PatternObject *pattern,
+                                    int subject_is_bytes,
+                                    const char *data,
+                                    Py_ssize_t length)
+{
+    if (!subject_is_bytes) {
+        return 0;
+    }
+
+    if ((pattern->compile_options & PCRE2_UTF) == 0) {
+        return 0;
+    }
+
+    PyObject *utf8_check = PyUnicode_DecodeUTF8(data, length, NULL);
+    if (utf8_check == NULL) {
+        PyErr_Clear();
+        PyErr_SetString(PcreError,
+                        "bytes subject must be valid UTF-8 when pattern uses the UTF flag");
+        return -1;
+    }
+    Py_DECREF(utf8_check);
+    return 0;
+}
+
 static Py_ssize_t
 finditer_byte_to_index(FindIterObject *self, Py_ssize_t target_byte)
 {
@@ -1547,6 +1572,12 @@ Pattern_create_finditer(PatternObject *pattern,
         iter->utf8_data = PyBytes_AS_STRING(subject_obj);
         Py_INCREF(subject_obj);
         iter->utf8_owner = subject_obj;
+        if (ensure_valid_utf8_for_bytes_subject(pattern,
+                                                iter->subject_is_bytes,
+                                                iter->utf8_data,
+                                                iter->subject_length_bytes) < 0) {
+            goto error;
+        }
     } else if (PyUnicode_Check(subject_obj)) {
         if (PyUnicode_READY(subject_obj) < 0) {
             goto error;
@@ -1828,6 +1859,13 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         buffer = PyBytes_AS_STRING(subject_obj);
         subject_length_bytes = PyBytes_GET_SIZE(subject_obj);
         logical_length = subject_length_bytes;
+        if (ensure_valid_utf8_for_bytes_subject(self,
+                                                subject_is_bytes,
+                                                buffer,
+                                                subject_length_bytes) < 0) {
+            Py_DECREF(utf8_owner);
+            return NULL;
+        }
     } else if (PyUnicode_Check(subject_obj)) {
         if (PyUnicode_READY(subject_obj) < 0) {
             return NULL;
