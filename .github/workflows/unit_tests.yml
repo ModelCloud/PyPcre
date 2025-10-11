@@ -117,7 +117,7 @@ jobs:
         uses: vmactions/solaris-vm@v1
         with:
           prepare: |
-            pkg install developer/gcc developer/build/gnu-make developer/build/pkg-config
+            pkg install developer/gcc developer/build/gnu-make developer/build/pkg-config developer/versioning/git
           copyback: false
           run: |
             export LDFLAGS="-L/usr/lib/amd64 -L/usr/lib/64"
