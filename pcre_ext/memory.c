@@ -22,9 +22,9 @@ typedef struct allocator_candidate {
 } allocator_candidate;
 
 static void *current_handle = NULL;
-static alloc_fn current_alloc = malloc;
-static free_fn current_free = free;
-static const char *current_name = "malloc";
+static alloc_fn current_alloc = (alloc_fn)PyMem_Malloc;
+static free_fn current_free = (free_fn)PyMem_Free;
+static const char *current_name = "pymem";
 static int allocator_initialized = 0;
 
 #if defined(_WIN32)
@@ -124,66 +124,42 @@ pcre_memory_initialize(void)
         .free_symbol = "tc_free",
     };
 
-    const allocator_candidate *const default_candidates[] = {
-        &jemalloc_candidate,
-        &tcmalloc_candidate,
-        NULL,
-    };
+    const char *forced = getenv("PYPCRE_ALLOCATOR");
 
-    const char *forced = getenv("PCRE_ALLOCATOR");
-    const allocator_candidate *order_storage[4] = {NULL, NULL, NULL, NULL};
-    const allocator_candidate *const *candidates = default_candidates;
-
-    if (forced != NULL && *forced != '\0') {
-        size_t pos = 0;
-
-        if (equals_ignore_case(forced, "malloc")) {
-            current_handle = NULL;
-            current_alloc = malloc;
-            current_free = free;
-            current_name = "malloc";
-            allocator_initialized = 1;
-            return 0;
-        }
-
-        if (equals_ignore_case(forced, "pymem")) {
-            current_handle = NULL;
-            current_alloc = (alloc_fn)PyMem_Malloc;
-            current_free = (free_fn)PyMem_Free;
-            current_name = "pymem";
-            allocator_initialized = 1;
-            return 0;
-        }
-
-        if (equals_ignore_case(forced, "jemalloc")) {
-            order_storage[pos++] = &jemalloc_candidate;
-        } else if (equals_ignore_case(forced, "tcmalloc")) {
-            order_storage[pos++] = &tcmalloc_candidate;
-        }
-
-        if (pos > 0) {
-            if (!equals_ignore_case(forced, "jemalloc")) {
-                order_storage[pos++] = &jemalloc_candidate;
-            }
-            if (!equals_ignore_case(forced, "tcmalloc")) {
-                order_storage[pos++] = &tcmalloc_candidate;
-            }
-            order_storage[pos] = NULL;
-            candidates = order_storage;
-        }
+    if (forced == NULL || *forced == '\0' || equals_ignore_case(forced, "pymem")) {
+        current_handle = NULL;
+        current_alloc = (alloc_fn)PyMem_Malloc;
+        current_free = (free_fn)PyMem_Free;
+        current_name = "pymem";
+        allocator_initialized = 1;
+        return 0;
     }
 
-    for (size_t i = 0; candidates[i] != NULL; ++i) {
-        if (load_allocator(candidates[i]) == 0) {
+    if (equals_ignore_case(forced, "malloc")) {
+        current_handle = NULL;
+        current_alloc = malloc;
+        current_free = free;
+        current_name = "malloc";
+        allocator_initialized = 1;
+        return 0;
+    }
+
+    if (equals_ignore_case(forced, "jemalloc")) {
+        if (load_allocator(&jemalloc_candidate) == 0) {
+            allocator_initialized = 1;
+            return 0;
+        }
+    } else if (equals_ignore_case(forced, "tcmalloc")) {
+        if (load_allocator(&tcmalloc_candidate) == 0) {
             allocator_initialized = 1;
             return 0;
         }
     }
 
     current_handle = NULL;
-    current_alloc = malloc;
-    current_free = free;
-    current_name = "malloc";
+    current_alloc = (alloc_fn)PyMem_Malloc;
+    current_free = (free_fn)PyMem_Free;
+    current_name = "pymem";
     allocator_initialized = 1;
     return 0;
 }
@@ -198,9 +174,9 @@ pcre_memory_teardown(void)
         dlclose(handle_to_close);
     }
 #endif
-    current_alloc = malloc;
-    current_free = free;
-    current_name = "malloc";
+    current_alloc = (alloc_fn)PyMem_Malloc;
+    current_free = (free_fn)PyMem_Free;
+    current_name = "pymem";
     allocator_initialized = 0;
 }
 
