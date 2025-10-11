@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+import pcre
 import pcre.cache as cache_mod
 
 
@@ -402,6 +403,84 @@ def test_thread_cache_cleanup_no_leak() -> None:
     )
     data = _run_cache_script(script, env_overrides={"PYPCRE_DEBUG": "1"})
     assert data["count"] == 0
+
+
+def test_shared_pattern_concurrent_execution_produces_expected_results() -> None:
+    pcre.clear_cache()
+
+    pattern = pcre.compile(r"(?P<num>\d+)-(?P<word>[A-Za-z]+)")
+
+    subject_one = "123-alpha tail"
+    subject_two = "prefix 456-beta suffix"
+    subject_three = "outer 789-gamma end"
+    subject_four = "zzz-no-hit"
+
+    cases: List[tuple[str, int, int, tuple[str, str] | None]] = [
+        (subject_one, 0, subject_one.index(" "), ("123", "alpha")),
+        (subject_two, subject_two.index("456"), subject_two.index(" suffix"), ("456", "beta")),
+        (subject_three, subject_three.index("789"), subject_three.index(" end"), ("789", "gamma")),
+        (subject_four, 0, len(subject_four), None),
+    ]
+
+    thread_count = 4
+    iterations = 50
+    start_barrier = threading.Barrier(thread_count + 1)
+
+    errors: List[BaseException] = []
+    results: List[List[tuple[str, str] | None]] = [[] for _ in range(thread_count)]
+
+    def worker(index: int) -> None:
+        try:
+            start_barrier.wait(timeout=5)
+            local: List[tuple[str, str] | None] = []
+            for _ in range(iterations):
+                for subject, pos, endpos, expected in cases:
+                    match = pattern.search(subject, pos=pos, endpos=endpos)
+                    if expected is None:
+                        if match is not None:
+                            raise AssertionError(f"expected no match for {subject!r}, got {match.group(0)!r}")
+                        local.append(None)
+                        continue
+                    if match is None:
+                        raise AssertionError(f"missing match for {subject!r}")
+                    local.append((match.group("num"), match.group("word")))
+            results[index] = local
+        except BaseException as exc:  # pragma: no cover - surfaced in main thread
+            errors.append(exc)
+            raise
+
+    threads = [
+        threading.Thread(target=worker, args=(idx,), name=f"pattern-worker-{idx}")
+        for idx in range(thread_count)
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    barrier_failed = False
+    try:
+        start_barrier.wait(timeout=5)
+    except threading.BrokenBarrierError:
+        barrier_failed = True
+
+    for thread in threads:
+        thread.join(timeout=10)
+
+    if any(thread.is_alive() for thread in threads):
+        pytest.fail("worker thread did not finish")
+
+    if errors:
+        raise errors[0]
+
+    if barrier_failed:
+        pytest.fail("worker threads failed to synchronize before execution")
+
+    expected_sequence: List[tuple[str, str] | None] = []
+    for _ in range(iterations):
+        expected_sequence.extend(case[3] for case in cases)
+
+    for local in results:
+        assert local == expected_sequence
 
 
 def test_cache_strategy_global_shares_cache_across_threads() -> None:

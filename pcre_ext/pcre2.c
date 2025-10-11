@@ -419,6 +419,27 @@ pattern_cache_teardown(void)
     atomic_store_explicit(&pattern_cache_global_mode, 0, memory_order_release);
 }
 
+static PyObject *
+module_clear_pattern_cache(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    if (pattern_cache_is_global()) {
+        if (global_pattern_cache_lock != NULL) {
+            PyThread_acquire_lock(global_pattern_cache_lock, 1);
+        }
+        pattern_cache_state_clear(&global_pattern_cache);
+        if (global_pattern_cache_lock != NULL) {
+            PyThread_release_lock(global_pattern_cache_lock);
+        }
+    } else if (atomic_load_explicit(&pattern_cache_tss_ready, memory_order_acquire)) {
+        PatternCacheState *state = thread_pattern_cache_state_get();
+        if (state != NULL) {
+            pattern_cache_state_clear(state);
+        }
+    }
+
+    Py_RETURN_NONE;
+}
+
 static inline int
 default_jit_get(void)
 {
@@ -1073,6 +1094,31 @@ utf8_index_to_offset_fast(const char *data, Py_ssize_t data_len, Py_ssize_t inde
     return offset;
 }
 
+static int
+ensure_valid_utf8_for_bytes_subject(PatternObject *pattern,
+                                    int subject_is_bytes,
+                                    const char *data,
+                                    Py_ssize_t length)
+{
+    if (!subject_is_bytes) {
+        return 0;
+    }
+
+    if ((pattern->compile_options & PCRE2_UTF) == 0) {
+        return 0;
+    }
+
+    PyObject *utf8_check = PyUnicode_DecodeUTF8(data, length, NULL);
+    if (utf8_check == NULL) {
+        PyErr_Clear();
+        PyErr_SetString(PcreError,
+                        "bytes subject must be valid UTF-8 when pattern uses the UTF flag");
+        return -1;
+    }
+    Py_DECREF(utf8_check);
+    return 0;
+}
+
 static Py_ssize_t
 finditer_byte_to_index(FindIterObject *self, Py_ssize_t target_byte)
 {
@@ -1526,6 +1572,12 @@ Pattern_create_finditer(PatternObject *pattern,
         iter->utf8_data = PyBytes_AS_STRING(subject_obj);
         Py_INCREF(subject_obj);
         iter->utf8_owner = subject_obj;
+        if (ensure_valid_utf8_for_bytes_subject(pattern,
+                                                iter->subject_is_bytes,
+                                                iter->utf8_data,
+                                                iter->subject_length_bytes) < 0) {
+            goto error;
+        }
     } else if (PyUnicode_Check(subject_obj)) {
         if (PyUnicode_READY(subject_obj) < 0) {
             goto error;
@@ -1807,6 +1859,13 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         buffer = PyBytes_AS_STRING(subject_obj);
         subject_length_bytes = PyBytes_GET_SIZE(subject_obj);
         logical_length = subject_length_bytes;
+        if (ensure_valid_utf8_for_bytes_subject(self,
+                                                subject_is_bytes,
+                                                buffer,
+                                                subject_length_bytes) < 0) {
+            Py_DECREF(utf8_owner);
+            return NULL;
+        }
     } else if (PyUnicode_Check(subject_obj)) {
         if (PyUnicode_READY(subject_obj) < 0) {
             return NULL;
@@ -2664,6 +2723,7 @@ static PyMethodDef module_methods[] = {
     {"get_match_data_cache_count", (PyCFunction)module_get_match_data_cache_count, METH_NOARGS, PyDoc_STR("Return the number of cached match-data buffers currently stored." )},
     {"get_cache_strategy", (PyCFunction)module_get_cache_strategy, METH_NOARGS, PyDoc_STR("Return the active caching strategy ('thread-local' or 'global')." )},
     {"set_cache_strategy", (PyCFunction)module_set_cache_strategy, METH_VARARGS, PyDoc_STR("Set the caching strategy to 'thread-local' (default) or 'global'." )},
+    {"clear_pattern_cache", (PyCFunction)module_clear_pattern_cache, METH_NOARGS, PyDoc_STR("Release cached compiled pattern objects." )},
     {"get_jit_stack_cache_size", (PyCFunction)module_get_jit_stack_cache_size, METH_NOARGS, PyDoc_STR("Return the capacity of the reusable JIT stack cache." )},
     {"set_jit_stack_cache_size", (PyCFunction)module_set_jit_stack_cache_size, METH_VARARGS, PyDoc_STR("Set the capacity of the reusable JIT stack cache." )},
     {"clear_jit_stack_cache", (PyCFunction)module_clear_jit_stack_cache, METH_NOARGS, PyDoc_STR("Release all cached PCRE2 JIT stacks." )},

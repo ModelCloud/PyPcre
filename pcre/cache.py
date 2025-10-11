@@ -194,6 +194,7 @@ def clear_cache() -> None:
         with _GLOBAL_STATE.lock:
             _GLOBAL_STATE.pattern_cache.clear()
 
+    _pcre2.clear_pattern_cache()
     _pcre2.clear_match_data_cache()
     _pcre2.clear_jit_stack_cache()
 
