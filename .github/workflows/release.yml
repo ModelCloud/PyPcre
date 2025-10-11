@@ -5,7 +5,7 @@ defaults:
     shell: bash -le {0}
 
 concurrency:
-  group: ${{ github.ref }}-workflow-unit-tests
+  group: ${{ github.ref }}-workflow-release
   cancel-in-progress: true
 
 env:
