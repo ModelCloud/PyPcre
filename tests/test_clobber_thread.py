@@ -15,10 +15,8 @@ import traceback
 from dataclasses import dataclass
 from typing import Optional
 
-import pytest
-
 import pcre
-
+import pytest
 from tests import test_clobber as fuzz_core
 
 

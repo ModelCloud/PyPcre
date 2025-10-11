@@ -9,9 +9,9 @@ import string
 import time
 from typing import Iterable
 
+import pcre
 import pytest
 
-import pcre
 
 # Exercise a broad cross-section of the API using randomized patterns/subjects.
 _RUN_DURATION_SECONDS = 60.0
