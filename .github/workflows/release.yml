@@ -94,6 +94,7 @@ jobs:
 
       - name: Compile
         run: |
+          python -V
           python setup.py bdist_wheel
 
       - name: Test install
