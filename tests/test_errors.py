@@ -11,13 +11,20 @@ BACKEND = pcre_ext_c
 
 
 def _error_class_by_macro() -> dict[str, type[pcre.PcreError]]:
-    return {
-        getattr(pcre, name).macro: getattr(pcre, name)
-        for name in dir(pcre)
-        if name.startswith("PcreError")
-        and name != "PcreError"
-        and hasattr(getattr(pcre, name), "macro")
-    }
+    mapping: dict[str, type[pcre.PcreError]] = {}
+    for name in dir(pcre):
+        if name == "PcreError":
+            continue
+        if not (name.startswith("PcreError") or name.startswith("PyError")):
+            continue
+        candidate = getattr(pcre, name)
+        macro = getattr(candidate, "macro", None)
+        if not macro:
+            continue
+        mapping.setdefault(macro, candidate)
+        if name.startswith("PcreError"):
+            mapping[macro] = candidate
+    return mapping
 
 
 def test_error_enum_matches_exported_classes():
