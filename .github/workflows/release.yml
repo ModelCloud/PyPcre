@@ -44,7 +44,7 @@ jobs:
           cache: 'pip'
 
       - name: Install requirements
-        run: pip install pip build setuptools twine -U
+        run: pip install pip build setuptools twine packaging -U
 
       - name: Build package
         run: |
