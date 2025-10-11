@@ -5,13 +5,8 @@ defaults:
     shell: bash -le {0}
 
 concurrency:
-  group: ${{ github.ref }}-workflow-release
+  group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
   cancel-in-progress: true
-
-env:
-  RELEASE_MODE: 1
-  CI: 1
-  MAX_JOBS: 4
 
 on:
   push:
@@ -20,16 +15,30 @@ on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
+      ref:
+        description: 'Branch, Tag or Commit SHA'
+        required: false
+        default: ''
+      pr_number:
+        description: 'PR Number'
+        required: false
+        type: number
       upload_pypi:
-        description: 'upload to PyPI'
+        description: 'Upload to PyPI'
         type: boolean
         required: false
         default: false
       upload_release:
-        description: 'upload to release (it only works with a tag ref)'
+        description: 'Upload to release (it only works with a tag ref)'
         type: boolean
         required: false
         default: false
+
+env:
+  RELEASE_MODE: 1
+  CI: 1
+  MAX_JOBS: 4
+  ref: ${{ github.event.inputs.ref || github.ref }}
 
 jobs:
   release-source:
@@ -38,6 +47,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
 
       - uses: actions/setup-python@v6
         with:
@@ -70,6 +81,8 @@ jobs:
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
 
       - uses: actions/setup-python@v6
         with:
@@ -77,14 +90,19 @@ jobs:
           cache: 'pip'
 
       - name: Install requirements
-        run: pip install pip build setuptools twine packaging -U
+        run:  |
+          python -V
+          pip install pip build setuptools twine packaging -U
 
       - name: Compile
         run: |
+          python -V
           python setup.py bdist_wheel
 
       - name: Test install
         run: |
+          python -V
+
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
