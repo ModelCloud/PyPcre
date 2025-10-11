@@ -9,9 +9,9 @@ on:
   repository_dispatch:
   workflow_dispatch:
 
-#concurrency:
-#  group: ${{ github.ref }}-workflow-unit-tests
-#  cancel-in-progress: true
+concurrency:
+  group: ${{ github.ref }}-workflow-unit-tests
+  cancel-in-progress: true
 
 jobs:
   list-test-files:

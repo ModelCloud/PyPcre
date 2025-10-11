@@ -1,5 +1,18 @@
 name: Release
 
+defaults:
+  run:
+    shell: bash -le {0}
+
+concurrency:
+  group: ${{ github.ref }}-workflow-unit-tests
+  cancel-in-progress: true
+
+env:
+  RELEASE_MODE: 1
+  CI: 1
+  MAX_JOBS: 4
+
 on:
   release:
     types: [ published ]
@@ -30,7 +43,7 @@ jobs:
           cache: 'pip'
 
       - name: Install requirements
-        run: pip install build setuptools twine -U
+        run: pip install pip build setuptools twine -U
 
       - name: Build package
         run: |
@@ -56,12 +69,15 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v5
 
+      - name: Install requirements
+        run: pip install pip build setuptools twine -U
+
       - name: Compile
-        run: python setup.py bdist_wheel
+        run: |
+          python -m build
 
       - name: Test install
         run: |
-          pip install twine
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
