@@ -35,6 +35,7 @@ from setup_utils import (
     has_library,
     is_truthy_env,
     is_windows_platform,
+    is_solaris_platform,
     locate_library_file,
     prepare_pcre2_source,
     run_pkg_config,
@@ -92,6 +93,9 @@ setup_utils.configure_environment(
     library_basename=LIBRARY_BASENAME,
     library_search_patterns=LIBRARY_SEARCH_PATTERNS,
 )
+
+if is_solaris_platform():
+    os.environ["PYPCRE_BUILD_FROM_SOURCE"] = "1"
 
 
 def filter_with_real_path(paths: list[str]) -> list[str]:
@@ -264,7 +268,7 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
     RUNTIME_LIBRARY_FILES.clear()
     RUNTIME_LIBRARY_FILES.extend(runtime_libraries)
 
-    if (sys.platform.startswith("sunos") or sys.platform.startswith("solaris")) and platform.architecture()[0] == "64bit":
+    if is_solaris_platform() and platform.architecture()[0] == "64bit":
         extra_link_args_x64 = [path for path in extra_link_args if '64' in path]
         if extra_link_args_x64:
             extra_link_args = extra_link_args_x64

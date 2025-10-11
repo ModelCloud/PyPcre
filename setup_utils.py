@@ -383,6 +383,11 @@ def _is_windows_platform() -> bool:
     return sys.platform.startswith("win") or os.name == "nt"
 
 
+def _is_solaris_platform() -> bool:
+    platform_name = sys.platform.lower()
+    return platform_name.startswith("sunos") or platform_name.startswith("solaris")
+
+
 def _is_wsl_environment() -> bool:
     if not sys.platform.startswith("linux"):
         return False
@@ -448,7 +453,7 @@ def _clean_previous_build(destination: Path, build_dir: Path, build_roots: list[
 
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
-    if _is_windows_platform() and not _is_wsl_environment():
+    if (_is_windows_platform() and not _is_wsl_environment()) or _is_solaris_platform():
         os.environ["PYPCRE_BUILD_FROM_SOURCE"] = "1"
 
     if not _is_truthy_env("PYPCRE_BUILD_FROM_SOURCE"):
@@ -880,7 +885,7 @@ def _platform_prefixes() -> list[Path]:
         prefixes.extend(Path(p) for p in ("/opt/homebrew", "/usr/local", "/usr"))
     elif sys.platform.startswith("freebsd"):
         prefixes.extend(Path(p) for p in ("/usr/local", "/usr"))
-    elif sys.platform.startswith("sunos") or sys.platform.startswith("solaris"):
+    elif _is_solaris_platform():
         prefixes.extend(Path(p) for p in ("/usr", "/usr/local", "/opt/local"))
     else:
         prefixes.extend(Path(p) for p in ("/usr/local", "/usr"))
@@ -906,7 +911,7 @@ def _platform_library_subdirs() -> list[str]:
             "lib/aarch64-linux-gnu",
             "lib/arm-linux-gnueabihf",
         ])
-    elif sys.platform.startswith("sunos") or sys.platform.startswith("solaris"):
+    elif _is_solaris_platform():
         subdirs.extend(["lib/64", "lib/amd64"])
 
     seen: set[str] = set()
@@ -1076,6 +1081,7 @@ has_header = _has_header
 has_library = _has_library
 is_truthy_env = _is_truthy_env
 is_windows_platform = _is_windows_platform
+is_solaris_platform = _is_solaris_platform
 
 
 __all__ = [
@@ -1099,4 +1105,5 @@ __all__ = [
     "has_library",
     "is_truthy_env",
     "is_windows_platform",
+    "is_solaris_platform",
 ]
