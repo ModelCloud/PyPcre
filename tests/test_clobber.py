@@ -9,7 +9,7 @@ import pytest
 import pcre
 
 # Exercise a broad cross-section of the API using randomized patterns/subjects.
-_RUN_DURATION_SECONDS = 30.0
+_RUN_DURATION_SECONDS = 60.0
 
 # Predefined building blocks that combine into (mostly) well-formed patterns.
 _BASE_TOKENS: list[str] = [
