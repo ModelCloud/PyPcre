@@ -11,9 +11,14 @@ on:
         type: boolean
         required: false
         default: false
+      upload_release:
+        description: 'upload to release (it only works with a tag ref)'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
-  build:
+  release-source:
     runs-on: ubuntu-latest
 
     steps:
@@ -39,3 +44,42 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
           python -m twine upload dist/*gz
+
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ]
+        py: [ '3.10', '3.11', '3.12', '3.13', '3.14' ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v5
+
+      - name: Compile
+        run: python setup.py bdist_wheel
+
+      - name: Test install
+        run: |
+          pip install twine
+          ls -ahl dist
+          whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
+          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+          twine check dist/$whl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: ${{ env.WHL_NAME }}
+          path: dist/${{ env.WHL_NAME }}
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        if: github.event_name == 'release' || github.event.inputs.upload_release == 'true' && !cancelled()
+        with:
+          repo_name: ${{ env.repo }}
+          tag: ${{ env.ref }}
+          file: dist/${{ env.WHL_NAME }}
+          file_glob: true
+          overwrite: true
