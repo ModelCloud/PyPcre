@@ -11,13 +11,20 @@ BACKEND = pcre_ext_c
 
 
 def _error_class_by_macro() -> dict[str, type[pcre.PcreError]]:
-    return {
-        getattr(pcre, name).macro: getattr(pcre, name)
-        for name in dir(pcre)
-        if name.startswith("PcreError")
-        and name != "PcreError"
-        and hasattr(getattr(pcre, name), "macro")
-    }
+    mapping: dict[str, type[pcre.PcreError]] = {}
+    for name in dir(pcre):
+        if name == "PcreError":
+            continue
+        if not (name.startswith("PcreError") or name.startswith("PyError")):
+            continue
+        candidate = getattr(pcre, name)
+        macro = getattr(candidate, "macro", None)
+        if not macro:
+            continue
+        mapping.setdefault(macro, candidate)
+        if name.startswith("PcreError"):
+            mapping[macro] = candidate
+    return mapping
 
 
 def test_error_enum_matches_exported_classes():
@@ -66,3 +73,24 @@ def test_low_level_compile_reports_bad_options():
     assert exc.macro == "PCRE2_ERROR_BAD_OPTIONS"
     assert exc.code == getattr(BACKEND, "PCRE2_ERROR_BAD_OPTIONS")
     assert exc.error_code is pcre.PcreErrorCode.BAD_OPTIONS
+
+
+def test_substitution_with_invalid_numeric_group_reference_raises():
+    # Regression test: patterns that only expose numeric group names through
+    # DUPNAMES should still reject ``\1`` substitutions when no real capture
+    # exists instead of crashing.
+    pattern = rb"\D\w?\(?#comment)(?=foo)(?#comment)(?P<1>abc)"
+    flags = (
+        pcre.Flag.NO_UCP
+        | pcre.Flag.NO_JIT
+        | pcre.Flag.ANCHORED
+        | pcre.Flag.DUPNAMES
+        | pcre.Flag.EXTENDED
+        | pcre.Flag.UNGREEDY
+    )
+    compiled = pcre.compile(pattern, flags=flags)
+
+    with pytest.raises(pcre.PcreError) as info:
+        compiled.sub(b"\\1", b"Zfooabc")
+
+    assert "invalid group reference" in str(info.value)

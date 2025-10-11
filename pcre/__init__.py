@@ -13,15 +13,14 @@ surfacing PCRE2-specific flags and behaviours.
 from __future__ import annotations
 
 import re as _std_re
-from enum import IntEnum, IntFlag
 from typing import Any
 
 import pcre_ext_c as _backend
 
-
-pcre_ext_c = _backend
+from . import error as _error_module
 from .cache import cache_strategy, get_cache_limit, set_cache_limit
-from .flags import PY_ONLY_FLAG_MEMBERS
+from .error import ERRORS_BY_CODE, ERRORS_BY_MACRO, PcreErrorCode
+from .flags import Flag
 from .pcre import (
     Match,
     Pattern,
@@ -43,45 +42,11 @@ from .pcre import (
 from .threads import configure_thread_pool, configure_threads, shutdown_thread_pool
 
 
+pcre_ext_c = _backend
+
 __version__ = getattr(_backend, "__version__", "0.0")
 
 _cpu_ascii_vector_mode = getattr(_backend, "_cpu_ascii_vector_mode", None)
-
-_FLAG_MEMBERS: dict[str, int] = {}
-_ERROR_CODE_MEMBERS: dict[str, int] = {}
-
-for _name in dir(_backend):
-    if not _name.startswith("PCRE2_"):
-        continue
-    _value = getattr(_backend, _name)
-    if not isinstance(_value, int):
-        continue
-
-    if _name == "PCRE2_CODE_UNIT_WIDTH":
-        continue
-
-    if _name.startswith("PCRE2_ERROR_"):
-        _ERROR_CODE_MEMBERS[_name.removeprefix("PCRE2_ERROR_")] = _value
-        continue
-
-    _FLAG_MEMBERS[_name.removeprefix("PCRE2_")] = _value
-
-_FLAG_MEMBERS.update(PY_ONLY_FLAG_MEMBERS)
-
-if _FLAG_MEMBERS:
-    Flag = IntFlag("Flag", _FLAG_MEMBERS)
-    Flag.__doc__ = "Pythonic IntFlag aliases for PCRE2 option constants."
-else:  # pragma: no cover - defensive fallback that should never trigger
-    class Flag(IntFlag):
-        """Empty IntFlag placeholder when no PCRE2 constants are available."""
-
-
-if _ERROR_CODE_MEMBERS:
-    PcreErrorCode = IntEnum("PcreErrorCode", _ERROR_CODE_MEMBERS)
-    PcreErrorCode.__doc__ = "IntEnum exposing PCRE2 error identifiers."
-else:  # pragma: no cover - defensive fallback that should never trigger
-    class PcreErrorCode(IntEnum):
-        """Empty IntEnum placeholder when PCRE2 error constants are unavailable."""
 
 
 def _error_code_property(self) -> PcreErrorCode | None:
@@ -92,14 +57,17 @@ def _error_code_property(self) -> PcreErrorCode | None:
 
 
 PcreError.error_code = property(_error_code_property)
+del _error_code_property
 
+# Re-export the statically declared PyError* aliases from the error module.
+for _name in _error_module.__all__:
+    globals()[_name] = getattr(_error_module, _name)
 
 _EXPORTED_ERROR_CLASSES: list[str] = []
 for _name in dir(_backend):
     if _name.startswith("PcreError") and _name != "PcreError":
         globals()[_name] = getattr(_backend, _name)
         _EXPORTED_ERROR_CLASSES.append(_name)
-
 
 purge = clear_cache
 error = PcreError
@@ -141,8 +109,11 @@ __all__ = [
     "PatternError",
     "Flag",
     "escape",
+    "ERRORS_BY_CODE",
+    "ERRORS_BY_MACRO",
 ]
 
+__all__ += list(_error_module.__all__)
 __all__ += _EXPORTED_ERROR_CLASSES
 
 if _cpu_ascii_vector_mode is not None:

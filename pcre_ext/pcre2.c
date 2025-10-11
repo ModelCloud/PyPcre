@@ -1826,6 +1826,12 @@ Pattern_get_groupindex(PatternObject *self, void *closure)
 }
 
 static PyObject *
+Pattern_get_capture_count(PatternObject *self, void *closure)
+{
+    return PyLong_FromUnsignedLong((unsigned long)self->capture_count);
+}
+
+static PyObject *
 Pattern_finditer_method(PatternObject *self, PyObject *args, PyObject *kwargs)
 {
     static char *kwlist[] = {"subject", "pos", "endpos", "options", NULL};
@@ -2246,6 +2252,7 @@ static PyGetSetDef Pattern_getset[] = {
     {"flags", (getter)Pattern_get_flags, NULL, PyDoc_STR("Compile-time options."), NULL},
     {"jit", (getter)Pattern_get_jit, NULL, PyDoc_STR("Whether the pattern was JIT compiled."), NULL},
     {"groupindex", (getter)Pattern_get_groupindex, NULL, PyDoc_STR("Mapping of named capture groups."), NULL},
+    {"capture_count", (getter)Pattern_get_capture_count, NULL, PyDoc_STR("Number of capturing groups."), NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

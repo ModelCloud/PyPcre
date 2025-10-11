@@ -15,10 +15,9 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List
 
-import pytest
-
 import pcre
 import pcre.cache as cache_mod
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

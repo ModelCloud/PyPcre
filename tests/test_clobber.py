@@ -1,15 +1,20 @@
+# SPDX-FileCopyrightText: 2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+
 import os
 import random
 import string
 import time
 from typing import Iterable
 
+import pcre
 import pytest
 
-import pcre
 
 # Exercise a broad cross-section of the API using randomized patterns/subjects.
-_RUN_DURATION_SECONDS = 30.0
+_RUN_DURATION_SECONDS = 60.0
 
 # Predefined building blocks that combine into (mostly) well-formed patterns.
 _BASE_TOKENS: list[str] = [
@@ -83,38 +88,23 @@ _INLINE_FLAG_WRAPPERS: tuple[str, ...] = (
     "(?i-m)",
 )
 
-_FLAG_NAME_POOL: tuple[str, ...] = tuple(
+_CANONICAL_FLAG_NAMES = tuple(
     name
-    for name in (
-        "IGNORECASE",
-        "MULTILINE",
-        "DOTALL",
-        "EXTENDED",
-        "UNGREEDY",
-        "ANCHORED",
-        "UTF",
-        "UCP",
-        "FIRSTLINE",
-        "LONGNAME",
-        "DUPNAMES",
-        "BSR_ANYCRLF",
-        "BSR_UNICODE",
-        "NEWLINE_ANY",
-        "NEWLINE_ANYCRLF",
-        "JIT",
-        "NO_JIT",
-        "NO_UTF",
-        "NO_UCP",
-    )
-    if name in pcre.Flag.__members__
+    for name, flag in pcre.Flag.__members__.items()
+    if getattr(flag, "name", name) == name
 )
+
+_TEXT_ONLY_FLAGS: frozenset[str] = frozenset({"COMPAT_UNICODE_ESCAPE"})
+
+_FLAG_NAME_POOL: tuple[str, ...] = tuple(sorted(_CANONICAL_FLAG_NAMES))
 
 _CONFLICTING_FLAGS: tuple[tuple[str, str], ...] = (
     ("JIT", "NO_JIT"),
+    ("THREADS", "NO_THREADS"),
     ("UTF", "NO_UTF"),
+    ("UTF", "NEVER_UTF"),
     ("UCP", "NO_UCP"),
-    ("BSR_ANYCRLF", "BSR_UNICODE"),
-    ("NEWLINE_ANY", "NEWLINE_ANYCRLF"),
+    ("UCP", "NEVER_UCP"),
 )
 
 
@@ -199,7 +189,12 @@ def _random_flags(rng: random.Random, is_bytes: bool) -> pcre.Flag:
         return pcre.Flag(0)
     selected: set[str] = set()
     flags = pcre.Flag(0)
-    names = list(_FLAG_NAME_POOL)
+    names = [
+        name
+        for name in _FLAG_NAME_POOL
+        if name in pcre.Flag.__members__
+        and (not is_bytes or name not in _TEXT_ONLY_FLAGS)
+    ]
     rng.shuffle(names)
     for name in names:
         if not is_bytes and name in {"NO_UTF", "NO_UCP"}:
