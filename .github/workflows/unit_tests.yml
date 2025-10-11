@@ -8,6 +8,14 @@ on:
   push:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'GitHub ref: Branch, Tag or Commit SHA'
+        required: false
+        default: ''
+
+env:
+  ref: ${{ github.event.inputs.ref || github.ref }}
 
 concurrency:
   group: ${{ github.ref }}-workflow-unit-tests
@@ -22,6 +30,8 @@ jobs:
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
 
       - name: List files
         id: files
@@ -55,7 +65,10 @@ jobs:
         os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout Codes
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
 
       - uses: actions/setup-python@v6
         with:
@@ -81,6 +94,9 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
+
 
       - name: clean dir
         run: rm -rf .git
@@ -109,6 +125,9 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
+
 
       - name: clean dir
         run: rm -rf .git
@@ -141,6 +160,9 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
+
 
       - uses: Vampire/setup-wsl@v6
         with:
