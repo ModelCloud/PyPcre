@@ -209,10 +209,11 @@ wrapper exposes two complementary ways to adjust that behaviour:
 - Execution helpers accept `pos`, `endpos`, and `options`, allowing you to thread PCRE2 execution flags per call.
 
 ## Memory allocation
-- PyPcre will select the fastest available allocator at import time: it
-  prefers jemalloc, then tcmalloc, and finally falls back to the platform
-  `malloc`. Optional allocators are loaded via `dlopen`, so no additional
-  link flags are required when they are absent.
+- By default PyPcre uses CPython's `PyMem` allocator.
+- Override the allocator explicitly by setting `PYPCRE_ALLOCATOR` to one of
+  `pymem`, `malloc`, `jemalloc`, or `tcmalloc` before importing the module. The
+  optional allocators are still loaded with `dlopen`, so no additional link
+  flags are required when they are absent.
 - Call `pcre_ext_c.get_allocator()` to inspect which backend is active at
   runtime.
 
