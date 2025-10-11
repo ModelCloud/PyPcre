@@ -348,7 +348,7 @@ def _resolve_cmake_executable() -> str | None:
             _log_skipping_pyenv_shim(path)
             continue
         try:
-            subprocess.run(
+            result = subprocess.run(
                 [path, "--version"],
                 check=True,
                 stdout=subprocess.PIPE,
@@ -361,6 +361,8 @@ def _resolve_cmake_executable() -> str | None:
             _log_cmake_validation_failure(path, exc)
             continue
         sys.stderr.write(f"Validated CMake executable at {path}\n")
+        version_line = (result.stdout or "").strip().splitlines()[0] if result.stdout else ""
+        print(f"PyPcre build: using CMake executable at {path}{f' ({version_line})' if version_line else ''}")
         return path
     return None
 
