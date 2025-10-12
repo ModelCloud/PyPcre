@@ -59,8 +59,13 @@ def _run_cache_script(source: str, env_overrides: Dict[str, str] | None = None) 
         text=True,
         env=env,
     )
-    if completed.stderr:
-        raise AssertionError(f"unexpected stderr output: {completed.stderr}")
+    stderr = completed.stderr.strip()
+    if stderr:
+        expected = "The global interpreter lock (GIL) has been enabled to load module 'pcre.cache', which has not declared that it can run safely without the GIL."
+        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+        unexpected = [line for line in lines if expected not in line]
+        if unexpected:
+            raise AssertionError(f"unexpected stderr output: {completed.stderr}")
     return json.loads(completed.stdout)
 
 
