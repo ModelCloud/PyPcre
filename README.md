@@ -18,7 +18,7 @@ Python bindings for the system PCRE2 library with a familiar `re`-style API.
 </p>
 
 ## Latest News
-* 10/11/2025 [0.2.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.0): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance for all api. Expanded ci testing coverage. FreeBSD, Solaris, and Windows compatibility validated.
+* 10/11/2025 [0.2.1](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.1): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance for all api. Expanded ci testing coverage. FreeBSD, Solaris, and Windows compatibility validated.
 * 10/09/2025 [0.1.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.1.0): 🎉 First release. Thread safe, auto JIT, auto pattern caching and optimistic linking to system library for fast install.
 
 ## Why PyPcre:
