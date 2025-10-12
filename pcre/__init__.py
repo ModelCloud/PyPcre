@@ -13,16 +13,9 @@ surfacing PCRE2-specific flags and behaviours.
 from __future__ import annotations
 
 import re as _std_re
-import warnings as _warnings
 from typing import Any
 
 import pcre_ext_c as _backend
-
-_warnings.filterwarnings(
-    "ignore",
-    message=r"The global interpreter lock (GIL) has been enabled to load module 'pcre.cache'",
-    category=RuntimeWarning,
-)
 
 from . import error as _error_module
 from .cache import cache_strategy, get_cache_limit, set_cache_limit
