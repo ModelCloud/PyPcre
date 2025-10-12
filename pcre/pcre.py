@@ -16,16 +16,17 @@ import pcre_ext_c as _pcre2
 
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
-from .flags import (
-    COMPAT_UNICODE_ESCAPE,
-    JIT,
-    NO_JIT,
-    NO_THREADS,
-    NO_UCP,
-    NO_UTF,
-    THREADS,
-    strip_py_only_flags,
-)
+from .flags import Flag, strip_py_only_flags
+
+# Cache frequently used flag values as plain integers to avoid the overhead of
+# IntFlag arithmetic in hot paths such as module-level search helpers.
+COMPAT_UNICODE_ESCAPE: int = int(Flag.COMPAT_UNICODE_ESCAPE)
+THREADS: int = int(Flag.THREADS)
+NO_THREADS: int = int(Flag.NO_THREADS)
+JIT: int = int(Flag.JIT)
+NO_JIT: int = int(Flag.NO_JIT)
+NO_UTF: int = int(Flag.NO_UTF)
+NO_UCP: int = int(Flag.NO_UCP)
 from .re_compat import (
     Match,
     TemplatePatternStub,
