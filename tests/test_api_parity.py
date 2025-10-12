@@ -36,6 +36,22 @@ def test_error_aliases_and_escape():
     assert pcre.escape(b"a+b") == re.escape(b"a+b")
 
 
+def test_stdlib_style_flag_aliases():
+    assert pcre.IGNORECASE == pcre.Flag.CASELESS
+    assert pcre.I == pcre.Flag.CASELESS
+    assert pcre.MULTILINE == pcre.Flag.MULTILINE
+    assert pcre.M == pcre.Flag.MULTILINE
+    assert pcre.DOTALL == pcre.Flag.DOTALL
+    assert pcre.S == pcre.Flag.DOTALL
+    assert pcre.VERBOSE == pcre.Flag.EXTENDED
+    assert pcre.X == pcre.Flag.EXTENDED
+    ascii_alias = pcre.Flag.NO_UTF | pcre.Flag.NO_UCP
+    assert pcre.ASCII == ascii_alias
+    assert pcre.A == ascii_alias
+    assert pcre.UNICODE == 0
+    assert pcre.U == 0
+
+
 def test_specific_compile_error_exposes_dedicated_exception():
     with pytest.raises(pcre.PcreErrorMissingClosingParenthesis) as info:
         pcre.compile("(")

@@ -80,6 +80,28 @@ def escape(pattern: Any) -> Any:
     return _std_re.escape(pattern)
 
 
+# Compat: expose stdlib-style flag constants so migrating `re` users can
+# continue referencing familiar names. Prefer `pcre.Flag` for new code.
+_FLAG_ZERO = Flag(0)
+_FLAG_COMPAT_ALIASES = {
+    "IGNORECASE": Flag.CASELESS,
+    "I": Flag.CASELESS,
+    "MULTILINE": Flag.MULTILINE,
+    "M": Flag.MULTILINE,
+    "DOTALL": Flag.DOTALL,
+    "S": Flag.DOTALL,
+    "VERBOSE": Flag.EXTENDED,
+    "X": Flag.EXTENDED,
+    "ASCII": Flag.NO_UTF | Flag.NO_UCP,
+    "A": Flag.NO_UTF | Flag.NO_UCP,
+    "UNICODE": _FLAG_ZERO,
+    "U": _FLAG_ZERO,
+}
+
+for _alias, _flag in _FLAG_COMPAT_ALIASES.items():
+    globals()[_alias] = _flag
+
+
 __all__ = [
     "Pattern",
     "Match",
@@ -112,6 +134,8 @@ __all__ = [
     "ERRORS_BY_CODE",
     "ERRORS_BY_MACRO",
 ]
+
+__all__ += list(_FLAG_COMPAT_ALIASES.keys())
 
 __all__ += list(_error_module.__all__)
 __all__ += _EXPORTED_ERROR_CLASSES
