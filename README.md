@@ -7,7 +7,7 @@
 
 # PyPcre (Python Pcre2 Binding)
 
-Python bindings for the system PCRE2 library with a familiar `re`-style API.
+Modern `nogil` Python bindings for the Pcre2 library with `stdlib.re` api compatibility.
 
 <p align="center">
     <a href="https://github.com/ModelCloud/PyPcre/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/Pcre.svg"></a>
@@ -39,9 +39,29 @@ pip install PyPcre
 
 The package prioritizes linking against the `libpcre2-8` shared library in system for fast install and max security protection which gets latest patches from OS. See [Building](#building) for manual build details.
 
+## Platform Support (Validated):
+
+`Linux`, `MacOS`, `Windows`, `WSL`, `FreeBSD`, `Solaris`
+
+
 ## Usage
 
-### Drop-in helpers
+
+If you already rely on the standard library `re`, migrating is as
+simple as changing your import:
+
+```python
+import pcre as re
+```
+
+The module-level entry points (`match`, `search`, `fullmatch`, `findall`,
+`finditer`, `split`, `sub`, `subn`, `compile`, `escape`, `purge`) expose the
+same call signatures as their `re` counterparts, making existing code work
+unchanged. Every standard flag with a PCRE2 equivalent—`IGNORECASE`,
+`MULTILINE`, `DOTALL`, `VERBOSE`, `ASCII`, and friends—is supported via the
+re-exported constants and the `pcre.Flag` enum. 
+
+### Sample Usage
 
 ```python
 from pcre import match, search, findall, compile, Flag
@@ -53,14 +73,10 @@ pattern = compile(rb"\d+", flags=Flag.MULTILINE)
 numbers = pattern.findall(b"line 1\nline 22")
 ```
 
-`pcre` mirrors the core helpers from Python’s standard library `re` module—
-`match`, `search`, `fullmatch`, `finditer`, `findall`, and `compile`—while
+`pcre` mirrors the core helpers from Python’s standard library `re` module 
+`match`, `search`, `fullmatch`, `finditer`, `findall`, and `compile` while
 exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 (`Flag.CASELESS`, `Flag.MULTILINE`, `Flag.UTF`, ...).
-
-### Platform Support:
-
-Linux, MacOS, Windows, WSL, FreeBSD, Solaris
 
 ### Stdlib `re` compatibility
 
