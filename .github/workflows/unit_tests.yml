@@ -115,6 +115,27 @@ jobs:
             pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
+  benchmark:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.13
+          cache: 'pip'
+
+      - name: install
+        run: |
+          pip install pip -U
+          pip install -v -e .
+
+      - name: Benchmark cache implementation
+        run: ./scripts/benchmark_cache.py c --iterations 20000 --gil 0
+
   solaris:
     needs:
       - list-test-files
