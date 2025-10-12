@@ -27,10 +27,6 @@ def test_module_compile_and_match_shortcuts():
     assert whole is not None
     assert whole.span() == (0, 5)
 
-    module_whole = pcre.module_fullmatch(r"\d+", "12345")
-    assert module_whole is not None
-    assert module_whole.span() == (0, 5)
-
 
 def test_module_finditer_and_findall_helpers():
     matches = [m.group(0) for m in pcre.finditer(r"[A-Z]+", "abc DEF ghi JKL")]

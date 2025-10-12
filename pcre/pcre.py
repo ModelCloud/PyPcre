@@ -556,12 +556,6 @@ def fullmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
     return compile(pattern, flags=flags).fullmatch(string)
 
 
-def module_fullmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    """Compat helper for code expecting a distinct module-level fullmatch."""
-
-    return fullmatch(pattern, string, flags=flags)
-
-
 def finditer(pattern: Any, string: Any, flags: FlagInput = 0) -> Iterable[Match]:
     return compile(pattern, flags=flags).finditer(string)
 
