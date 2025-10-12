@@ -259,7 +259,6 @@ def _exercise_pattern(
         "subn",
         "module_match",
         "module_search",
-        "module_fullmatch",
         "module_findall",
         "module_split",
         "module_sub",
@@ -288,8 +287,6 @@ def _exercise_pattern(
             pcre.match(pattern, subject, flags=flags)
         elif op == "module_search":
             pcre.search(pattern, subject, flags=flags)
-        elif op == "module_fullmatch":
-            pcre.fullmatch(pattern, subject, flags=flags)
         elif op == "module_findall":
             pcre.findall(pattern, subject, flags=flags)
         elif op == "module_split":

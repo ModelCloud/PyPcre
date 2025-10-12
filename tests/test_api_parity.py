@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import inspect
 import re
 from enum import IntFlag
 
@@ -252,3 +253,27 @@ def test_match_attributes_bytes():
     assert match.lastgroup is None
     assert match.regs == ((2, 4), (2, 3), (3, 4))
     assert match.expand(br"[\1\2]") == b"[ab]"
+
+
+def _signature_fingerprint(func):
+    signature = inspect.signature(func)
+    return tuple((param.name, param.kind, param.default) for param in signature.parameters.values())
+
+
+def test_stdlib_function_signatures_align_with_pcre():
+    stdlib_functions = {
+        name: getattr(re, name)
+        for name in dir(re)
+        if not name.startswith("_") and inspect.isroutine(getattr(re, name))
+    }
+
+    for name, std_callable in stdlib_functions.items():
+        pcre_callable = getattr(pcre, name, None)
+        assert pcre_callable is not None, f"pcre is missing stdlib helper {name!r}"
+        assert inspect.isroutine(pcre_callable), f"pcre.{name} should be a function"
+
+        std_sig = _signature_fingerprint(std_callable)
+        pcre_sig = _signature_fingerprint(pcre_callable)
+        assert (
+            pcre_sig == std_sig
+        ), f"Signature mismatch for {name!r}: pcre{pcre_sig!r} != re{std_sig!r}"
