@@ -298,9 +298,4 @@ EXTENSION = Extension(
     **collect_build_config(),
 )
 
-CACHE_EXTENSION = Extension(
-    name="pcre.cache",
-    sources=["pcre/pattern_cache.c"],
-)
-
-setup(ext_modules=[EXTENSION, CACHE_EXTENSION], cmdclass={"build_ext": build_ext})
+setup(ext_modules=[EXTENSION], cmdclass={"build_ext": build_ext})
