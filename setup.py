@@ -44,6 +44,9 @@ from setup_utils import (
 
 MODULE_SOURCES = [
     "pcre_ext/pcre2.c",
+    "pcre_ext/pattern_cache.c",
+    "pcre_ext/jit_support.c",
+    "pcre_ext/string_helpers.c",
     "pcre_ext/error.c",
     "pcre_ext/cache.c",
     "pcre_ext/flag.c",

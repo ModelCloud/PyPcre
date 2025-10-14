@@ -70,24 +70,6 @@ required_ovector_pairs(PatternObject *self)
     return required;
 }
 
-static int
-env_flag_is_true(const char *value)
-{
-    if (value == NULL || value[0] == '\0') {
-        return 0;
-    }
-    switch (value[0]) {
-        case '0':
-        case 'f':
-        case 'F':
-        case 'n':
-        case 'N':
-            return 0;
-        default:
-            return 1;
-    }
-}
-
 static inline ThreadCacheState *
 thread_cache_state_get(void)
 {
