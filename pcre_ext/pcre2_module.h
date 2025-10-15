@@ -107,12 +107,26 @@ PyObject *module_get_cache_strategy(PyObject *module, PyObject *args);
 PyObject *module_set_cache_strategy(PyObject *module, PyObject *args);
 PyObject *module_debug_thread_cache_count(PyObject *module, PyObject *args);
 
+/* Pattern cache (compiled patterns) */
+int pattern_cache_initialize(int global_mode);
+void pattern_cache_teardown(void);
+int pattern_cache_lookup(PyObject *cache_key, PatternObject **out_pattern);
+int pattern_cache_store(PyObject *cache_key, PatternObject *pattern);
+void pattern_cache_clear_current(void);
+PyObject *module_clear_pattern_cache(PyObject *module, PyObject *args);
+
 /* Utilities */
+int env_flag_is_true(const char *value);
 PyObject *bytes_from_text(PyObject *obj);
 Py_ssize_t utf8_offset_to_index(const char *data, Py_ssize_t length);
 int utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset_out);
 PyObject *create_groupindex_dict(pcre2_code *code);
 int coerce_jit_argument(PyObject *value, int default_value, int *out, int *is_explicit);
+Py_ssize_t ascii_prefix_length(const char *data, Py_ssize_t max_len);
+int ensure_valid_utf8_for_bytes_subject(PatternObject *pattern, int subject_is_bytes, const char *data, Py_ssize_t length);
+int ascii_vector_mode(void);
+PyObject *module_translate_unicode_escapes(PyObject *module, PyObject *arg);
+PyObject *module_cpu_ascii_vector_mode(PyObject *module, PyObject *args);
 
 /* Memory management */
 int pcre_memory_initialize(void);
@@ -120,5 +134,15 @@ void pcre_memory_teardown(void);
 void *pcre_malloc(size_t size);
 void pcre_free(void *ptr);
 const char *pcre_memory_allocator_name(void);
+
+/* JIT helpers */
+int jit_support_initialize(int force_serial_lock);
+void jit_support_teardown(void);
+void jit_guard_acquire(void);
+void jit_guard_release(void);
+int default_jit_get(void);
+void default_jit_set(int value);
+int pattern_jit_get(PatternObject *pattern);
+void pattern_jit_set(PatternObject *pattern, int value);
 
 #endif

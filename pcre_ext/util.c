@@ -7,6 +7,24 @@
 #include <string.h>
 #include <stdint.h>
 
+int
+env_flag_is_true(const char *value)
+{
+    if (value == NULL || value[0] == '\0') {
+        return 0;
+    }
+    switch (value[0]) {
+        case '0':
+        case 'f':
+        case 'F':
+        case 'n':
+        case 'N':
+            return 0;
+        default:
+            return 1;
+    }
+}
+
 #if defined(_MSC_VER)
 static inline unsigned int
 popcountll(uint64_t value)
