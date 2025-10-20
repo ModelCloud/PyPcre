@@ -28,6 +28,7 @@ from setup_utils import (
     discover_library_dirs,
     extend_env_paths,
     extend_unique,
+    ensure_python_headers,
     find_library_with_brew,
     find_library_with_ldconfig,
     find_library_with_pkg_config,
@@ -221,6 +222,8 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
             extra_compile_args.append("-std=c11")
         else:
             extra_compile_args.append("-std=c99")
+
+    ensure_python_headers(include_dirs)
 
     if not has_header(include_dirs):
         include_dirs.extend(discover_include_dirs())
