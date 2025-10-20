@@ -52,3 +52,5 @@ venv/
 # mypy
 .mypy_cache/
 .dmypy.json
+/experiments/
+/pythonlib/

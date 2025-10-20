@@ -11,7 +11,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
+import tarfile
 import tempfile
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -952,6 +956,136 @@ def _extend_env_paths(target: list[str], env_var: str) -> None:
         if candidate:
             _extend_unique(target, candidate)
 
+
+
+def _python_include_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    config_paths = sysconfig.get_paths()
+    for key in ("include", "platinclude"):
+        value = config_paths.get(key)
+        if not value:
+            continue
+        candidate = Path(value)
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _python_headers_available() -> bool:
+    for directory in _python_include_candidates():
+        if (directory / "Python.h").exists() and (directory / "pyconfig.h").exists():
+            return True
+    return False
+
+
+def _safe_extract(tar: tarfile.TarFile, destination: Path, members: Iterable[tarfile.TarInfo]) -> None:
+    destination = destination.resolve()
+    for member in members:
+        target_path = (destination / member.name).resolve()
+        if os.path.commonpath([str(destination), str(target_path)]) != str(destination):
+            raise RuntimeError("unsafe path detected while extracting python headers")
+    tar.extractall(path=destination, members=members)
+
+
+def _render_config_define(name: str, value: object) -> str | None:
+    if isinstance(value, int):
+        return f"#define {name} {value}" if value else f"/* #undef {name} */"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped == "0":
+            return f"/* #undef {name} */"
+        if stripped == "1" or stripped.isdigit():
+            return f"#define {name} {stripped}"
+    return None
+
+
+def _ensure_generated_pyconfig(include_dir: Path) -> None:
+    target = include_dir / "pyconfig.h"
+    if target.exists():
+        return
+    config = sysconfig.get_config_vars()
+    lines: list[str] = [
+        "/* Auto-generated pyconfig.h for PyPcre fallback */",
+        "#ifndef Py_PYCONFIG_H",
+        "#define Py_PYCONFIG_H",
+        "",
+    ]
+    for name in sorted(config):
+        if not name or not name[0].isupper():
+            continue
+        directive = _render_config_define(name, config[name])
+        if directive:
+            lines.append(directive)
+    lines.append("")
+    lines.append("#endif /* Py_PYCONFIG_H */")
+    target.write_text("\n".join(lines))
+
+
+def _download_python_include() -> Path:
+    version = sysconfig.get_config_var("py_version")
+    if not version:
+        version = ".".join(str(part) for part in sys.version_info[:3])
+    archive_stem = f"Python-{version}"
+    target_root = _get_pcre_ext_dir() / "python_headers"
+    include_dir = target_root / archive_stem / "Include"
+    if (include_dir / "Python.h").exists() and (include_dir / "pyconfig.h").exists():
+        print(f"PyPcre: using cached CPython headers at {include_dir}")
+        return include_dir
+    if include_dir.exists():
+        if (include_dir / "Python.h").exists():
+            print(f"PyPcre: using cached CPython headers at {include_dir}")
+            _ensure_generated_pyconfig(include_dir)
+            return include_dir
+    target_root.mkdir(parents=True, exist_ok=True)
+    print(f"PyPcre: downloading CPython headers for Python {version} -> {include_dir}")
+    urls = [
+        f"https://www.python.org/ftp/python/{version}/{archive_stem}.tar.xz",
+        f"https://www.python.org/ftp/python/{version}/{archive_stem}.tgz",
+        f"https://www.python.org/ftp/python/{version}/{archive_stem}.tar.gz",
+    ]
+    archive_path: Path | None = None
+    archive_mode = "r:gz"
+    last_error: Exception | None = None
+    for url in urls:
+        try:
+            with urllib.request.urlopen(url) as response, tempfile.NamedTemporaryFile(delete=False) as tmp:
+                shutil.copyfileobj(response, tmp)
+                archive_path = Path(tmp.name)
+            archive_mode = "r:xz" if url.endswith(".xz") else "r:gz"
+            with tarfile.open(archive_path, archive_mode) as archive:
+                members = [
+                    member for member in archive.getmembers()
+                    if member.name.startswith(f"{archive_stem}/Include/")
+                ]
+                if not members:
+                    raise RuntimeError("Python source archive missing Include/ directory")
+                _safe_extract(archive, target_root, members)
+            break
+        except (urllib.error.URLError, OSError, tarfile.TarError) as exc:
+            last_error = exc
+            if archive_path is not None:
+                archive_path.unlink(missing_ok=True)
+            archive_path = None
+    if archive_path is None:
+        raise RuntimeError(
+            "Unable to download CPython headers automatically; install python development headers.",
+        ) from last_error
+    archive_path.unlink(missing_ok=True)
+    _ensure_generated_pyconfig(include_dir)
+    if not (include_dir / "Python.h").exists():
+        raise RuntimeError("Failed to prepare CPython headers from downloaded archive")
+    return include_dir
+
+
+def _ensure_python_headers(include_dirs: list[str]) -> None:
+    if _python_headers_available():
+        return
+    fallback_include = _download_python_include()
+    include_path = str(fallback_include)
+    if include_path not in include_dirs:
+        include_dirs.insert(0, include_path)
+
+
 def _header_exists(directory: Path) -> bool:
     return (directory / "pcre2.h").exists()
 
@@ -1081,6 +1215,7 @@ compiler_supports_flag = _compiler_supports_flag
 compiler_supports_flags = _compiler_supports_flags
 has_header = _has_header
 has_library = _has_library
+ensure_python_headers = _ensure_python_headers
 is_truthy_env = _is_truthy_env
 is_windows_platform = _is_windows_platform
 is_solaris_platform = _is_solaris_platform
@@ -1105,6 +1240,7 @@ __all__ = [
     "compiler_supports_flags",
     "has_header",
     "has_library",
+    "ensure_python_headers",
     "is_truthy_env",
     "is_windows_platform",
     "is_solaris_platform",
