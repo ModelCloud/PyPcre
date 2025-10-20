@@ -1009,7 +1009,23 @@ def _ensure_generated_pyconfig(include_dir: Path) -> None:
         "#ifndef Py_PYCONFIG_H",
         "#define Py_PYCONFIG_H",
         "",
+        "#include <stddef.h>",
+        "#include <stdint.h>",
+        "#include <limits.h>",
+        "#include <sys/types.h>",
+        "",
     ]
+    sizeof_size_t = config.get("SIZEOF_SIZE_T")
+    if isinstance(sizeof_size_t, int):
+        lines.append("#ifndef SSIZE_MAX")
+        if sizeof_size_t == 8:
+            lines.append("#  define SSIZE_MAX 0x7FFFFFFFFFFFFFFFLL")
+        elif sizeof_size_t == 4:
+            lines.append("#  define SSIZE_MAX 0x7FFFFFFFL")
+        else:
+            lines.append("#  define SSIZE_MAX ((size_t)~0 >> 1)")
+        lines.append("#endif")
+        lines.append("")
     for name in sorted(config):
         if not name or not name[0].isupper():
             continue
