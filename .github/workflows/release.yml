@@ -70,3 +70,40 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
         run: |
           python -m twine upload dist/*gz
+
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ]
+        py: [ '3.10', '3.11', '3.12', '3.13', '3.14' ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.ref }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.py }}
+          cache: 'pip'
+
+      - name: Install requirements
+        run:  |
+          python -V
+          pip install pip build setuptools twine packaging -U
+
+      - name: Compile
+        run: |
+          python -V
+          python setup.py bdist_wheel
+
+      - name: Test install
+        run: |
+          python -V
+          ls -ahl dist
+          whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
+          echo "WHL_NAME=$whl" >> $GITHUB_ENV
+          twine check dist/$whl
+
