@@ -92,7 +92,7 @@ jobs:
       - name: Install requirements
         run:  |
           python -V
-          pip install pip build setuptools twine packaging -U
+          pip install build setuptools twine packaging -U
 
       - name: Compile
         run: |
