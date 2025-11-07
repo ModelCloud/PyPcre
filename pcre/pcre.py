@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import re as _std_re
 from collections.abc import Generator, Iterable
-from re import _parser
+try:
+    from re import _parser  # python 3.11+
+except Exception:
+    import sre_parse as _parser
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
