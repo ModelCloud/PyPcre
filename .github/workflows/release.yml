@@ -46,7 +46,7 @@ jobs:
     if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           ref: ${{ env.ref }}
 
@@ -80,7 +80,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: ${{ env.ref }}
 
