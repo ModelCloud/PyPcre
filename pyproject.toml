@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyPcre"
-version = "0.2.5"
+version = "0.2.6"
 description = "Modern, GIL-friendly, Fast Python bindings for PCRE2 with auto caching and JIT of compiled patterns."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,8 +26,6 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
-  "Programming Language :: Python :: Free Threading",
-  "Programming Language :: Python :: Free Threading :: 3 - Stable",
   "Programming Language :: C",
   "Topic :: Software Development :: Libraries",
   "Topic :: Text Processing :: Linguistic"
