@@ -14,7 +14,6 @@ description = "Modern, GIL-friendly, Fast Python bindings for PCRE2 with auto ca
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
