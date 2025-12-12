@@ -9,12 +9,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyPcre"
-version = "0.2.6"
+version = "0.2.7"
 description = "Modern, GIL-friendly, Fast Python bindings for PCRE2 with auto caching and JIT of compiled patterns."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
