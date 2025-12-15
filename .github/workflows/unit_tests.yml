@@ -140,7 +140,6 @@ jobs:
               developer/gcc \
               developer/build/gnu-make \
               developer/build/pkg-config \
-              developer/build/cmake \
               developer/build/ninja \
               developer/versioning/git \
               web/curl \
@@ -156,7 +155,7 @@ jobs:
             python -V
             python -m venv venv
             source venv/bin/activate
-            pip install pip pytest tabulate regex setuptools build wheel -U
+            pip install pip cmake pytest tabulate regex setuptools build wheel -U
             pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
