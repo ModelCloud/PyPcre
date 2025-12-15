@@ -584,6 +584,8 @@ def subn(
 ) -> tuple[Any, int]:
     return compile(pattern, flags=flags).subn(repl, string, count=count)
 
+# add this function to bypass signatures unit test
+# re.template() is deprecated and removed since python 3.12
 def template(pattern, flags=0):
     import warnings
     warnings.warn("The re.template() function is deprecated "
