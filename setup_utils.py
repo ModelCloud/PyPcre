@@ -864,11 +864,6 @@ def _linux_multiarch_dirs() -> list[str]:
         "amd64": ["x86_64-linux-gnu"],
         "aarch64": ["aarch64-linux-gnu"],
         "arm64": ["aarch64-linux-gnu"],
-        "armv7l": ["arm-linux-gnueabihf"],
-        "armv6l": ["arm-linux-gnueabihf"],
-        "armv8l": ["arm-linux-gnueabihf"],
-        "i686": ["i386-linux-gnu"],
-        "i386": ["i386-linux-gnu"],
         "ppc64le": ["powerpc64le-linux-gnu"],
         "s390x": ["s390x-linux-gnu"],
     }
@@ -887,15 +882,26 @@ _KNOWN_MULTIARCH_TOKENS = {
     "s390x-linux-gnu",
 }
 
+_UNSUPPORTED_MULTIARCH_TOKENS = {
+    "i386-linux-gnu",
+    "i486-linux-gnu",
+    "i586-linux-gnu",
+    "i686-linux-gnu",
+    "arm-linux-gnueabihf",
+}
+
 
 def _host_multiarch_names() -> set[str]:
     return set(_linux_multiarch_dirs())
 
 
 def _path_matches_host_multiarch(path: str, host_multiarch: set[str]) -> bool:
+    lower = path.lower()
+    for token in _UNSUPPORTED_MULTIARCH_TOKENS:
+        if token in lower:
+            return False
     if not host_multiarch:
         return True
-    lower = path.lower()
     for token in _KNOWN_MULTIARCH_TOKENS:
         if token in lower and token not in host_multiarch:
             return False
@@ -951,9 +957,7 @@ def _platform_library_subdirs() -> list[str]:
             subdirs.append(f"lib/{multiarch}")
         default_multiarch_subdirs = [
             "lib/x86_64-linux-gnu",
-            "lib/i386-linux-gnu",
             "lib/aarch64-linux-gnu",
-            "lib/arm-linux-gnueabihf",
             "lib/powerpc64le-linux-gnu",
             "lib/s390x-linux-gnu",
         ]
