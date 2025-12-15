@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ] # macos-latest arm64, macos-13 intel
+        os: [ ubuntu-latest, macos-latest, windows-latest ] # macos-latest arm64, macos-13 intel
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - name: Checkout Codes
