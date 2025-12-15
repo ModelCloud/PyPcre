@@ -899,11 +899,13 @@ def _path_matches_host_multiarch(path: str, host_multiarch: set[str]) -> bool:
     lower = path.lower()
     for token in _UNSUPPORTED_MULTIARCH_TOKENS:
         if token in lower:
+            print(f"Skipping lib: {lower}")
             return False
     if not host_multiarch:
         return True
     for token in _KNOWN_MULTIARCH_TOKENS:
         if token in lower and token not in host_multiarch:
+            print(f"Skipping lib: {lower}")
             return False
     return True
 
