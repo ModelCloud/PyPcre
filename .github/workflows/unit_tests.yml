@@ -139,14 +139,12 @@ jobs:
             pkg install  \
               developer/gcc \
               developer/build/gnu-make \
-              developer/build/binutils \
               developer/build/pkg-config \
               developer/build/cmake \
               developer/build/ninja \
               developer/versioning/git \
               web/curl \
               library/security/openssl \
-              system/library/security/ca-certificates \
               library/zlib
 
           copyback: false
