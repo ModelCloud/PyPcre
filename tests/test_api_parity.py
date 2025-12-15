@@ -267,8 +267,11 @@ def test_stdlib_function_signatures_align_with_pcre():
         if not name.startswith("_") and inspect.isroutine(getattr(re, name))
     }
 
+    a = dir(re)
+    print(a)
     for name, std_callable in stdlib_functions.items():
         pcre_callable = getattr(pcre, name, None)
+        print(f"asserting helper: {name}")
         assert pcre_callable is not None, f"pcre is missing stdlib helper {name!r}"
         assert inspect.isroutine(pcre_callable), f"pcre.{name} should be a function"
 

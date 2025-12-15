@@ -37,6 +37,7 @@ from .pcre import (
     split,
     sub,
     subn,
+    template,
 )
 from .threads import configure_thread_pool, configure_threads, shutdown_thread_pool
 
@@ -124,6 +125,7 @@ __all__ = [
     "split",
     "sub",
     "subn",
+    "template",
     "shutdown_thread_pool",
     "error",
     "PatternError",

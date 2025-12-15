@@ -10,7 +10,7 @@ from __future__ import annotations
 import re as _std_re
 from collections.abc import Generator, Iterable
 try:
-    from re import _parser  # python 3.11+
+    from re import _parser, TEMPLATE  # python 3.11+
 except Exception:
     import sre_parse as _parser
 from typing import Any, List
@@ -584,6 +584,8 @@ def subn(
 ) -> tuple[Any, int]:
     return compile(pattern, flags=flags).subn(repl, string, count=count)
 
+def template(pattern, flags=0):
+    return compile(pattern, flags | TEMPLATE)
 
 _PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})
 
