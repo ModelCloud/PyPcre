@@ -861,6 +861,7 @@ def _linux_multiarch_dirs() -> list[str]:
     arch = platform.machine()
     mapping = {
         "x86_64": ["x86_64-linux-gnu"],
+        "amd64": ["x86_64-linux-gnu"],
         "aarch64": ["aarch64-linux-gnu"],
         "arm64": ["aarch64-linux-gnu"],
         "armv7l": ["arm-linux-gnueabihf"],
@@ -872,6 +873,42 @@ def _linux_multiarch_dirs() -> list[str]:
         "s390x": ["s390x-linux-gnu"],
     }
     return mapping.get(arch, [])
+
+
+_KNOWN_MULTIARCH_TOKENS = {
+    "x86_64-linux-gnu",
+    "i386-linux-gnu",
+    "i486-linux-gnu",
+    "i586-linux-gnu",
+    "i686-linux-gnu",
+    "aarch64-linux-gnu",
+    "arm-linux-gnueabihf",
+    "powerpc64le-linux-gnu",
+    "s390x-linux-gnu",
+}
+
+
+def _host_multiarch_names() -> set[str]:
+    return set(_linux_multiarch_dirs())
+
+
+def _path_matches_host_multiarch(path: str, host_multiarch: set[str]) -> bool:
+    if not host_multiarch:
+        return True
+    lower = path.lower()
+    for token in _KNOWN_MULTIARCH_TOKENS:
+        if token in lower and token not in host_multiarch:
+            return False
+    return True
+
+
+def _filter_incompatible_multiarch(paths: Iterable[str]) -> list[str]:
+    host_multiarch = _host_multiarch_names()
+    filtered: list[str] = []
+    for path in _deduplicate_preserve_order(list(paths)):
+        if _path_matches_host_multiarch(path, host_multiarch):
+            filtered.append(path)
+    return filtered
 
 
 def _platform_prefixes() -> list[Path]:
@@ -909,14 +946,23 @@ def _platform_library_subdirs() -> list[str]:
     subdirs = ["lib", "lib64", "lib32", "lib/pcre2"]
 
     if sys.platform.startswith("linux"):
-        for multiarch in _linux_multiarch_dirs():
+        host_multiarch = _host_multiarch_names()
+        for multiarch in host_multiarch:
             subdirs.append(f"lib/{multiarch}")
-        subdirs.extend([
+        default_multiarch_subdirs = [
             "lib/x86_64-linux-gnu",
             "lib/i386-linux-gnu",
             "lib/aarch64-linux-gnu",
             "lib/arm-linux-gnueabihf",
-        ])
+            "lib/powerpc64le-linux-gnu",
+            "lib/s390x-linux-gnu",
+        ]
+        if host_multiarch:
+            default_multiarch_subdirs = [
+                entry for entry in default_multiarch_subdirs
+                if entry.split("/", 1)[1] in host_multiarch
+            ]
+        subdirs.extend(default_multiarch_subdirs)
     elif _is_solaris_platform():
         subdirs.extend(["lib/64", "lib/amd64"])
 
@@ -1149,6 +1195,8 @@ def _find_library_with_ldconfig() -> list[str]:
     output = _run_command(["ldconfig", "-p"])
     if not output:
         return []
+    host_multiarch = _host_multiarch_names()
+    library_files: list[str] = []
     for line in output.splitlines():
         if "libpcre2-8.so" not in line:
             continue
@@ -1156,9 +1204,11 @@ def _find_library_with_ldconfig() -> list[str]:
         if len(parts) != 2:
             continue
         path = Path(parts[1].strip())
+        if not _path_matches_host_multiarch(str(path), host_multiarch):
+            continue
         if path.exists():
-            return [str(path)]
-    return []
+            library_files.append(str(path))
+    return library_files
 
 
 def _find_library_with_brew() -> list[str]:
@@ -1191,9 +1241,13 @@ def _discover_library_dirs() -> list[str]:
     prefixes = _platform_prefixes()
     candidates: list[Path] = []
     subdirs = _platform_library_subdirs()
+    host_multiarch = _host_multiarch_names()
     for prefix in prefixes:
         for subdir in subdirs:
-            candidates.append(prefix / subdir)
+            candidate = prefix / subdir
+            if not _path_matches_host_multiarch(str(candidate), host_multiarch):
+                continue
+            candidates.append(candidate)
     library_dirs: list[str] = []
     _extend_with_existing(library_dirs, candidates, _library_exists)
     return library_dirs
@@ -1235,6 +1289,7 @@ ensure_python_headers = _ensure_python_headers
 is_truthy_env = _is_truthy_env
 is_windows_platform = _is_windows_platform
 is_solaris_platform = _is_solaris_platform
+filter_incompatible_multiarch = _filter_incompatible_multiarch
 
 
 __all__ = [
@@ -1260,4 +1315,5 @@ __all__ = [
     "is_truthy_env",
     "is_windows_platform",
     "is_solaris_platform",
+    "filter_incompatible_multiarch",
 ]

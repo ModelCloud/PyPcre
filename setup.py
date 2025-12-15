@@ -29,6 +29,7 @@ from setup_utils import (
     extend_env_paths,
     extend_unique,
     ensure_python_headers,
+    filter_incompatible_multiarch,
     find_library_with_brew,
     find_library_with_ldconfig,
     find_library_with_pkg_config,
@@ -185,6 +186,9 @@ def collect_build_config() -> dict[str, list[str] | list[tuple[str, str | None]]
 
     for path in find_library_with_brew():
         extend_unique(library_files, path)
+
+    library_dirs = filter_incompatible_multiarch(library_dirs)
+    library_files = filter_incompatible_multiarch(library_files)
 
     env_cflags = os.environ.get("PYPCRE_CFLAGS")
     if env_cflags:
