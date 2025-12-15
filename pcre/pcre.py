@@ -585,6 +585,12 @@ def subn(
     return compile(pattern, flags=flags).subn(repl, string, count=count)
 
 def template(pattern, flags=0):
+    import warnings
+    warnings.warn("The re.template() function is deprecated "
+                  "as it is an undocumented function "
+                  "without an obvious purpose. "
+                  "Use re.compile() instead.",
+                  DeprecationWarning)
     return compile(pattern, flags | TEMPLATE)
 
 _PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})

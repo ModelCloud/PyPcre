@@ -280,3 +280,36 @@ def test_stdlib_function_signatures_align_with_pcre():
         assert (
             pcre_sig == std_sig
         ), f"Signature mismatch for {name!r}: pcre{pcre_sig!r} != re{std_sig!r}"
+
+def test_template_equivalent_to_compile_with_template_flag():
+    pat1 = pcre.template("abc")
+    pat2 = pcre.compile("abc", re.TEMPLATE)
+
+    assert pat1.flags & pcre.TEMPLATE
+    assert pat1.flags == pat2.flags
+
+@pytest.mark.parametrize("pattern,text,should_match", [
+    ("a+b", "a+b", True),
+    ("a+b", "ab",  False),
+    (".*",  ".*",  True),
+    (".*",  "abc", False),
+])
+def test_template_behavior(pattern, text, should_match):
+    re_pat   = re.template(pattern)
+    pcre_pat = pcre.template(pattern)
+
+    assert bool(re_pat.search(text)) == should_match
+    assert bool(pcre_pat.search(text)) == should_match
+
+CASES = [
+    ("a+b", ["a+b", "ab"]),
+    ("(a)", ["(a)", "a"]),
+    ("[a-z]", ["[a-z]", "b"]),
+]
+def test_template_blackbox():
+    for pat, texts in CASES:
+        re_pat = re.template(pat)
+        pc_pat = pcre.template(pat)
+
+        for text in texts:
+            assert bool(re_pat.search(text)) == bool(pc_pat.search(text))
