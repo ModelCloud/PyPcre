@@ -20,6 +20,7 @@ Modern `nogil` Python bindings for the Pcre2 library with `stdlib.re` api compat
 
 
 ## Latest News
+* 12/15/2025 [0.2.8](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.8): Fixed multi-arch Linux os compatibility where both x86_64 and i386 libs of pcre2 are installed. 
 * 10/20/2025 [0.2.4](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.4): Removed dependency on system having python3-dev packge. python.h will be optimistically downloaded from python.org when needed.
 * 10/12/2025 [0.2.3](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.3): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance for all api. Expanded ci testing coverage. FreeBSD, Solaris, and Windows compatibility validated.
 * 10/09/2025 [0.1.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.1.0): 🎉 First release. Thread safe, auto JIT, auto pattern caching and optimistic linking to system library for fast install.
