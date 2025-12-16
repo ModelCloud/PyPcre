@@ -146,6 +146,10 @@ jobs:
               library/security/openssl \
               library/zlib
 
+            pkgadd -d http://get.opencsw.org/now
+            /opt/csw/bin/pkgutil -U
+            /opt/csw/bin/pkgutil -y -i cmake
+
           copyback: false
           run: |
             export LDFLAGS="-L/usr/lib/amd64 -L/usr/lib/64"
@@ -155,7 +159,7 @@ jobs:
             python -V
             python -m venv venv
             source venv/bin/activate
-            pip install pip cmake pytest tabulate regex setuptools build wheel -U
+            pip install pip pytest tabulate regex setuptools build wheel -U
             pip install -v -e .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
