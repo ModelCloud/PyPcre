@@ -146,7 +146,7 @@ jobs:
               library/security/openssl \
               library/zlib
 
-            export CMAKE_VER=4.2.1
+            export CMAKE_VER=4.2.0
             PREFIX="$HOME/opt/cmake-$CMAKE_VER"
             
             curl -L https://github.com/Kitware/CMake/releases/download/v$CMAKE_VER/cmake-$CMAKE_VER-sunos-x86_64.sh \
@@ -161,7 +161,7 @@ jobs:
             export CFLAGS="-m64"
             export LD_LIBRARY_PATH=/usr/lib/amd64:$LD_LIBRARY_PATH
             
-            export PATH="$HOME/opt/cmake-4.2.1/bin:$PATH"
+            export PATH="$HOME/opt/cmake-4.2.0/bin:$PATH"
             
             echo "which cmake"
             which cmake
