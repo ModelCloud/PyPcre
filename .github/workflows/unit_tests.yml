@@ -146,9 +146,11 @@ jobs:
               library/security/openssl \
               library/zlib
 
-            exportCMAKE_VER=4.2.1
+            export CMAKE_VER=4.2.1
             PREFIX="$HOME/opt/cmake-$CMAKE_VER"
             
+            curl -L https://github.com/Kitware/CMake/releases/download/v$CMAKE_VER/cmake-$CMAKE_VER-sunos-x86_64.sh \
+            -o /tmp/cmake.sh && \
             mkdir -p "$PREFIX" \
             && chmod +x /tmp/cmake.sh \
             && /tmp/cmake.sh --skip-license --prefix="$PREFIX"
