@@ -164,6 +164,7 @@ jobs:
             export LD_LIBRARY_PATH=/usr/lib/amd64:$LD_LIBRARY_PATH
             
             export PATH="$HOME/opt/cmake-4.2.0/bin:$PATH"
+            export CMAKE_TLS_VERIFY=0
             
             echo "which cmake"
             which cmake
