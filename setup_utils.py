@@ -9,6 +9,7 @@ import os
 import platform
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import sysconfig
@@ -870,25 +871,116 @@ def _linux_multiarch_dirs() -> list[str]:
     return mapping.get(arch, [])
 
 
-_KNOWN_MULTIARCH_TOKENS = {
-    "x86_64-linux-gnu",
-    "i386-linux-gnu",
-    "i486-linux-gnu",
-    "i586-linux-gnu",
-    "i686-linux-gnu",
-    "aarch64-linux-gnu",
-    "arm-linux-gnueabihf",
-    "powerpc64le-linux-gnu",
-    "s390x-linux-gnu",
-}
+def _host_pointer_width() -> int:
+    return struct.calcsize("P") * 8
 
-_UNSUPPORTED_MULTIARCH_TOKENS = {
-    "i386-linux-gnu",
-    "i486-linux-gnu",
-    "i586-linux-gnu",
-    "i686-linux-gnu",
-    "arm-linux-gnueabihf",
-}
+
+_MACHO_MAGIC_32 = {0xFEEDFACE, 0xCEFAEDFE}
+_MACHO_MAGIC_64 = {0xFEEDFACF, 0xCFFAEDFE}
+_MACHO_FAT_MAGIC = {0xCAFEBABE, 0xBEBAFECA}
+_MACHO_FAT_MAGIC_64 = {0xCAFEBABF, 0xBFBAFECA}
+_MACHO_ABI64_FLAG = 0x01000000
+_MACHO_MAGIC_BYTES = {struct.pack(">I", value) for value in (_MACHO_MAGIC_32 | _MACHO_MAGIC_64 | _MACHO_FAT_MAGIC | _MACHO_FAT_MAGIC_64)}
+
+
+def _elf_class_bits(path: Path) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(5)
+    except OSError:
+        return None
+    if len(header) < 5 or header[:4] != b"\x7fELF":
+        return None
+    if header[4] == 1:
+        return 32
+    if header[4] == 2:
+        return 64
+    return None
+
+
+def _macho_class_bits(path: Path, host_bits: int) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(8)
+            if len(header) < 4:
+                return None
+            magic = struct.unpack(">I", header[:4])[0]
+            if magic in _MACHO_MAGIC_32:
+                return 32
+            if magic in _MACHO_MAGIC_64:
+                return 64
+            if magic not in _MACHO_FAT_MAGIC and magic not in _MACHO_FAT_MAGIC_64:
+                return None
+            big_endian = magic in (0xCAFEBABE, 0xCAFEBABF)
+            is_fat64 = magic in _MACHO_FAT_MAGIC_64
+            endian = ">" if big_endian else "<"
+            nfat_arch = struct.unpack(f"{endian}I", header[4:8])[0]
+            arch_entry_size = 24 if is_fat64 else 20
+            arch_data = handle.read(nfat_arch * arch_entry_size)
+            if len(arch_data) < nfat_arch * arch_entry_size:
+                return None
+            for index in range(nfat_arch):
+                offset = index * arch_entry_size
+                cputype = struct.unpack(f"{endian}I", arch_data[offset : offset + 4])[0]
+                bits = 64 if (cputype & _MACHO_ABI64_FLAG) else 32
+                if bits == host_bits:
+                    return host_bits
+            if nfat_arch > 0:
+                first_type = struct.unpack(f"{endian}I", arch_data[0:4])[0]
+                return 64 if (first_type & _MACHO_ABI64_FLAG) else 32
+            return None
+    except OSError:
+        return None
+
+
+def _pe_class_bits(path: Path) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            mz_header = handle.read(64)
+            if len(mz_header) < 64 or not mz_header.startswith(b"MZ"):
+                return None
+            e_lfanew = struct.unpack("<I", mz_header[0x3C:0x40])[0]
+            handle.seek(e_lfanew)
+            signature = handle.read(4)
+            if signature != b"PE\x00\x00":
+                return None
+            file_header = handle.read(20)
+            if len(file_header) < 20:
+                return None
+            optional_magic = handle.read(2)
+            if len(optional_magic) < 2:
+                return None
+            magic_value = struct.unpack("<H", optional_magic)[0]
+            if magic_value == 0x20B:
+                return 64
+            if magic_value == 0x10B:
+                return 32
+            return None
+    except OSError:
+        return None
+
+
+def _binary_matches_host(path: Path) -> bool:
+    host_bits = _host_pointer_width()
+    try:
+        with path.open("rb") as handle:
+            magic = handle.read(4)
+    except OSError:
+        return True
+    if magic.startswith(b"\x7fELF"):
+        bits = _elf_class_bits(path)
+    elif magic in _MACHO_MAGIC_BYTES:
+        bits = _macho_class_bits(path, host_bits)
+    elif magic.startswith(b"MZ"):
+        bits = _pe_class_bits(path)
+    else:
+        bits = None
+    if bits is None:
+        return True
+    if bits != host_bits:
+        print(f"Skipping lib (binary class mismatch): {path}")
+        return False
+    return True
 
 
 def _host_multiarch_names() -> set[str]:
@@ -896,17 +988,17 @@ def _host_multiarch_names() -> set[str]:
 
 
 def _path_matches_host_multiarch(path: str, host_multiarch: set[str]) -> bool:
-    lower = path.lower()
-    for token in _UNSUPPORTED_MULTIARCH_TOKENS:
-        if token in lower:
-            print(f"Skipping lib: {lower}")
-            return False
-    if not host_multiarch:
-        return True
-    for token in _KNOWN_MULTIARCH_TOKENS:
-        if token in lower and token not in host_multiarch:
-            print(f"Skipping lib: {lower}")
-            return False
+    _ = host_multiarch  # retained for signature compatibility
+    path_obj = Path(path)
+    if path_obj.is_file():
+        return _binary_matches_host(path_obj)
+    if path_obj.is_dir():
+        try:
+            candidate = _locate_library_file(path_obj)
+        except RuntimeError:
+            return True
+        if candidate is not None:
+            return _binary_matches_host(candidate)
     return True
 
 
