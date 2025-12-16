@@ -146,16 +146,18 @@ jobs:
               library/security/openssl \
               library/zlib
 
-            pkgadd -d http://get.opencsw.org/now
-            /opt/csw/bin/pkgutil -U
-            /opt/csw/bin/pkgutil -y -i cmake
+            curl -L https://github.com/Kitware/CMake/releases/download/v4.2.1/cmake-4.2.1-sunos-x86_64.sh \
+            -o /tmp/cmake.sh \
+            && chmod +x /tmp/cmake.sh \
+            && /tmp/cmake.sh --skip-license --prefix=/opt/cmake-4.2.1
 
           copyback: false
           run: |
             export LDFLAGS="-L/usr/lib/amd64 -L/usr/lib/64"
             export CFLAGS="-m64"
             export LD_LIBRARY_PATH=/usr/lib/amd64:$LD_LIBRARY_PATH
-            export PATH=/opt/csw/bin:$PATH
+            
+            export PATH=/opt/cmake-4.2.1/bin:$PATH
             
             echo "which cmake"
             which cmake
