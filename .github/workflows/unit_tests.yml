@@ -156,6 +156,11 @@ jobs:
             export CFLAGS="-m64"
             export LD_LIBRARY_PATH=/usr/lib/amd64:$LD_LIBRARY_PATH
             export PATH=/opt/csw/bin:$PATH
+            
+            echo "which cmake"
+            which cmake
+            echo "cmake --version"
+            cmake --version
          
             python -V
             python -m venv venv
