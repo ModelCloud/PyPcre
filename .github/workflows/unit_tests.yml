@@ -136,6 +136,8 @@ jobs:
         uses: vmactions/solaris-vm@v1
         with:
           prepare: |
+            pkg refresh --full
+            pkg update ca-certificates
             pkg install  \
               developer/gcc \
               developer/build/gnu-make \
