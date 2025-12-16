@@ -146,10 +146,12 @@ jobs:
               library/security/openssl \
               library/zlib
 
-            curl -L https://github.com/Kitware/CMake/releases/download/v4.2.1/cmake-4.2.1-sunos-x86_64.sh \
-            -o /tmp/cmake.sh \
+            exportCMAKE_VER=4.2.1
+            PREFIX="$HOME/opt/cmake-$CMAKE_VER"
+            
+            mkdir -p "$PREFIX" \
             && chmod +x /tmp/cmake.sh \
-            && /tmp/cmake.sh --skip-license --prefix=/opt/cmake-4.2.1
+            && /tmp/cmake.sh --skip-license --prefix="$PREFIX"
 
           copyback: false
           run: |
@@ -157,7 +159,7 @@ jobs:
             export CFLAGS="-m64"
             export LD_LIBRARY_PATH=/usr/lib/amd64:$LD_LIBRARY_PATH
             
-            export PATH=/opt/cmake-4.2.1/bin:$PATH
+            export PATH="$HOME/opt/cmake-4.2.1/bin:$PATH"
             
             echo "which cmake"
             which cmake
