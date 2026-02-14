@@ -568,8 +568,9 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             ]
             # On Windows, force MSVC and the /MD runtime. Never let CMake pick MinGW.
             if _is_windows_platform():
+                vs_gen = os.environ.get("CMAKE_GENERATOR", "Visual Studio 18 2022")
                 cmake_args += [
-                    "-G", "Visual Studio 17 2022",
+                    "-G", vs_gen,
                     "-A", "x64",
                     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
                 ]
