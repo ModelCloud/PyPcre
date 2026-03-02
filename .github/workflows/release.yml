@@ -106,6 +106,13 @@ jobs:
 
       - name: Compile
         run: |
+          echo "--------"
+          ls -ahl
+          echo "--------"
+          ls -ahl pcre_ext
+          echo "--------"
+          ls -ahl pcre_ext/pcre2-10.46
+          echo "--------"
           python -V
           python setup.py bdist_wheel
 
