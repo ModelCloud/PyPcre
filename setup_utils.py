@@ -457,6 +457,39 @@ def _clean_previous_build(destination: Path, build_dir: Path, build_roots: list[
                     continue
 
 
+def _detect_vs_generator():
+    vswhere = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+    if not os.path.exists(vswhere):
+        return None
+
+    result = subprocess.run(
+        [
+            vswhere,
+            "-latest",
+            "-products", "*",
+            "-requires", "Microsoft.Component.MSBuild",
+            "-format", "json"
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        return None
+
+    data = json.loads(result.stdout)
+    if not data:
+        return None
+
+    version = data[0]["catalog"]["productLineVersion"]
+
+    if version == "2022":
+        return "Visual Studio 17 2022"
+    elif version == "2019":
+        return "Visual Studio 16 2019"
+
+    return None
+
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if (_is_windows_platform() and not _is_wsl_environment()) or _is_solaris_platform():
         os.environ["PYPCRE_BUILD_FROM_SOURCE"] = "1"
@@ -566,7 +599,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             ]
             # On Windows, force MSVC and the /MD runtime. Never let CMake pick MinGW.
             if _is_windows_platform():
-                vs_gen = os.environ.get("CMAKE_GENERATOR", "Visual Studio 18 2022")
+                vs_gen = os.environ.get("CMAKE_GENERATOR", _detect_vs_generator())
                 cmake_args += [
                     "-G", vs_gen,
                     "-A", "x64",
