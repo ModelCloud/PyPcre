@@ -31,6 +31,7 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v6
         with:
+          submodules: recursive
           ref: ${{ env.ref }}
 
       - name: List files
@@ -74,6 +75,10 @@ jobs:
         with:
           python-version: 3.13
           cache: 'pip'
+
+      - name: Add msbuild to PATH
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@v2
 
       - name: install
         run: |
