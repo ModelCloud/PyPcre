@@ -108,6 +108,7 @@ jobs:
           python setup.py bdist_wheel
 
       - name: Test install
+        shell: bash
         run: |
           python -V
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
