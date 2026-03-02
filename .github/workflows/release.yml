@@ -79,6 +79,11 @@ jobs:
         py: [ '3.10', '3.11', '3.12', '3.13', '3.14' ]
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Clean dir
+        run: |
+          ls -ahl
+          rm -rf *
+
       - name: Checkout Codes
         uses: actions/checkout@v6
         with:
