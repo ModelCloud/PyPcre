@@ -112,6 +112,7 @@ jobs:
           ls -ahl pcre_ext
           echo "--------"
           ls -ahl pcre_ext/pcre2-10.46
+          rm -rf pcre_ext/pcre2-10.46/.git
           echo "--------"
           python -V
           python setup.py bdist_wheel
