@@ -499,7 +499,7 @@ def _detect_vs_generator():
     if result.returncode != 0:
         return None
 
-    data = json.loads(r.stdout or "[]")
+    data = json.loads(result.stdout or "[]")
     if not data:
         return None
 
@@ -512,6 +512,7 @@ def _detect_vs_generator():
         "15": "2017",
         "16": "2019",
         "17": "2022",
+        "18": "2026",
     }
 
     year = year_map.get(major)
