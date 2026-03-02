@@ -20,6 +20,7 @@ Modern `nogil` Python bindings for the Pcre2 library with `stdlib.re` api compat
 
 
 ## Latest News
+* 03/02/2026 [0.2.11](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.11): Auto-detect `Visual Studio` for `Windows` env during install/compile.
 * 02/24/2026 [0.2.10](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.10): Allow VisualStudio (VS) compiler version check override via env var. 
 * 12/15/2025 [0.2.8](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.8): Fixed multi-arch Linux os compatibility where both x86_64 and i386 libs of pcre2 are installed. 
 * 10/20/2025 [0.2.4](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.4): Removed dependency on system having python3-dev packge. python.h will be optimistically downloaded from python.org when needed.
