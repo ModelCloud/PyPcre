@@ -63,6 +63,12 @@ jobs:
           python -m build --sdist
           twine check dist/*
 
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sources
+          path: dist/*.tar.gz
+
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         env:
@@ -112,3 +118,8 @@ jobs:
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
           twine check dist/$whl
 
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WHL_NAME }}
+          path: dist/${{ env.WHL_NAME }}

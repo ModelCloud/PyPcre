@@ -73,7 +73,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: 3.13
+          python-version: 3.14
           cache: 'pip'
 
       - name: Add msbuild to PATH
@@ -86,7 +86,9 @@ jobs:
           pip install -v -e .
 
       - name: test ${{ matrix.test_script }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+        run: |
+          mkdir -p artifacts
+          pytest --durations=0 tests/${{ matrix.test_script }}.py --junitxml=artifacts/${{ runner.os }}-${{ matrix.test_script }}.xml
 
 
   freebsd:
