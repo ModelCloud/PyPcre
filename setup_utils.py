@@ -465,17 +465,10 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
         return ([], [], [])
 
     destination = _get_pcre_ext_dir() / _get_repo_tag()
-    git_dir = destination / ".git"
+    sub_git_file = destination / ".git"  # on Windows , .git is a file containing "gitdir: <actual_git_dir>"
     repo_already_present = destination.exists()
 
-    if destination.exists() and not git_dir.is_dir():
-        print(f"[DEBUG] destination: {destination}")
-        print(f"[DEBUG] destination.exists(): {destination.exists()}")
-        print(f"[DEBUG] git_dir: {git_dir}")
-        print(f"[DEBUG] git_dir.exists(): {git_dir.exists()}")
-        print(f"[DEBUG] git_dir.is_dir(): {git_dir.is_dir()}")
-        if destination.exists():
-            print(f"[DEBUG] destination contents: {list(destination.iterdir())}")
+    if destination.exists() and not sub_git_file.exists():
         raise RuntimeError(
             f"Existing directory {destination} is not a git checkout; remove or rename it before building"
         )
