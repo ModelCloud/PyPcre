@@ -20,11 +20,9 @@ import urllib.request
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-
 from setuptools._distutils.ccompiler import CCompiler, new_compiler
 from setuptools._distutils.errors import CCompilerError, DistutilsExecError
 from setuptools._distutils.sysconfig import customize_compiler
-
 
 _PCRE_EXT_DIR: Path | None = None
 _PCRE2_REPO_URL: str | None = None
@@ -471,6 +469,13 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     repo_already_present = destination.exists()
 
     if destination.exists() and not git_dir.is_dir():
+        print(f"[DEBUG] destination: {destination}")
+        print(f"[DEBUG] destination.exists(): {destination.exists()}")
+        print(f"[DEBUG] git_dir: {git_dir}")
+        print(f"[DEBUG] git_dir.exists(): {git_dir.exists()}")
+        print(f"[DEBUG] git_dir.is_dir(): {git_dir.is_dir()}")
+        if destination.exists():
+            print(f"[DEBUG] destination contents: {list(destination.iterdir())}")
         raise RuntimeError(
             f"Existing directory {destination} is not a git checkout; remove or rename it before building"
         )
