@@ -499,11 +499,27 @@ def _detect_vs_generator():
     if result.returncode != 0:
         return None
 
-    data = json.loads(result.stdout or "[]")
+    data = json.loads(r.stdout or "[]")
     if not data:
         return None
 
-    return data[0].get("installationPath")
+    info = data[0]
+
+    ver = info.get("installationVersion", "")
+    major = ver.split(".")[0]
+
+    year_map = {
+        "15": "2017",
+        "16": "2019",
+        "17": "2022",
+    }
+
+    year = year_map.get(major)
+    if year:
+        return f"Visual Studio {major} {year}"
+
+    year = 2015 + (int(major) - 14) * 2  # VS2015 -> 14
+    return f"Visual Studio {major} {year}"
 
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
