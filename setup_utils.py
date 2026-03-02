@@ -492,7 +492,8 @@ def _detect_vs_generator():
             "-format", "json"
         ],
         capture_output=True,
-        text=True
+        text=True,
+        check=False
     )
 
     if result.returncode != 0:
