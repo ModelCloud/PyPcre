@@ -1,9 +1,5 @@
 name: Release
 
-defaults:
-  run:
-    shell: bash -le {0}
-
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
   cancel-in-progress: true

@@ -1,9 +1,5 @@
 name: Unit Tests
 
-defaults:
-  run:
-    shell: bash -e {0}
-
 on:
   push:
   repository_dispatch:
