@@ -29,10 +29,11 @@ _PCRE_EXT_DIR: Path | None = None
 _PCRE2_REPO_URL: str | None = None
 _PCRE2_TAG: str | None = None
 
-
 _LIB_EXTENSIONS: tuple[str, ...] = ()
 _LIBRARY_BASENAME: str | None = None
 _LIBRARY_SEARCH_PATTERNS: tuple[str, ...] = ()
+
+VS_DOWNLOAD_URL = "https://aka.ms/vs"
 
 
 def _ensure_macos_archflags() -> None:
@@ -50,13 +51,13 @@ def _ensure_macos_archflags() -> None:
 
 
 def configure_environment(
-    *,
-    pcre_ext_dir: Path,
-    repo_url: str,
-    repo_tag: str,
-    lib_extensions: Iterable[str],
-    library_basename: str,
-    library_search_patterns: Iterable[str],
+        *,
+        pcre_ext_dir: Path,
+        repo_url: str,
+        repo_tag: str,
+        lib_extensions: Iterable[str],
+        library_basename: str,
+        library_search_patterns: Iterable[str],
 ) -> None:
     """Inject project-specific constants from setup.py."""
 
@@ -458,9 +459,28 @@ def _clean_previous_build(destination: Path, build_dir: Path, build_roots: list[
                     continue
 
 
+def _find_vswhere():
+    path = shutil.which("vswhere.exe")
+    if path:
+        return path
+
+    candidates = [
+        r"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe",
+        r"%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe",
+        r"%ProgramData%\Microsoft\VisualStudio\Installer\vswhere.exe",
+    ]
+
+    for p in candidates:
+        full_path = os.path.expandvars(p)
+        if os.path.isfile(full_path):
+            return full_path
+
+    return None
+
+
 def _detect_vs_generator():
-    vswhere = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-    if not os.path.exists(vswhere):
+    vswhere = _find_vswhere()
+    if not vswhere:
         return None
 
     result = subprocess.run(
@@ -490,6 +510,7 @@ def _detect_vs_generator():
         return "Visual Studio 16 2019"
 
     return None
+
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
     if (_is_windows_platform() and not _is_wsl_environment()) or _is_solaris_platform():
@@ -596,11 +617,17 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                 "-DPCRE2_BUILD_TESTS=OFF",
                 "-DPCRE2_BUILD_PCRE2GREP=OFF",
                 "-DPCRE2_BUILD_PCRE2TEST=OFF",
-                "-DBUILD_SHARED_LIBS=OFF",   # build a static lib
+                "-DBUILD_SHARED_LIBS=OFF",  # build a static lib
             ]
             # On Windows, force MSVC and the /MD runtime. Never let CMake pick MinGW.
             if _is_windows_platform():
                 vs_gen = os.environ.get("CMAKE_GENERATOR", _detect_vs_generator())
+                if not vs_gen:
+                    raise RuntimeError(
+                        "Visual Studio not found.\n"
+                        "Please install Visual Studio Build Tools:\n"
+                        f"{VS_DOWNLOAD_URL}"
+                    )
                 cmake_args += [
                     "-G", vs_gen,
                     "-A", "x64",
@@ -801,7 +828,7 @@ def _should_disable_native_flags_for_macos(compiler: CCompiler | None) -> bool:
 
 
 def _compiler_supports_flags(
-    flags: Iterable[str], *, code: str | None = None
+        flags: Iterable[str], *, code: str | None = None
 ) -> bool:
     normalized = tuple(str(flag) for flag in flags if flag)
     source_code = code or "int main(void) { return 0; }\n"
@@ -861,7 +888,7 @@ def _augment_compile_flags(flags: list[str]) -> None:
         ("-mtune=native", True),
         ("-fomit-frame-pointer", False),
         ("-funroll-loops", False),
-        #("-falign-loops=32", False),
+        # ("-falign-loops=32", False),
     ]
 
     seen = set(flags)
@@ -954,7 +981,7 @@ def _macho_class_bits(path: Path, host_bits: int) -> int | None:
                 return None
             for index in range(nfat_arch):
                 offset = index * arch_entry_size
-                cputype = struct.unpack(f"{endian}I", arch_data[offset : offset + 4])[0]
+                cputype = struct.unpack(f"{endian}I", arch_data[offset: offset + 4])[0]
                 bits = 64 if (cputype & _MACHO_ABI64_FLAG) else 32
                 if bits == host_bits:
                     return host_bits
@@ -1112,9 +1139,9 @@ def _extend_unique(target: list[str], value: str) -> None:
 
 
 def _extend_with_existing(
-    target: list[str],
-    candidates: list[Path],
-    predicate: Callable[[Path], bool] | None = None,
+        target: list[str],
+        candidates: list[Path],
+        predicate: Callable[[Path], bool] | None = None,
 ) -> None:
     for candidate in candidates:
         if not candidate.is_dir():
@@ -1132,7 +1159,6 @@ def _extend_env_paths(target: list[str], env_var: str) -> None:
         candidate = raw_path.strip()
         if candidate:
             _extend_unique(target, candidate)
-
 
 
 def _python_include_candidates() -> list[Path]:
@@ -1421,7 +1447,6 @@ is_truthy_env = _is_truthy_env
 is_windows_platform = _is_windows_platform
 is_solaris_platform = _is_solaris_platform
 filter_incompatible_multiarch = _filter_incompatible_multiarch
-
 
 __all__ = [
     "configure_environment",
