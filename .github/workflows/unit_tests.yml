@@ -1,9 +1,5 @@
 name: Unit Tests
 
-defaults:
-  run:
-    shell: bash -e {0}
-
 on:
   push:
   repository_dispatch:
@@ -31,6 +27,7 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v6
         with:
+          submodules: recursive
           ref: ${{ env.ref }}
 
       - name: List files
@@ -72,8 +69,12 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: 3.13
+          python-version: 3.14
           cache: 'pip'
+
+      - name: Add msbuild to PATH
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@v2
 
       - name: install
         run: |
@@ -81,7 +82,9 @@ jobs:
           pip install -v -e .
 
       - name: test ${{ matrix.test_script }}
-        run: pytest --durations=0 tests/${{ matrix.test_script }}.py
+        run: |
+          mkdir -p artifacts
+          pytest --durations=0 tests/${{ matrix.test_script }}.py --junitxml=artifacts/${{ runner.os }}-${{ matrix.test_script }}.xml
 
 
   freebsd:

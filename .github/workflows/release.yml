@@ -1,9 +1,5 @@
 name: Release
 
-defaults:
-  run:
-    shell: bash -le {0}
-
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-release
   cancel-in-progress: true
@@ -63,6 +59,12 @@ jobs:
           python -m build --sdist
           twine check dist/*
 
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sources
+          path: dist/*.tar.gz
+
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         env:
@@ -75,13 +77,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, macos-13, windows-latest ]
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
         py: [ '3.10', '3.11', '3.12', '3.13', '3.14' ]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
         with:
+          submodules: recursive
           ref: ${{ env.ref }}
 
       - uses: actions/setup-python@v6
@@ -89,8 +92,13 @@ jobs:
           python-version: ${{ matrix.py }}
           cache: 'pip'
 
+      - name: Add msbuild to PATH
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@v2
+
       - name: Install requirements
         run:  |
+          which python
           python -V
           pip install build setuptools twine packaging -U
 
@@ -100,10 +108,15 @@ jobs:
           python setup.py bdist_wheel
 
       - name: Test install
+        shell: bash
         run: |
           python -V
-          ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
           twine check dist/$whl
 
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WHL_NAME }}
+          path: dist/${{ env.WHL_NAME }}
