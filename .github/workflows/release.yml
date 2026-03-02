@@ -89,6 +89,10 @@ jobs:
           python-version: ${{ matrix.py }}
           cache: 'pip'
 
+      - name: Add msbuild to PATH
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@v2
+
       - name: Install requirements
         run:  |
           python -V
