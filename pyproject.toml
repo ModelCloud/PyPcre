@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyPcre"
-version = "0.2.10"
+version = "0.2.11"
 description = "Modern, GIL-friendly, Fast Python bindings for PCRE2 with auto caching and JIT of compiled patterns."
 readme = "README.md"
 requires-python = ">=3.9"
