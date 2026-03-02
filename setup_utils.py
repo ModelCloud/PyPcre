@@ -508,19 +508,21 @@ def _detect_vs_generator():
     ver = info.get("installationVersion", "")
     major = ver.split(".")[0]
 
-    year_map = {
-        "15": "2017",
-        "16": "2019",
-        "17": "2022",
-        "18": "2026",
-    }
+    year = info.get("catalog", {}).get("productLineVersion")
 
-    year = year_map.get(major)
+    if not year:
+        year_map = {
+            "15": "2017",
+            "16": "2019",
+            "17": "2022",
+            "18": "2026",
+        }
+        year = year_map.get(major)
+
     if year:
         return f"Visual Studio {major} {year}"
 
-    year = 2015 + (int(major) - 14) * 2  # VS2015 -> 14
-    return f"Visual Studio {major} {year}"
+    return f"Visual Studio {major}"
 
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
