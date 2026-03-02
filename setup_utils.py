@@ -498,18 +498,11 @@ def _detect_vs_generator():
     if result.returncode != 0:
         return None
 
-    data = json.loads(result.stdout)
+    data = json.loads(result.stdout or "[]")
     if not data:
         return None
 
-    version = data[0]["catalog"]["productLineVersion"]
-
-    if version == "2022":
-        return "Visual Studio 17 2022"
-    elif version == "2019":
-        return "Visual Studio 16 2019"
-
-    return None
+    return data[0].get("installationPath")
 
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
