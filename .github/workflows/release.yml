@@ -60,7 +60,7 @@ jobs:
           twine check dist/*
 
       - name: Upload source artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sources
           path: dist/*.tar.gz
@@ -116,7 +116,7 @@ jobs:
           twine check dist/$whl
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
