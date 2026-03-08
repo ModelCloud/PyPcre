@@ -473,6 +473,31 @@ class Pattern:
 
 
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
+    # Fast path for the dominant shape: compile(pattern) with default flags.
+    if flags == 0:
+        if isinstance(pattern, Pattern):
+            return pattern
+
+        if isinstance(pattern, _CPattern):
+            wrapper = Pattern(pattern)
+            if get_thread_default():
+                wrapper.enable_auto_threads()
+            else:
+                wrapper.disable_threads()
+            return wrapper
+
+        adjusted_pattern = _apply_regex_compat(pattern, bool(_DEFAULT_COMPAT_REGEX))
+        if isinstance(adjusted_pattern, str):
+            native_flags = _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP
+        else:
+            native_flags = 0
+        compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=_DEFAULT_JIT)
+        if get_thread_default():
+            compiled.enable_auto_threads()
+        else:
+            compiled.disable_threads()
+        return compiled
+
     resolved_flags = _normalise_flags(flags)
     threads_requested = bool(resolved_flags & THREADS)
     no_threads_requested = bool(resolved_flags & NO_THREADS)
