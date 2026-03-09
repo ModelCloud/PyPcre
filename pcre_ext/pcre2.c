@@ -1806,11 +1806,6 @@ Pattern_compile_cached(PyObject *pattern_obj, uint32_t flags, int jit, int jit_e
         return NULL;
     }
 
-    if (PyObject_Hash(cache_key) == -1) {
-        PyErr_Clear();
-        use_cache = 0;
-    }
-
     if (use_cache) {
         PatternObject *cached = NULL;
         if (pattern_cache_lookup(cache_key, &cached) == 0) {

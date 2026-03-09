@@ -211,27 +211,6 @@ pattern_cache_teardown(void)
     atomic_store_explicit(&pattern_cache_global_mode, 0, memory_order_release);
 }
 
-static void
-pattern_cache_touch(PatternCacheState *state, PyObject *cache_key)
-{
-    if (state->order == NULL) {
-        return;
-    }
-    Py_ssize_t idx = PySequence_Index(state->order, cache_key);
-    if (idx >= 0) {
-        if (PySequence_DelItem(state->order, idx) < 0) {
-            PyErr_Clear();
-            return;
-        }
-    } else if (PyErr_Occurred()) {
-        PyErr_Clear();
-        return;
-    }
-    if (PyList_Append(state->order, cache_key) < 0) {
-        PyErr_Clear();
-    }
-}
-
 int
 pattern_cache_lookup(PyObject *cache_key, PatternObject **out_pattern)
 {
@@ -256,7 +235,6 @@ pattern_cache_lookup(PyObject *cache_key, PatternObject **out_pattern)
     if (cached != NULL) {
         Py_INCREF(cached);
         *out_pattern = (PatternObject *)cached;
-        pattern_cache_touch(state, cache_key);
     } else if (PyErr_Occurred()) {
         pattern_cache_release_state(lock_held);
         return -1;

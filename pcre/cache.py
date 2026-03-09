@@ -48,13 +48,6 @@ class _GlobalCacheState:
 _THREAD_LOCAL = _ThreadCacheState()
 _GLOBAL_STATE = _GlobalCacheState()
 _CACHE_STRATEGY = _CacheStrategy.THREAD_LOCAL
-_CACHE_STRATEGY_LOCKED = False
-
-
-def _lock_cache_strategy() -> None:
-    global _CACHE_STRATEGY_LOCKED
-    if not _CACHE_STRATEGY_LOCKED:
-        _CACHE_STRATEGY_LOCKED = True
 
 
 def _normalize_strategy(value: str) -> _CacheStrategy:
@@ -177,8 +170,6 @@ def cached_compile(
     jit: bool,
 ) -> T:
     """Compile *pattern* with *flags*, caching wrapper results when hashable."""
-
-    _lock_cache_strategy()
 
     if _CACHE_STRATEGY is _CacheStrategy.THREAD_LOCAL:
         return _cached_compile_thread_local(pattern, flags, wrapper, jit=jit)
