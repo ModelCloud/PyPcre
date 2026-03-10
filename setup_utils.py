@@ -522,7 +522,9 @@ def _detect_vs_generator():
     if year:
         return f"Visual Studio {major} {year}"
 
-    return f"Visual Studio {major}"
+    raise RuntimeError(
+        f"Unknown Visual Studio version: installationVersion={ver}, major={major}, year={year}"
+    )
 
 
 def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
