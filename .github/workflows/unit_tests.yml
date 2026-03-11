@@ -80,7 +80,7 @@ jobs:
       - name: install
         run: |
           pip install pip pytest tabulate regex setuptools build wheel -U
-          pip install -v .
+          pip install -v . -v
 
       - name: test ${{ matrix.test_script }}
         run: |

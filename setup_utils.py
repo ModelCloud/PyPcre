@@ -535,6 +535,7 @@ def _detect_vs_generator():
         year = year_map.get(major)
 
     if year:
+        print(f"VS year: {year}. major: {major}. ver: {ver}. stdout: {result.stdout.strip()}")
         return f"Visual Studio {major} {year}"
 
     raise RuntimeError(
@@ -657,6 +658,7 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
                     "-A", "x64",
                     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
                 ]
+                print(f"cmake args with VS: {cmake_args}")
             else:
                 ninja = shutil.which("ninja")
                 if ninja:
