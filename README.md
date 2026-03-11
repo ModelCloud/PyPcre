@@ -24,7 +24,7 @@ Modern `nogil` Python bindings for the Pcre2 library with `stdlib.re` api compat
 * 02/24/2026 [0.2.10](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.10): Allow VisualStudio (VS) compiler version check override via env var. 
 * 12/15/2025 [0.2.8](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.8): Fixed multi-arch Linux os compatibility where both x86_64 and i386 libs of pcre2 are installed. 
 * 10/20/2025 [0.2.4](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.4): Removed dependency on system having python3-dev packge. python.h will be optimistically downloaded from python.org when needed.
-* 10/12/2025 [0.2.3](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.3): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance for all api. Expanded ci testing coverage. FreeBSD, Solaris, and Windows compatibility validated.
+* 10/12/2025 [0.2.3](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.3): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance for all api. Expanded ci testing coverage. FreeBSD, Solaris and Windows compatibility validated.
 * 10/09/2025 [0.1.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.1.0): 🎉 First release. Thread safe, auto JIT, auto pattern caching and optimistic linking to system library for fast install.
 
 ## Why PyPcre:
@@ -47,7 +47,7 @@ The package prioritizes linking against the `libpcre2-8` shared library in syste
 
 ## Platform Support (Validated):
 
-`Linux`, `MacOS`, `Windows`, `WSL`, `FreeBSD`, `Solaris`
+`Linux`, `MacOS`, `Windows`, `WSL`, `FreeBSD`
 
 
 ## Usage
@@ -280,7 +280,7 @@ When `pkg-config` is available the build will automatically pick up the
 required include and link flags via `pkg-config --cflags/--libs libpcre2-8`.
 Without `pkg-config`, the build script scans common installation prefixes for
 Linux distributions (Debian, Ubuntu, Fedora/RHEL/CentOS, openSUSE, Alpine),
-FreeBSD, macOS (including Homebrew), and Solaris to locate the headers and
+FreeBSD and macOS (including Homebrew) to locate the headers and
 libraries.
 
 If your system ships `libpcre2-8` under `/usr` but you also maintain a
