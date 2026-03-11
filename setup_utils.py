@@ -532,7 +532,7 @@ def _detect_vs_generator():
             "17": "2022",
             "18": "2026",
         }
-        year = year_map.get(major)
+        year = year_map.get(str(major))
 
     if year:
         print(f"VS year: {year}. major: {major}. ver: {ver}. stdout: {result.stdout.strip()}")
