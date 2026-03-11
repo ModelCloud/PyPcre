@@ -523,16 +523,13 @@ def _detect_vs_generator():
     ver = info.get("installationVersion", "")
     major = ver.split(".")[0]
 
-    year = info.get("catalog", {}).get("productLineVersion")
-
-    if not year:
-        year_map = {
-            "15": "2017",
-            "16": "2019",
-            "17": "2022",
-            "18": "2026",
-        }
-        year = year_map.get(str(major))
+    year_map = {
+        "15": "2017",
+        "16": "2019",
+        "17": "2022",
+        "18": "2026",
+    }
+    year = year_map.get(str(major))
 
     if year:
         print(f"VS year: {year}. major: {major}. ver: {ver}. stdout: {result.stdout.strip()}")
