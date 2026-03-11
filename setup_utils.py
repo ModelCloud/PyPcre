@@ -481,7 +481,11 @@ def _find_vswhere():
 def _detect_vs_generator():
     vswhere = _find_vswhere()
     if not vswhere:
-        return None
+        raise RuntimeError(
+            "unable to find vswhere.exe\n"
+            "Please install Visual Studio Build Tools:\n"
+            f"{VS_DOWNLOAD_URL}"
+        )
 
     result = subprocess.run(
         [
@@ -497,11 +501,22 @@ def _detect_vs_generator():
     )
 
     if result.returncode != 0:
-        return None
+        raise RuntimeError(
+            f"vswhere failed.\n"
+            f"exit code: {result.returncode}\n"
+            f"stdout: {result.stdout.strip()}\n"
+            f"stderr: {result.stderr.strip()}\n"
+        )
 
-    data = json.loads(result.stdout or "[]")
+    try:
+        data = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"unable to parse vswhere output. Output: {result.stdout}"
+        ) from e
+
     if not data:
-        return None
+        raise RuntimeError(f"vswhere cannot find a valid VS installation: {result.stdout}")
 
     info = data[0]
 
@@ -523,7 +538,7 @@ def _detect_vs_generator():
         return f"Visual Studio {major} {year}"
 
     raise RuntimeError(
-        f"Unknown Visual Studio version: installationVersion={ver}, major={major}, year={year}"
+        f"Unknown Visual Studio version: installationVersion={ver}, major={major}, year={year}. vswhere result: {result.stdout}"
     )
 
 
@@ -637,12 +652,6 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             # On Windows, force MSVC and the /MD runtime. Never let CMake pick MinGW.
             if _is_windows_platform():
                 vs_gen = os.environ.get("CMAKE_GENERATOR", _detect_vs_generator())
-                if not vs_gen:
-                    raise RuntimeError(
-                        "Visual Studio not found.\n"
-                        "Please install Visual Studio Build Tools:\n"
-                        f"{VS_DOWNLOAD_URL}"
-                    )
                 cmake_args += [
                     "-G", vs_gen,
                     "-A", "x64",
