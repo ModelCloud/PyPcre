@@ -552,16 +552,18 @@ Scenario: Bytes pattern compile for template b'([A-Za-z]{1,8}){n}'
 | regex          | 1000  | 87.601   |      |
 
 Scenario: Bytes pattern compile for template b'\\x00[\\xff\\xfe]{1,{n}}\\x01'
-| engine | calls | total_ms | best |
-|----------------|---------|------------|--------|
-| PyPcre backend | 1000 | 4.110 | * |
-| regex | 1000 | 61.611 | |
+
+| engine         | calls | total_ms | best |
+|----------------|-------|----------|------|
+| PyPcre backend | 1000  | 4.110    | *    |
+| regex          | 1000  | 61.611   |      |
 
 Scenario: Bytes pattern compile for template b'foo{n}'
-| engine | calls | total_ms | best |
-|----------------|---------|------------|--------|
-| PyPcre backend | 1000 | 3.707 | * |
-| regex | 1000 | 32.290 | |
+
+| engine         | calls | total_ms | best |
+|----------------|-------|----------|------|
+| PyPcre backend | 1000  | 3.707    | *    |
+| regex          | 1000  | 32.290   |      |
 
 * best total_ms
 
@@ -607,10 +609,11 @@ Scenario: Text pattern compile for template (?P<word>[A-Za-z]{{1,8}}){n}
 | regex          | 1000  | 83.193   |      |
 
 Scenario: Text pattern compile for template foo{n}
-| engine | calls | total_ms | best |
-|----------------|---------|------------|--------|
-| PyPcre backend | 1000 | 4.028 | * |
-| regex | 1000 | 30.818 | |
+
+| engine         | calls | total_ms | best |
+|----------------|-------|----------|------|
+| PyPcre backend | 1000  | 4.028    | *    |
+| regex          | 1000  | 30.818   |      |
 
 * best total_ms
 
@@ -631,13 +634,14 @@ Scenario: Text pattern compile for template (?P<word>[A-Za-z]{{1,8}}){n}
 | regex  | 1000  | 83.193   |      |
 
 Scenario: Text pattern compile for template foo{n}
+
 | engine | calls | total_ms | best |
-|----------|---------|------------|--------|
-| PyPcre | 1000 | 6.225 | * |
-| regex | 1000 | 30.818 | |
+|--------|-------|----------|------|
+| PyPcre | 1000  | 6.225    | *    |
+| regex  | 1000  | 30.818   |      |
 
 * best total_ms
-  .
+
   Engine benchmark: multi-thread text search:
 
 Scenario: Text pattern \bfoo\b using compiled-pattern search call
