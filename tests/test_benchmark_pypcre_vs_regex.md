@@ -10,6 +10,7 @@
 - `pypcre (ms)` / `regex (ms)` are each-round averages: wall-clock elapsed time per round, with the highest and lowest rounds removed before averaging.
 - `compiled match` / `compiled fullmatch` benchmark `c = compile(...); c.match(...) / c.fullmatch(...)`, with compile done before timing in each worker thread.
 - `module match` / `module fullmatch` benchmark direct module calls and therefore include each engine's internal compile/cache path.
+- No-match results for `match` / `fullmatch` are recorded as `error` instead of being counted as successful benchmark runs.
 - `regex` free-threaded failures in uncompiled and compile paths are recorded as `error` instead of failing the whole benchmark.
 - `pypcre_vs_regex` shows wall-clock ratio. `xN` means pypcre is N times faster; `x0.xx slower` means pypcre is slower.
 
@@ -17,55 +18,59 @@
 
 | threads | pypcre (ms) | regex (ms) | pypcre_vs_regex |
 |---------|-------------|------------|-----------------|
-| 1       | 7.261       | 3.671      | x0.51 slower    |
-| 2       | 5.931       | 25.636     | x4.32 faster    |
-| 4       | 5.119       | 60.251     | x11.77 faster   |
-| 8       | 10.781      | 244.942    | x22.72 faster   |
-| 16      | 340.426     | 7059.720   | x20.74 faster   |
+| 1       | 5.732       | 7.403      | x1.29 faster    |
+| 2       | 7.629       | 24.895     | x3.26 faster    |
+| 4       | 11.628      | 74.553     | x6.41 faster    |
+| 8       | 9.215       | 168.141    | x18.25 faster   |
+| 16      | 17.958      | error      | n/a             |
+
+regex errors:
+
+- threads=16: UnicodeDecodeError: 'locale' codec can't decode byte 0xdc in position 0: decoding error
 
 ## compiled match (1000 times avg)
 
 | threads | pypcre (ms) | regex (ms) | pypcre_vs_regex |
 |---------|-------------|------------|-----------------|
-| 1       | 1.222       | 0.580      | x0.47 slower    |
-| 2       | 2.739       | 0.823      | x0.30 slower    |
-| 4       | 2.341       | 1.405      | x0.60 slower    |
-| 8       | 3.628       | 4.679      | x1.29 faster    |
-| 16      | 11.493      | 364.789    | x31.74 faster   |
+| 1       | 2.428       | 0.516      | x4.70 slower    |
+| 2       | 4.065       | 1.066      | x3.81 slower    |
+| 4       | 2.507       | 2.124      | x1.18 slower    |
+| 8       | 5.012       | 9.259      | x1.85 faster    |
+| 16      | 9.165       | 215.470    | x23.51 faster   |
 
 ## module fullmatch (1000 times avg)
 
 | threads | pypcre (ms) | regex (ms) | pypcre_vs_regex |
 |---------|-------------|------------|-----------------|
-| 1       | 2.566       | 3.742      | x1.46 faster    |
-| 2       | 2.800       | 19.935     | x7.12 faster    |
-| 4       | 5.828       | 64.451     | x11.06 faster   |
-| 8       | 8.725       | 138.969    | x15.93 faster   |
-| 16      | 22.434      | 2824.129   | x125.89 faster  |
+| 1       | 3.311       | 3.619      | x1.09 faster    |
+| 2       | 4.075       | 25.368     | x6.22 faster    |
+| 4       | 4.722       | 71.344     | x15.11 faster   |
+| 8       | 10.574      | 133.595    | x12.63 faster   |
+| 16      | 19.609      | 3536.852   | x180.37 faster  |
 
 ## compiled fullmatch (1000 times avg)
 
 | threads | pypcre (ms) | regex (ms) | pypcre_vs_regex |
 |---------|-------------|------------|-----------------|
-| 1       | 1.344       | 0.743      | x0.55 slower    |
-| 2       | 2.581       | 0.531      | x0.21 slower    |
-| 4       | 4.374       | 2.160      | x0.49 slower    |
-| 8       | 4.413       | 6.612      | x1.50 faster    |
-| 16      | 6.511       | 308.368    | x47.36 faster   |
+| 1       | 1.792       | 0.524      | x3.42 slower    |
+| 2       | 1.753       | 0.583      | x3.00 slower    |
+| 4       | 3.112       | 1.970      | x1.58 slower    |
+| 8       | 7.117       | 4.922      | x1.45 slower    |
+| 16      | 6.479       | 426.202    | x65.78 faster   |
 
 ## compile (1000 times avg)
 
 | threads | pypcre (ms) | regex (ms) | pypcre_vs_regex |
 |---------|-------------|------------|-----------------|
-| 1       | 6.517       | 127.855    | x19.62 faster   |
-| 2       | 7.871       | error      | n/a             |
-| 4       | 10.396      | error      | n/a             |
-| 8       | 27.438      | error      | n/a             |
-| 16      | 74.439      | error      | n/a             |
+| 1       | 7.205       | 129.571    | x17.98 faster   |
+| 2       | 15.010      | error      | n/a             |
+| 4       | 13.972      | error      | n/a             |
+| 8       | 23.303      | error      | n/a             |
+| 16      | 71.944      | error      | n/a             |
 
 regex errors:
 
-- threads=2: UnicodeDecodeError: 'locale' codec can't decode byte 0xc2 in position 0: decoding error
-- threads=4: UnicodeDecodeError: 'locale' codec can't decode byte 0xc0 in position 0: decoding error
-- threads=8: ValueError: embedded null character
-- threads=16: Error: unsupported locale setting
+- threads=2: RuntimeError: dictionary changed size during iteration
+- threads=4: UnicodeDecodeError: 'locale' codec can't decode byte 0xde in position 0: decoding error
+- threads=8: RuntimeError: dictionary changed size during iteration
+- threads=16: UnicodeDecodeError: 'locale' codec can't decode byte 0xf2 in position 0: decoding error

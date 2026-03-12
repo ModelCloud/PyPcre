@@ -144,6 +144,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
     def _run_scenario(self, api_name, engine_name, module, thread_count):
         round_wall_times = []
         error_messages = []
+        failure_count = 0
 
         for _ in range(BENCHMARK_ROUNDS):
             try:
@@ -153,6 +154,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
                     thread_count=thread_count,
                 )
             except Exception as exc:
+                failure_count += 1
                 if engine_name == "regex" and api_name in {
                     "module_match",
                     "module_fullmatch",
@@ -175,6 +177,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
                 "rounds": BENCHMARK_ROUNDS,
                 "trimmed_wall_ms": "error",
                 "raw_wall_ms": [],
+                "failure_count": failure_count,
                 "error": error_messages[0],
             }
 
@@ -185,6 +188,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
             "rounds": BENCHMARK_ROUNDS,
             "trimmed_wall_ms": _trimmed_mean(round_wall_times) * 1000,
             "raw_wall_ms": [value * 1000 for value in round_wall_times],
+            "failure_count": failure_count,
             "error": "",
         }
 
@@ -220,7 +224,9 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
                 start_barrier.wait()
                 started_at = time.perf_counter()
                 for payload in payloads:
-                    operation(payload)
+                    result = operation(payload)
+                    if api_name != "compile" and result is None:
+                        raise AssertionError(f"{api_name} returned no match")
                 durations[index] = time.perf_counter() - started_at
             except BaseException as exc:  # pragma: no cover - benchmark failure path
                 with errors_lock:
@@ -266,6 +272,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
             "- `pypcre (ms)` / `regex (ms)` are each-round averages: wall-clock elapsed time per round, with the highest and lowest rounds removed before averaging.",
             "- `compiled match` / `compiled fullmatch` benchmark `c = compile(...); c.match(...) / c.fullmatch(...)`, with compile done before timing in each worker thread.",
             "- `module match` / `module fullmatch` benchmark direct module calls and therefore include each engine's internal compile/cache path.",
+            "- No-match results for `match` / `fullmatch` are recorded as `error` instead of being counted as successful benchmark runs.",
             "- `regex` free-threaded failures in uncompiled and compile paths are recorded as `error` instead of failing the whole benchmark.",
             "- `pypcre_vs_regex` shows wall-clock ratio. `xN` means pypcre is N times faster; `x0.xx slower` means pypcre is slower.",
             "",
@@ -341,6 +348,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
             return "same"
         if ratio > 1.0:
             return f"x{ratio:.2f} faster"
+        ratio = pypcre_value / regex_value
         return f"x{ratio:.2f} slower"
 
 
