@@ -267,7 +267,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
             "- `compiled match` / `compiled fullmatch` benchmark `c = compile(...); c.match(...) / c.fullmatch(...)`, with compile done before timing in each worker thread.",
             "- `module match` / `module fullmatch` benchmark direct module calls and therefore include each engine's internal compile/cache path.",
             "- `regex` free-threaded failures in uncompiled and compile paths are recorded as `error` instead of failing the whole benchmark.",
-            "- `pypcre_vs_regex` shows `faster xx.x%`, `slower xx.x%`, `same`, or `n/a` based on wall-clock time.",
+            "- `pypcre_vs_regex` shows wall-clock ratio. `xN` means pypcre is N times faster; `x0.xx slower` means pypcre is slower.",
             "",
         ]
 
@@ -334,14 +334,14 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
     def _comparison_label(self, pypcre_value, regex_value):
         if not isinstance(pypcre_value, (int, float)) or not isinstance(regex_value, (int, float)):
             return "n/a"
-        if regex_value == 0:
+        if regex_value == 0 or pypcre_value == 0:
             return "n/a"
-        pct = ((regex_value - pypcre_value) / regex_value) * 100.0
-        if abs(pct) < 0.05:
+        ratio = regex_value / pypcre_value
+        if abs(ratio - 1.0) < 0.01:
             return "same"
-        if pct > 0:
-            return f"faster {pct:.1f}%"
-        return f"slower {abs(pct):.1f}%"
+        if ratio > 1.0:
+            return f"x{ratio:.2f} faster"
+        return f"x{ratio:.2f} slower"
 
 
 if __name__ == "__main__":
