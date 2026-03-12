@@ -84,24 +84,42 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
 
     def test_concurrent_api_benchmark(self):
         results = {
-            "match": [],
-            "fullmatch": [],
+            "module_match": [],
+            "compiled_match": [],
+            "module_fullmatch": [],
+            "compiled_fullmatch": [],
             "compile": [],
         }
 
         for thread_count in THREAD_COUNTS:
             for engine_name, module in self.engines:
-                results["match"].append(
+                results["module_match"].append(
                     self._run_scenario(
-                        api_name="match",
+                        api_name="module_match",
                         engine_name=engine_name,
                         module=module,
                         thread_count=thread_count,
                     )
                 )
-                results["fullmatch"].append(
+                results["compiled_match"].append(
                     self._run_scenario(
-                        api_name="fullmatch",
+                        api_name="compiled_match",
+                        engine_name=engine_name,
+                        module=module,
+                        thread_count=thread_count,
+                    )
+                )
+                results["module_fullmatch"].append(
+                    self._run_scenario(
+                        api_name="module_fullmatch",
+                        engine_name=engine_name,
+                        module=module,
+                        thread_count=thread_count,
+                    )
+                )
+                results["compiled_fullmatch"].append(
+                    self._run_scenario(
+                        api_name="compiled_fullmatch",
                         engine_name=engine_name,
                         module=module,
                         thread_count=thread_count,
@@ -135,7 +153,11 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
                     thread_count=thread_count,
                 )
             except Exception as exc:
-                if api_name == "compile" and engine_name == "regex":
+                if engine_name == "regex" and api_name in {
+                    "module_match",
+                    "module_fullmatch",
+                    "compile",
+                }:
                     error_messages.append(f"{type(exc).__name__}: {exc}")
                     continue
                 raise
@@ -152,9 +174,7 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
                 "iterations_per_thread": ITERATIONS_PER_THREAD,
                 "rounds": BENCHMARK_ROUNDS,
                 "trimmed_wall_ms": "error",
-                "trimmed_thread_mean_ms": "error",
                 "raw_wall_ms": [],
-                "raw_thread_ms": [],
                 "error": error_messages[0],
             }
 
@@ -177,11 +197,17 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
 
         def worker(index):
             try:
-                if api_name == "match":
+                if api_name == "module_match":
+                    payloads = [MATCH_SUBJECT] * ITERATIONS_PER_THREAD
+                    operation = lambda value: module.match(MATCH_PATTERN, value)
+                elif api_name == "compiled_match":
                     payloads = [MATCH_SUBJECT] * ITERATIONS_PER_THREAD
                     compiled = module.compile(MATCH_PATTERN)
                     operation = compiled.match
-                elif api_name == "fullmatch":
+                elif api_name == "module_fullmatch":
+                    payloads = [FULLMATCH_SUBJECT] * ITERATIONS_PER_THREAD
+                    operation = lambda value: module.fullmatch(FULLMATCH_PATTERN, value)
+                elif api_name == "compiled_fullmatch":
                     payloads = [FULLMATCH_SUBJECT] * ITERATIONS_PER_THREAD
                     compiled = module.compile(FULLMATCH_PATTERN)
                     operation = compiled.fullmatch
@@ -232,19 +258,34 @@ class TestPyPcreVsRegexBenchmark(unittest.TestCase):
             "",
             f"- Generated from `{Path(__file__).name}`",
             f"- Python runtime: `{sys.version.split()[0]}` free-threaded=`{str(IS_FREE_THREADED).lower()}`",
-            "- APIs: `match`, `fullmatch`, `compile`",
+            "- APIs: `module match`, `compiled match`, `module fullmatch`, `compiled fullmatch`, `compile`",
             f"- Iterations per thread: `{ITERATIONS_PER_THREAD}`",
             f"- Benchmark rounds per scenario: `{BENCHMARK_ROUNDS}`",
             f"- Thread counts: `{', '.join(str(value) for value in THREAD_COUNTS)}`",
             "- Timing excludes thread startup by synchronizing all worker threads before the measured region.",
             "- `pypcre (ms)` / `regex (ms)` are each-round averages: wall-clock elapsed time per round, with the highest and lowest rounds removed before averaging.",
-            "- `regex.compile` failures under free-threaded concurrency are recorded as `error` instead of failing the whole benchmark.",
+            "- `compiled match` / `compiled fullmatch` benchmark `c = compile(...); c.match(...) / c.fullmatch(...)`, with compile done before timing in each worker thread.",
+            "- `module match` / `module fullmatch` benchmark direct module calls and therefore include each engine's internal compile/cache path.",
+            "- `regex` free-threaded failures in uncompiled and compile paths are recorded as `error` instead of failing the whole benchmark.",
             "- `pypcre_vs_regex` shows `faster xx.x%`, `slower xx.x%`, `same`, or `n/a` based on wall-clock time.",
             "",
         ]
 
-        for api_name in ("match", "fullmatch", "compile"):
-            lines.append(f"## {api_name} ({ITERATIONS_PER_THREAD} times avg)")
+        section_titles = {
+            "module_match": f"module match ({ITERATIONS_PER_THREAD} times avg)",
+            "compiled_match": f"compiled match ({ITERATIONS_PER_THREAD} times avg)",
+            "module_fullmatch": f"module fullmatch ({ITERATIONS_PER_THREAD} times avg)",
+            "compiled_fullmatch": f"compiled fullmatch ({ITERATIONS_PER_THREAD} times avg)",
+            "compile": f"compile ({ITERATIONS_PER_THREAD} times avg)",
+        }
+        for api_name in (
+                "module_match",
+                "compiled_match",
+                "module_fullmatch",
+                "compiled_fullmatch",
+                "compile",
+        ):
+            lines.append(f"## {section_titles[api_name]}")
             lines.append("")
             lines.append(
                 _markdown_table(self._report_rows_for_api(results[api_name]))
