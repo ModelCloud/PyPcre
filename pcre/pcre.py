@@ -9,14 +9,11 @@ from __future__ import annotations
 
 import re as _std_re
 from collections.abc import Generator, Iterable
-try:
-    from re import _parser, TEMPLATE  # python 3.11+
-except Exception:
-    import sre_parse as _parser
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
 
+from ._stdlib_re import RE_TEMPLATE, RE_TEMPLATE_FLAG, RE_UNICODE_FLAG, _parser
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
 from .flags import Flag, strip_py_only_flags
@@ -128,7 +125,7 @@ def _apply_default_unicode_flags(pattern: Any, flags: int) -> int:
 
 
 def _coerce_stdlib_regexflag(flag: _std_re.RegexFlag) -> int:
-    unsupported_bits = int(flag) & ~_STD_RE_FLAG_MASK
+    unsupported_bits = int(flag) & ~(_STD_RE_FLAG_MASK | RE_TEMPLATE_FLAG | RE_UNICODE_FLAG)
     if unsupported_bits:
         unsupported = _std_re.RegexFlag(unsupported_bits)
         raise ValueError(
@@ -618,7 +615,7 @@ def template(pattern, flags=0):
                   "without an obvious purpose. "
                   "Use re.compile() instead.",
                   DeprecationWarning)
-    return compile(pattern, flags | TEMPLATE)
+    return compile(pattern, flags | RE_TEMPLATE)
 
 _PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})
 

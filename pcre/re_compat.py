@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import operator
 import re as _std_re
-try:
-    from re import _parser  # python 3.11+
-except Exception:
-    import sre_parse as _parser
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
+
+from ._stdlib_re import _parser
 
 
 _CRawMatch = _pcre2.Match

@@ -1,5 +1,6 @@
 import types
 from collections import OrderedDict
+import re
 
 import pytest
 from pcre import Flag
@@ -286,6 +287,35 @@ def test_configure_updates_regex_compat_default(monkeypatch):
 def test_compile_rejects_non_int_iterable_flags():
     with pytest.raises(TypeError):
         core.compile("expr", flags=("not", "ints"))
+
+
+def test_template_delegates_to_compile_without_template_bits(monkeypatch):
+    captured = {}
+
+    def fake_cached(pattern, flags, wrapper, *, jit):
+        captured["flags"] = flags
+        fake_cpattern = types.SimpleNamespace(
+            pattern=pattern,
+            groupindex={},
+            flags=flags,
+            match=MethodRecorder("match"),
+            search=MethodRecorder("search"),
+            fullmatch=MethodRecorder("fullmatch"),
+            jit=jit,
+        )
+        return wrapper(fake_cpattern)
+
+    monkeypatch.setattr(core, "cached_compile", fake_cached)
+    monkeypatch.setattr(core, "RE_TEMPLATE", re.RegexFlag.UNICODE)
+
+    with pytest.warns(DeprecationWarning):
+        compiled = core.template("expr")
+
+    expected_flags = strip_py_only_flags(
+        core._apply_default_unicode_flags("expr", 0)
+    )
+    assert captured["flags"] == expected_flags
+    assert compiled.flags == expected_flags
 
 
 def test_pattern_match_handles_optional_end():

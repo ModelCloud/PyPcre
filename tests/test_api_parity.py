@@ -51,6 +51,8 @@ def test_stdlib_style_flag_aliases():
     assert pcre.A == ascii_alias
     assert pcre.UNICODE == 0
     assert pcre.U == 0
+    assert pcre.TEMPLATE == 0
+    assert pcre.T == 0
 
 
 def test_specific_compile_error_exposes_dedicated_exception():
@@ -81,6 +83,13 @@ def test_compile_accepts_stdlib_regex_flags():
     assert isinstance(combo, pcre.Pattern)
     assert combo.flags & Flag.CASELESS
     assert combo.flags & Flag.MULTILINE
+
+
+def test_compile_accepts_noop_stdlib_regex_flags():
+    compiled = pcre.compile(r"pattern", flags=re.RegexFlag.UNICODE)
+    assert isinstance(compiled, pcre.Pattern)
+    assert compiled.flags & Flag.UTF
+    assert compiled.flags & Flag.UCP
 
 
 def test_compile_rejects_incompatible_stdlib_regex_flags():
