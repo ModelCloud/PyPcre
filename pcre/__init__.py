@@ -96,6 +96,8 @@ _FLAG_COMPAT_ALIASES = {
     "A": Flag.NO_UTF | Flag.NO_UCP,
     "UNICODE": _FLAG_ZERO,
     "U": _FLAG_ZERO,
+    "TEMPLATE": _FLAG_ZERO,
+    "T": _FLAG_ZERO,
 }
 
 for _alias, _flag in _FLAG_COMPAT_ALIASES.items():
