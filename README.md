@@ -5,9 +5,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 -->
 
-# PyPcre (Python Pcre2 Binding)
+# PyPcre (Python PCRE2 Binding)
 
-Modern `nogil` Python bindings for the Pcre2 library with `stdlib.re` api compatibility.
+Modern `nogil` Python bindings for the PCRE2 library with `stdlib.re` API compatibility.
 
 <p align="center">
     <a href="https://github.com/ModelCloud/PyPcre/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/Pcre.svg"></a>
@@ -20,23 +20,24 @@ Modern `nogil` Python bindings for the Pcre2 library with `stdlib.re` api compat
 
 
 ## Latest News
-* 03/21/2026 [0.2.14](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.4): Python 3.14 compat
-* 03/02/2026 [0.2.11](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.11): Auto-detect `Visual Studio` for `Windows` env during install/compile.
-* 02/24/2026 [0.2.10](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.10): Allow VisualStudio (VS) compiler version check override via env var. 
-* 12/15/2025 [0.2.8](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.8): Fixed multi-arch Linux os compatibility where both x86_64 and i386 libs of pcre2 are installed. 
-* 10/20/2025 [0.2.4](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.4): Removed dependency on system having python3-dev packge. python.h will be optimistically downloaded from python.org when needed.
-* 10/12/2025 [0.2.3](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.3): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance for all api. Expanded ci testing coverage. FreeBSD, Solaris and Windows compatibility validated.
-* 10/09/2025 [0.1.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.1.0): 🎉 First release. Thread safe, auto JIT, auto pattern caching and optimistic linking to system library for fast install.
+* 03/22/2026 [0.2.15](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.15): Python 3.15 `re` compatibility (`prefixmatch`, `NOFLAG`)
+* 03/21/2026 [0.2.14](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.14): Python 3.14 compatibility
+* 03/02/2026 [0.2.11](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.11): Auto-detect `Visual Studio` in Windows environments during install and compile.
+* 02/24/2026 [0.2.10](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.10): Allow a `Visual Studio` (VS) compiler version check override via an environment variable.
+* 12/15/2025 [0.2.8](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.8): Fixed multi-arch Linux OS compatibility when both x86_64 and i386 `pcre2` libraries are installed.
+* 10/20/2025 [0.2.4](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.4): Removed the dependency on a system `python3-dev` package. `Python.h` will be downloaded optimistically from python.org when needed.
+* 10/12/2025 [0.2.3](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.3): 🤗 Full `GIL=0` compliance for Python >= 3.13T. Reduced cache thread contention. Improved performance across all APIs. Expanded CI test coverage. FreeBSD, Solaris, and Windows compatibility validated.
+* 10/09/2025 [0.1.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.1.0): 🎉 First release. Thread-safe, with auto JIT, auto pattern caching, and optimistic linking to the system library for fast installs.
 
-## Why PyPcre:
+## Why PyPcre
 
-PyPcre is a modern Pcre2 binding designed to be both super fast and thread-safe in the `GIL=0` world. In the old days of global interpreter locks, Python had real threads but mostly fake concurrency (with the exception of some low-level apis and packages). In 2025, Python is moving toward full `GIl=0` design which will unlock true multi-threaded concurrency and finally bring Python in parity with other modern languages. 
+PyPcre is a modern PCRE2 binding designed to be both fast and thread-safe in a `GIL=0` world. In the era of the global interpreter lock, Python had real threads but often only limited concurrency, aside from a handful of low-level APIs and packages. As Python moves toward a fuller `GIL=0` design, true multi-threaded concurrency becomes practical and brings Python closer to parity with other modern languages.
 
-Many Python regular expression packages will either out-right segfault due to safety under `GIL=0` or suffer sub-optimal performance due to non-threaded design mindset. 
+Many Python regular expression packages either segfault under `GIL=0` or suffer suboptimal performance because they were not designed with threaded execution in mind.
 
-PyPcre is fully ci tested where every single api and Pcre2 flag is tested in a continuous development environment backed by the ModelCloud.AI team. Fuzz (clobber) tests are also performed to catch any memory safety, accuracy, or memory leak regressions. 
+PyPcre is fully CI-tested. Every API and PCRE2 flag is exercised in a continuous development environment backed by the ModelCloud.AI team. Fuzz (clobber) tests are also run to catch memory safety, accuracy, and memory leak regressions.
 
-Safety first: PyPcre will optimistically link to the os provided `libpcre2` package for maximum safetey since PyPcre will automatically enjoy upstream security patches. You can force full source compile via `PYPCRE_BUILD_FROM_SOURCE=1` env toggle.
+For safety, PyPcre preferentially links against the OS-provided `libpcre2` package so it can benefit from upstream security patches. You can force a full source build with the `PYPCRE_BUILD_FROM_SOURCE=1` environment variable.
 
 ## Installation
 
@@ -44,15 +45,14 @@ Safety first: PyPcre will optimistically link to the os provided `libpcre2` pack
 pip install PyPcre
 ```
 
-The package prioritizes linking against the `libpcre2-8` shared library in system for fast install and max security protection which gets latest patches from OS. See [Building](#building) for manual build details.
+The package prefers linking against the system `libpcre2-8` shared library for fast installs and to inherit security updates from the OS. See [Building](#building) for manual build details.
 
-## Platform Support (Validated):
+## Platform Support (Validated)
 
-`Linux`, `MacOS`, `Windows`, `WSL`, `FreeBSD`
+`Linux`, `macOS`, `Windows`, `WSL`, `FreeBSD`
 
 
 ## Usage
-
 
 If you already rely on the standard library `re`, migrating is as
 simple as changing your import:
@@ -61,17 +61,13 @@ simple as changing your import:
 import pcre as re
 ```
 
-The module-level entry points (`match`, `search`, `fullmatch`, `findall`,
-`finditer`, `split`, `sub`, `subn`, `compile`, `escape`, `purge`) expose the
-same call signatures as their `re` counterparts, making existing code work
-unchanged. Every standard flag with a PCRE2 equivalent—`IGNORECASE`,
-`MULTILINE`, `DOTALL`, `VERBOSE`, `ASCII`, and friends—is supported via the
-re-exported constants and the `pcre.Flag` enum. 
+The high-level API keeps the standard library shape, so most existing `re`
+code can move over with little or no rewriting.
 
-### Sample Usage
+### Quick start
 
 ```python
-from pcre import match, search, findall, compile, Flag
+from pcre import compile, findall, match, search, Flag
 
 if match(r"(?P<word>\\w+)", "hello world"):
     print("found word")
@@ -80,16 +76,59 @@ pattern = compile(rb"\d+", flags=Flag.MULTILINE)
 numbers = pattern.findall(b"line 1\nline 22")
 ```
 
-`pcre` mirrors the core helpers from Python’s standard library `re` module 
-`prefixmatch`, `match`, `search`, `fullmatch`, `finditer`, `findall`, and `compile` while
-exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
-(`Flag.CASELESS`, `Flag.MULTILINE`, `Flag.UTF`, ...).
+### User-facing API
+
+- Module helpers: `prefixmatch`, `match`, `search`, `fullmatch`, `finditer`,
+  `findall`, `split`, `sub`, `subn`, `compile`, `escape`, `purge`, and
+  `parallel_map`.
+- `compile()` returns a `Pattern` object with the familiar matching helpers
+  plus `split()`, `sub()`, and `subn()`.
+- `Pattern` exposes `.pattern`, `.flags`, `.jit`, `.groupindex`, and `.groups`
+  for introspection.
+- `Match` objects expose the usual `group()`, `groups()`, `groupdict()`,
+  `start()`, `end()`, `span()`, and `expand()` methods, along with `.re`,
+  `.string`, `.pos`, `.endpos`, `.lastindex`, `.lastgroup`, and `.regs`.
+- Flags are available through `pcre.Flag` and familiar aliases such as
+  `IGNORECASE`, `MULTILINE`, `DOTALL`, `VERBOSE`, `ASCII`, `UNICODE`, and
+  `NOFLAG`.
+- Errors are raised as `pcre.PcreError`; `error` and `PatternError` are kept as
+  compatibility aliases.
+
+### Common examples
+
+Compiled patterns:
+
+```python
+from pcre import compile, Flag
+
+pattern = compile(r"(?P<name>[A-Za-z]+)", flags=Flag.CASELESS)
+match = pattern.search("User: alice")
+print(match.group("name"))  # alice
+```
+
+Substitution:
+
+```python
+from pcre import sub
+
+result = sub(r"\d+", "#", "room 101")
+print(result)  # room #
+```
+
+Bytes:
+
+```python
+from pcre import compile
+
+pattern = compile(br"\w+")
+print(pattern.findall(b"ab cd"))  # [b'ab', b'cd']
+```
 
 ### Stdlib `re` compatibility
 
 - Module-level helpers and the `Pattern` class follow the same call shapes as
   the standard library `re` module, including `pos`, `endpos`, and `flags`
-  behaviour.
+  behavior.
 - Python 3.15's `prefixmatch()` alias is available at both the module level
   and on compiled `Pattern` objects, and `re.NOFLAG` is re-exported as the
   zero-value compatibility alias.
@@ -107,6 +146,7 @@ exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
   raises a compatibility `ValueError` to prevent silent divergences.
 - `pcre.escape()` delegates directly to `re.escape` for byte and text
   patterns so escaping semantics remain identical.
+- String patterns enable Unicode behavior by default. Byte patterns do not.
 
 ### `regex` package compatibility
 
@@ -122,143 +162,31 @@ pattern = compile(r"\\U0001F600", flags=Flag.COMPAT_UNICODE_ESCAPE)
 assert pattern.pattern == r"\\x{0001F600}"
 ```
 
-Set the default behaviour globally with `pcre.configure(compat_regex=True)`
+Set the default behavior globally with `pcre.configure(compat_regex=True)`
 so that subsequent calls to `compile()` and the module-level helpers apply
 the conversion without repeating the flag.
 
-### Automatic pattern caching
+### Common issues
 
-`pcre.compile()` caches the final `Pattern` wrapper for up to 128
-unique `(pattern, flags)` pairs when the pattern object is hashable. By default
-the cache is **thread-local**, keeping per-thread LRU stores so workers do not
-contend with one another. Adjust the capacity with `pcre.set_cache_limit(n)`—pass
-`0` to disable caching completely or `None` for an unlimited cache—and check the
-current limit with `pcre.get_cache_limit()`. The cache can be emptied at any time
-with `pcre.clear_cache()`.
+- Unsupported stdlib flags such as `re.DEBUG`, `re.LOCALE`, and `re.ASCII`
+  raise `ValueError`. If you want ASCII-style behavior, use `pcre.ASCII` or
+  `Flag.NO_UTF | Flag.NO_UCP`.
+- Replacement types must match the subject type: text patterns use `str`
+  replacements, while byte patterns use bytes-like replacements.
+- If you are porting patterns from the third-party `regex` package, check
+  `\u` and `\U` escapes first. That is the most common compatibility gap.
+- Most users do not need to tune caching, JIT, or threading. The defaults are
+  intended to work well out of the box.
 
-Applications that prefer the historic global cache can opt back in before any
-compilation takes place by setting `PYPCRE_CACHE_PATTERN_GLOBAL=1` in the
-environment **before importing** `pcre`. Runtime switching is no longer
-supported; altering the value after patterns have been compiled raises
-`RuntimeError`.
+### Optional runtime controls
 
-### Text versus bytes defaults
-
-String patterns follow the same defaults as Python’s `re` module,
-automatically enabling the `Flag.UTF` and `Flag.UCP` options so Unicode
-pattern and character semantics “just work.” Byte patterns remain raw by
-default—neither option is activated—so you retain full control over
-binary-oriented matching. Explicitly set `Flag.NO_UTF`/`Flag.NO_UCP` if you
-need to opt out for strings, or add the UTF/UCP flags yourself when compiling
-bytes.
-
-### Working with compiled patterns
-
-- `compile()` accepts either a pattern literal or an existing `Pattern`
-  instance, making it easy to mix compiled objects with the convenience
-  helpers.
-- `Pattern.match/search/fullmatch/finditer/findall` accept optional
-  `pos`, `endpos`, and `options` arguments, mirroring the standard library
-  `re` module while letting you thread PCRE2 execution flags through
-  individual calls.
-
-### Threaded execution
-
-- `pcre.parallel_map()` fans out work across a shared thread pool for
-  `match`, `search`, `fullmatch`, and `findall`. The helper preserves the
-  order of the provided subjects and returns the same result objects you’d
-  normally receive from the `Pattern` methods.
-- The threaded backend activates only on machines with at least eight CPU
-  cores; otherwise execution falls back to the sequential path regardless of
-  flags or configuration.
-- Threading is **opt-in by default** when Python runs without the GIL
-  (e.g. Python with `-X gil=0` or `PYTHON_GIL=0`). When the GIL is active the default falls
-  back to sequential execution to avoid needless overhead.
-- With auto threading enabled (`configure_threads(enabled=True)`), the pool
-  is only engaged when at least one subject is larger than the configured
-  threshold (60 kB by default). Smaller jobs run sequentially to avoid the
-  cost of thread hand-offs; adjust the boundary via
-  `configure_threads(threshold=...)`.
-- Use `Flag.THREADS` to force threaded execution for a specific pattern or
-  `Flag.NO_THREADS` to lock it to sequential mode regardless of global
-  settings.
-- `pcre.configure_thread_pool(max_workers=...)` controls the size of the
-  shared executor (capped to half the available CPUs); call it with
-  `preload=True` to spin the pool up eagerly, and `shutdown_thread_pool()`
-  to tear it down manually if needed.
-
-### Performance considerations
-
-- **Precompile for hot loops.** The module-level helpers mirror the `re`
-  API and route through the shared compilation cache, but the extra call
-  plumbing still adds overhead. With a simple pattern like `"fo"`, using
-  the low-level `pcre_ext_c.Pattern` directly costs ~0.60 µs per call,
-  whereas the high-level `pcre.match()` helper lands at ~4.4 µs per call
-  under the same workload. For sustained loops, create a `Pattern` object
-  once and reuse it.
-- **Benchmark toggles.** The extension defaults to the fastest safe
-  configuration, but you can flip individual knobs back to the legacy
-  behaviour by setting environment variables *before* importing `pcre`:
-
-  | Env var                        | Effect (per-call, `pattern.match("fo")`) |
-  |--------------------------------|------------------------------------------|
-  | _(baseline)_                   | 0.60 µs                                  |
-  | `PYPCRE_DISABLE_CONTEXT_CACHE=1` | 0.60 µs |
-  | `PYPCRE_FORCE_JIT_LOCK=1`       | 0.60 µs |
-  | `pcre.match()` helper          | 4.43 µs                                  |
-
-  The toggles reintroduce the legacy GIL hand-off, per-call match-context
-  allocation, and explicit locks so you can quantify the impact of each
-  optimisation on your workload. Measurements were taken on CPython 3.14 (rc3)
-  with 200 000 evaluations of `pcre_ext_c.compile("fo").match("foobar")`; absolute
-  values will vary by platform, but the relative differences are
-  representative. Leave the variables unset in production to keep the new fast
-  paths active.
-
-### JIT Pattern Compilation and Execution
-
-Pcre2’s JIT compiler is enabled by default for every compiled pattern. The
-wrapper exposes two complementary ways to adjust that behaviour:
-
-- Toggle the global default at runtime with `pcre.configure(jit=False)` to
-  turn JIT off (call `pcre.configure(jit=True)` to turn it back on).
-- Override the default per pattern using the Python-only flags `Flag.JIT`
-  and `Flag.NO_JIT`:
-
-  ```python
-  from pcre import compile, configure, Flag
-
-  configure(jit=False)              # disable JIT globally
-  baseline = compile(r"expr")      # JIT disabled
-
-  fast = compile(r"expr", flags=Flag.JIT)      # force-enable for this pattern
-  slow = compile(r"expr", flags=Flag.NO_JIT)   # force-disable for this pattern
-  ```
-
-## Pattern cache
-- `pcre.compile()` caches hashable `(pattern, flags)` pairs, keeping up to 128 entries per thread by default.
-- Set `PYPCRE_CACHE_PATTERN_GLOBAL=1` before importing `pcre` if you need a shared, process-wide cache instead of isolated thread stores.
-- Use `pcre.clear_cache()` when you need to free the active cache proactively.
-- Non-hashable pattern objects skip the cache and are compiled each time.
-
-## Default flags for text patterns
-- String patterns enable `Flag.UTF` and `Flag.UCP` automatically so behaviour matches `re`.
-- Byte patterns keep both flags disabled; opt in manually if Unicode semantics are desired.
-- Explicitly supply `Flag.NO_UTF`/`Flag.NO_UCP` to override the defaults for strings.
-
-## Additional usage notes
-- All top-level helpers (`match`, `search`, `fullmatch`, `finditer`, `findall`) defer to the cached compiler.
-- Compiled `Pattern` objects expose `.pattern`, `.flags`, `.jit`, and `.groupindex` for introspection.
-- Execution helpers accept `pos`, `endpos`, and `options`, allowing you to thread PCRE2 execution flags per call.
-
-## Memory allocation
-- By default PyPcre uses CPython's `PyMem` allocator.
-- Override the allocator explicitly by setting `PYPCRE_ALLOCATOR` to one of
-  `pymem`, `malloc`, `jemalloc`, or `tcmalloc` before importing the module. The
-  optional allocators are still loaded with `dlopen`, so no additional link
-  flags are required when they are absent.
-- Call `pcre_ext_c.get_allocator()` to inspect which backend is active at
-  runtime.
+- `pcre.configure(jit=False)` disables JIT globally. `Flag.JIT` and
+  `Flag.NO_JIT` let you override that per pattern.
+- `pcre.set_cache_limit()`, `pcre.get_cache_limit()`, and `pcre.clear_cache()`
+  control the high-level compile cache.
+- `pcre.configure_threads()`, `pcre.configure_thread_pool()`,
+  `shutdown_thread_pool()`, `Flag.THREADS`, and `Flag.NO_THREADS` are available
+  if you want to opt into or restrict threaded execution.
 
 ## Building
 
@@ -267,7 +195,7 @@ variant). Install the development headers for your platform before building,
 for example `apt install libpcre2-dev` on Debian/Ubuntu, `dnf install pcre2-devel`
 on Fedora/RHEL derivatives, or `brew install pcre2` on macOS.
 
-If the headers or library live in a non-standard location you can export one
+If the headers or library live in a non-standard location, you can export one
 or more of the following environment variables prior to invoking the build
 (`pip install .`, `python -m build`, etc.):
 
@@ -275,16 +203,19 @@ or more of the following environment variables prior to invoking the build
 - `PYPCRE_INCLUDE_DIR`
 - `PYPCRE_LIBRARY_DIR`
 - `PYPCRE_LIBRARY_PATH` *(pathsep-separated directories or explicit library files to
-  prioritise when resolving `libpcre2-8`)*
+  prioritize when resolving `libpcre2-8`)*
 - `PYPCRE_LIBRARIES`
 - `PYPCRE_CFLAGS`
 - `PYPCRE_LDFLAGS`
 
-When `pkg-config` is available the build will automatically pick up the
+If you would rather force a source build, set `PYPCRE_BUILD_FROM_SOURCE=1`
+before installing.
+
+When `pkg-config` is available, the build automatically picks up the
 required include and link flags via `pkg-config --cflags/--libs libpcre2-8`.
 Without `pkg-config`, the build script scans common installation prefixes for
 Linux distributions (Debian, Ubuntu, Fedora/RHEL/CentOS, openSUSE, Alpine),
-FreeBSD and macOS (including Homebrew) to locate the headers and
+FreeBSD, and macOS (including Homebrew) to locate the headers and
 libraries.
 
 If your system ships `libpcre2-8` under `/usr` but you also maintain a
