@@ -252,6 +252,8 @@ class Pattern:
         raw, resolved_end = _call_with_optional_end(self._pattern.match, subject, pos, endpos, options)
         return self._wrap_match(raw, subject, pos, resolved_end)
 
+    prefixmatch = match
+
     def search(
         self,
         subject: Any,
@@ -569,8 +571,11 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     return compiled
 
 
-def match(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
+def prefixmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
     return compile(pattern, flags=flags).match(string)
+
+
+match = prefixmatch
 
 
 def search(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
