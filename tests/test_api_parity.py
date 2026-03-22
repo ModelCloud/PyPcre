@@ -20,6 +20,20 @@ def test_purge_aliases_clear_cache():
     assert pcre.purge is pcre.clear_cache
 
 
+def test_prefixmatch_aliases_match():
+    assert pcre.match is pcre.prefixmatch
+    assert "prefixmatch" in pcre.__all__
+
+    module_match = pcre.prefixmatch(r"ab", "abcd")
+    assert module_match is not None
+    assert module_match.span() == re.match(r"ab", "abcd").span()
+
+    compiled = pcre.compile(r"ab")
+    pattern_match = compiled.prefixmatch("zab", pos=1)
+    assert pattern_match is not None
+    assert pattern_match.span() == re.compile(r"ab").match("zab", 1).span()
+
+
 def test_error_aliases_and_escape():
     assert pcre.error is pcre.PcreError
     assert pcre.PatternError is pcre.PcreError
@@ -38,6 +52,7 @@ def test_error_aliases_and_escape():
 
 
 def test_stdlib_style_flag_aliases():
+    assert pcre.NOFLAG == 0
     assert pcre.IGNORECASE == pcre.Flag.CASELESS
     assert pcre.I == pcre.Flag.CASELESS
     assert pcre.MULTILINE == pcre.Flag.MULTILINE

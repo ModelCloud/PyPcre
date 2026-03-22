@@ -33,6 +33,7 @@ from .pcre import (
     fullmatch,
     match,
     parallel_map,
+    prefixmatch,
     search,
     split,
     sub,
@@ -84,6 +85,7 @@ def escape(pattern: Any) -> Any:
 # continue referencing familiar names. Prefer `pcre.Flag` for new code.
 _FLAG_ZERO = Flag(0)
 _FLAG_COMPAT_ALIASES = {
+    "NOFLAG": _FLAG_ZERO,
     "IGNORECASE": Flag.CASELESS,
     "I": Flag.CASELESS,
     "MULTILINE": Flag.MULTILINE,
@@ -118,6 +120,7 @@ __all__ = [
     "set_cache_limit",
     "get_cache_limit",
     "compile",
+    "prefixmatch",
     "match",
     "search",
     "fullmatch",

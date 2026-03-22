@@ -81,7 +81,7 @@ numbers = pattern.findall(b"line 1\nline 22")
 ```
 
 `pcre` mirrors the core helpers from Python’s standard library `re` module 
-`match`, `search`, `fullmatch`, `finditer`, `findall`, and `compile` while
+`prefixmatch`, `match`, `search`, `fullmatch`, `finditer`, `findall`, and `compile` while
 exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 (`Flag.CASELESS`, `Flag.MULTILINE`, `Flag.UTF`, ...).
 
@@ -90,6 +90,9 @@ exposing PCRE2’s extended flag set through the Pythonic `Flag` enum
 - Module-level helpers and the `Pattern` class follow the same call shapes as
   the standard library `re` module, including `pos`, `endpos`, and `flags`
   behaviour.
+- Python 3.15's `prefixmatch()` alias is available at both the module level
+  and on compiled `Pattern` objects, and `re.NOFLAG` is re-exported as the
+  zero-value compatibility alias.
 - `Pattern` mirrors `re.Pattern` attributes like `.pattern`, `.groupindex`,
   and `.groups`, while `Match` objects surface the familiar `.re`, `.string`,
   `.pos`, `.endpos`, `.lastindex`, `.lastgroup`, `.regs`, and `.expand()` API.
