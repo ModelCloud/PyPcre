@@ -78,7 +78,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest, macos-latest, windows-latest ]
-        py: [ '3.10', '3.11', '3.12', '3.13', '3.14' ]
+        py: [ '3.10', '3.11', '3.12', '3.13', '3.14', '3.14t' ] # no '3.13t', because  RuntimeError: CFFI does not support the free-threaded build of CPython 3.13. Upgrade to free-threaded 3.14 or newer to use CFFI with the free-threaded build.
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Codes
