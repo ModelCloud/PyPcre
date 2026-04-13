@@ -4,10 +4,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 -->
+<div align=center>
+<img width="400" height="1024" alt="image" src="https://github.com/user-attachments/assets/92964c3a-f82e-4949-bd27-278f57c62d9f" />
+</div>
+<h1 align="center">PyPcre (Python PCRE2 Binding) 🧬</h1>
 
-# PyPcre (Python PCRE2 Binding) 🧬
-
+<p align=center>
 Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compatible API. ⚡
+</p>
 
 <p align="center">
     <a href="https://github.com/ModelCloud/PyPcre/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/Pcre.svg"></a>
