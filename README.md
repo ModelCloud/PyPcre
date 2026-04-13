@@ -55,9 +55,9 @@ PyPcre gives Python a familiar `re`-shaped API on top of the real `PCRE2` engine
 | Built-in threaded subject fan-out | `parallel_map()` ✅ | No | No |
 | System library security updates | Yes ✅ | N/A | N/A |
 
-### Favorable Benchmark Highlights 🏁
+### Benchmark Highlights 🏁
 
-These tables are intentionally selective: they show representative local workloads where PyPcre was fastest or effectively tied. Environment: `Python 3.14.3` free-threaded build on x86_64 Linux, compiled-pattern reuse, best-of-5 timing, lower is better.
+The tables below show representative local measurements from a `Python 3.14.3` free-threaded build on x86_64 Linux with compiled-pattern reuse. Results are best-of-5 and lower is better.
 
 | Workload | Operation | PyPcre | `re` | `regex` | PyPcre edge |
 | --- | --- | ---: | ---: | ---: | --- |
@@ -68,9 +68,9 @@ These tables are intentionally selective: they show representative local workloa
 | UUID extraction | `findall` | `77.49 ms` | `83.19 ms` | `134.87 ms` | `1.07x` vs `re`, `1.74x` vs `regex` |
 | Boundary-aware token scan | `findall` | `127.76 ms` | `128.03 ms` | `146.37 ms` | effectively tied with `re`, `1.15x` vs `regex` |
 
-### Threaded `PYTHON_GIL=0` Highlights 🧵
+### Free-Threaded Benchmark Highlights 🧵
 
-Same caveat: these are favorable local workloads. Measurements below used `8` threads sharing one compiled pattern, best-of-3 timing, lower is better.
+The measurements below used `8` threads sharing one compiled pattern in the same environment. Results are best-of-3 and lower is better.
 
 | Workload | Threads | PyPcre | `re` | `regex` | PyPcre edge |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -78,7 +78,7 @@ Same caveat: these are favorable local workloads. Measurements below used `8` th
 | Extract only `WARN` / `ERROR` lines | `8` | `28.58 ms` | `65.54 ms` | `73.55 ms` | `2.29x` vs `re`, `2.57x` vs `regex` |
 | Per-line full-name extraction | `8` | `31.68 ms` | `123.44 ms` | `164.80 ms` | `3.90x` vs `re`, `5.20x` vs `regex` |
 
-PyPcre is not trying to pretend stdlib `re` is bad. `re` is excellent. The point is different: PyPcre lets you keep that familiar Python shape while stepping into the `PCRE2` world with more syntax, more engine power, more explicit threading support, and many real workloads where it is already extremely competitive or outright faster. 🚀
+`stdlib.re` is a strong baseline, but PyPcre is built to be the better all-around package when you want more from regular expressions: full `PCRE2` features, more expressive syntax, JIT, explicit free-threaded support, and a stable `re`-style API surface. It keeps Python ergonomics while giving you a substantially more capable engine. 🚀
 
 ## Installation 📦
 
