@@ -171,7 +171,7 @@ jobs:
           ref: ${{ env.ref }}
 
 
-      - uses: Vampire/setup-wsl@v6
+      - uses: Vampire/setup-wsl@v7
         with:
           distribution: Ubuntu-24.04
           additional-packages:
