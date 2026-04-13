@@ -1,6 +1,6 @@
+import re
 import types
 from collections import OrderedDict
-import re
 
 import pytest
 from pcre import Flag

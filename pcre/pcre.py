@@ -18,6 +18,7 @@ from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
 from .flags import Flag, strip_py_only_flags
 
+
 # Cache frequently used flag values as plain integers to avoid the overhead of
 # IntFlag arithmetic in hot paths such as module-level search helpers.
 COMPAT_UNICODE_ESCAPE: int = int(Flag.COMPAT_UNICODE_ESCAPE)
@@ -29,11 +30,12 @@ NO_UTF: int = int(Flag.NO_UTF)
 NO_UCP: int = int(Flag.NO_UCP)
 from .re_compat import (
     Match as _CompatMatch,
+)
+from .re_compat import (
     TemplatePatternStub,
     coerce_group_value,
     coerce_subject_slice,
     compute_next_pos,
-    count_capturing_groups,
     is_bytes_like,
     join_parts,
     maybe_infer_group_count,
