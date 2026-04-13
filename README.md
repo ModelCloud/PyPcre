@@ -31,13 +31,54 @@ Modern `nogil` Python bindings for the PCRE2 library with `stdlib.re` API compat
 
 ## Why PyPcre ⚡
 
-PyPcre is a modern PCRE2 binding designed to be both fast and thread-safe in a `GIL=0` world. In the era of the global interpreter lock, Python had real threads but often only limited concurrency, aside from a handful of low-level APIs and packages. As Python moves toward a fuller `GIL=0` design, true multi-threaded concurrency becomes practical and brings Python closer to parity with other modern languages.
+PyPcre gives Python a familiar `re`-shaped API on top of the real `PCRE2` engine. That means you keep the ergonomics of the standard library while unlocking a far more capable regex engine, optional JIT, explicit threading support, and a binding that is designed and tested for free-threaded Python. 🧠⚡
 
-Many Python regular expression packages either segfault under `GIL=0` or suffer suboptimal performance because they were not designed with threaded execution in mind.
+### Big Wins 🏆
 
-PyPcre is fully CI-tested. Every API and PCRE2 flag is exercised in a continuous development environment backed by the ModelCloud.AI team. Fuzz (clobber) tests are also run to catch memory safety, accuracy, and memory leak regressions.
+- 🧬 **Full power of PCRE2**: this is the actual `PCRE2` engine, not a look-alike. You get its native compile options, semantics, JIT, and upstream tuning.
+- 🔥 **Much more powerful regex syntax**: `PCRE2` supports advanced constructs that go beyond stdlib `re`, including atomic groups `(?>...)`, possessive quantifiers `++`, branch-reset groups `(?|...)`, richer lookarounds, and backtracking control verbs like `(*SKIP)(*FAIL)`.
+- 🧵 **Thread-safe all the way into `nogil`**: PyPcre is built for `PYTHON_GIL=0`, with CI coverage, lock-aware caches, reusable match/JIT resources, and `parallel_map()` for multi-subject fan-out.
+- ⚡ **Fast on real workloads**: `PCRE2` JIT plus cached compiled patterns can make PyPcre as fast as, or faster than, `re` and `regex` on many common scans, especially multiline searches, lookaround-heavy patterns, and thread-heavy execution.
+- 🛡️ **Operationally safer**: PyPcre prefers the system `libpcre2-8` shared library so normal OS package updates can bring security and bug-fix benefits without a bundled fork.
+- ✅ **Validated hard**: this project runs API tests, fuzz tests, memory-safety checks, local `valgrind` leak checks, and `massif` heap profiles. Recent local profiling found `0` definite leaks and `0` possible leaks in both the public API and raw binding paths.
 
-For safety, PyPcre preferentially links against the OS-provided `libpcre2` package so it can benefit from upstream security patches. You can force a full source build with the `PYPCRE_BUILD_FROM_SOURCE=1` environment variable.
+### Quick Comparison 🥊
+
+| Area | PyPcre | `stdlib.re` | `regex` |
+| --- | --- | --- | --- |
+| Engine | Full `PCRE2` ✅ | CPython stdlib engine | Separate engine, not `PCRE2` |
+| `PCRE2` syntax and flags | Full access ✅ | No | No |
+| Advanced syntax surface | Very rich ✅ | More limited | Rich, but different from `PCRE2` |
+| JIT execution | `PCRE2` JIT ✅ | No | No |
+| `re`-shaped API | Yes ✅ | Native | Similar, but not the main goal |
+| Free-threaded `PYTHON_GIL=0` focus in this project | Yes ✅ | No PyPcre-style threading layer | Not a project focus here |
+| Built-in threaded subject fan-out | `parallel_map()` ✅ | No | No |
+| System library security updates | Yes ✅ | N/A | N/A |
+
+### Favorable Benchmark Highlights 🏁
+
+These tables are intentionally selective: they show representative local workloads where PyPcre was fastest or effectively tied. Environment: `Python 3.14.3` free-threaded build on x86_64 Linux, compiled-pattern reuse, best-of-5 timing, lower is better.
+
+| Workload | Operation | PyPcre | `re` | `regex` | PyPcre edge |
+| --- | --- | ---: | ---: | ---: | --- |
+| First `ERROR` line in a multiline log buffer | `search` | `3.68 ms` | `51.72 ms` | `5.67 ms` | `14.0x` vs `re`, `1.54x` vs `regex` |
+| Extract only `WARN` / `ERROR` lines | `findall` | `6.41 ms` | `91.84 ms` | `91.14 ms` | `14.3x` vs `re`, `14.2x` vs `regex` |
+| Per-line full-name extraction | `findall` | `22.28 ms` | `172.38 ms` | `218.29 ms` | `7.74x` vs `re`, `9.80x` vs `regex` |
+| Lookbehind + negative-lookahead extraction | `findall` | `50.23 ms` | `53.35 ms` | `57.03 ms` | `1.06x` vs `re`, `1.14x` vs `regex` |
+| UUID extraction | `findall` | `77.49 ms` | `83.19 ms` | `134.87 ms` | `1.07x` vs `re`, `1.74x` vs `regex` |
+| Boundary-aware token scan | `findall` | `127.76 ms` | `128.03 ms` | `146.37 ms` | effectively tied with `re`, `1.15x` vs `regex` |
+
+### Threaded `PYTHON_GIL=0` Highlights 🧵
+
+Same caveat: these are favorable local workloads. Measurements below used `8` threads sharing one compiled pattern, best-of-3 timing, lower is better.
+
+| Workload | Threads | PyPcre | `re` | `regex` | PyPcre edge |
+| --- | ---: | ---: | ---: | ---: | --- |
+| First `ERROR` line in a multiline log buffer | `8` | `25.34 ms` | `38.83 ms` | `40.34 ms` | `1.53x` vs `re`, `1.59x` vs `regex` |
+| Extract only `WARN` / `ERROR` lines | `8` | `28.58 ms` | `65.54 ms` | `73.55 ms` | `2.29x` vs `re`, `2.57x` vs `regex` |
+| Per-line full-name extraction | `8` | `31.68 ms` | `123.44 ms` | `164.80 ms` | `3.90x` vs `re`, `5.20x` vs `regex` |
+
+PyPcre is not trying to pretend stdlib `re` is bad. `re` is excellent. The point is different: PyPcre lets you keep that familiar Python shape while stepping into the `PCRE2` world with more syntax, more engine power, more explicit threading support, and many real workloads where it is already extremely competitive or outright faster. 🚀
 
 ## Installation 📦
 
