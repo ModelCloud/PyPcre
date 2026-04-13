@@ -7,7 +7,7 @@
 
 # PyPcre (Python PCRE2 Binding) 🧬
 
-Modern `nogil` Python bindings for the PCRE2 library with `stdlib.re` API compatibility. ⚡
+Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compatible API. ⚡
 
 <p align="center">
     <a href="https://github.com/ModelCloud/PyPcre/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/Pcre.svg"></a>
@@ -31,16 +31,16 @@ Modern `nogil` Python bindings for the PCRE2 library with `stdlib.re` API compat
 
 ## Why PyPcre ⚡
 
-PyPcre gives Python a familiar `re`-shaped API on top of the real `PCRE2` engine. That means you keep the ergonomics of the standard library while unlocking a far more capable regex engine, optional JIT, explicit threading support, and a binding that is designed and tested for free-threaded Python. 🧠⚡
+PyPcre pairs Python's familiar `re`-compatible API with the real `PCRE2` engine. You keep the ergonomics of the standard library while gaining a more capable regex engine, optional JIT, explicit threading support, and a binding designed and tested for free-threaded Python. 🧠⚡
 
 ### Big Wins 🏆
 
-- 🧬 **Full power of PCRE2**: this is the actual `PCRE2` engine, not a look-alike. You get its native compile options, semantics, JIT, and upstream tuning.
-- 🔥 **Much more powerful regex syntax**: `PCRE2` supports advanced constructs that go beyond stdlib `re`, including atomic groups `(?>...)`, possessive quantifiers `++`, branch-reset groups `(?|...)`, richer lookarounds, and backtracking control verbs like `(*SKIP)(*FAIL)`.
-- 🧵 **Thread-safe all the way into `nogil`**: PyPcre is built for `PYTHON_GIL=0`, with CI coverage, lock-aware caches, reusable match/JIT resources, and `parallel_map()` for multi-subject fan-out.
-- ⚡ **Fast on real workloads**: `PCRE2` JIT plus cached compiled patterns can make PyPcre as fast as, or faster than, `re` and `regex` on many common scans, especially multiline searches, lookaround-heavy patterns, and thread-heavy execution.
-- 🛡️ **Operationally safer**: PyPcre prefers the system `libpcre2-8` shared library so normal OS package updates can bring security and bug-fix benefits without a bundled fork.
-- ✅ **Validated hard**: this project runs API tests, fuzz tests, memory-safety checks, local `valgrind` leak checks, and `massif` heap profiles. Recent local profiling found `0` definite leaks and `0` possible leaks in both the public API and raw binding paths.
+- 🧬 **Full power of PCRE2**: PyPcre uses the real `PCRE2` engine, so you get native compile options, semantics, JIT, and upstream tuning.
+- 🔥 **More expressive regex syntax**: `PCRE2` supports constructs beyond stdlib `re`, including atomic groups `(?>...)`, possessive quantifiers `++`, branch-reset groups `(?|...)`, richer lookarounds, and backtracking control verbs like `(*SKIP)(*FAIL)`.
+- 🧵 **Thread-safe into `nogil`**: PyPcre is built for `PYTHON_GIL=0`, with CI coverage, lock-aware caches, reusable match/JIT resources, and `parallel_map()` for multi-subject fan-out.
+- ⚡ **Fast on real workloads**: `PCRE2` JIT plus cached compiled patterns lets PyPcre match or beat `re` and `regex` on many common scans, especially multiline searches, lookaround-heavy patterns, and free-threaded execution.
+- 🛡️ **Safer operational story**: PyPcre prefers the system `libpcre2-8` shared library so normal OS package updates can bring security and bug-fix benefits without a bundled fork.
+- ✅ **Validated thoroughly**: the project runs API tests, fuzz tests, memory-safety checks, local `valgrind` leak checks, and `massif` heap profiles. Recent local profiling found `0` definite leaks and `0` possible leaks in both the public API and raw binding paths.
 
 ### Quick Comparison 🥊
 
@@ -48,16 +48,16 @@ PyPcre gives Python a familiar `re`-shaped API on top of the real `PCRE2` engine
 | --- | --- | --- | --- |
 | Engine | Full `PCRE2` ✅ | CPython stdlib engine | Separate engine, not `PCRE2` |
 | `PCRE2` syntax and flags | Full access ✅ | No | No |
-| Advanced syntax surface | Very rich ✅ | More limited | Rich, but different from `PCRE2` |
+| Syntax power | Very rich ✅ | More limited | Rich, but different from `PCRE2` |
 | JIT execution | `PCRE2` JIT ✅ | No | No |
-| `re`-shaped API | Yes ✅ | Native | Similar, but not the main goal |
-| Free-threaded `PYTHON_GIL=0` focus in this project | Yes ✅ | No PyPcre-style threading layer | Not a project focus here |
+| `re`-compatible API surface | Stable and familiar ✅ | Native | Similar, but not the main goal |
+| Free-threaded support | Built and tested for `PYTHON_GIL=0` ✅ | No explicit PyPcre-style layer | Not a project focus here |
 | Built-in threaded subject fan-out | `parallel_map()` ✅ | No | No |
-| System library security updates | Yes ✅ | N/A | N/A |
+| System library updates | Uses system `libpcre2-8` by default ✅ | N/A | N/A |
 
 ### Benchmark Highlights 🏁
 
-The tables below show representative local measurements from a `Python 3.14.3` free-threaded build on x86_64 Linux with compiled-pattern reuse. Results are best-of-5 and lower is better.
+Measured on a `Python 3.14.3` free-threaded build on x86_64 Linux with compiled-pattern reuse. Times are best-of-5; lower is better.
 
 | Workload | Operation | PyPcre | `re` | `regex` | PyPcre edge |
 | --- | --- | ---: | ---: | ---: | --- |
@@ -70,7 +70,7 @@ The tables below show representative local measurements from a `Python 3.14.3` f
 
 ### Free-Threaded Benchmark Highlights 🧵
 
-The measurements below used `8` threads sharing one compiled pattern in the same environment. Results are best-of-3 and lower is better.
+Measured in the same environment with `8` threads sharing one compiled pattern. Times are best-of-3; lower is better.
 
 | Workload | Threads | PyPcre | `re` | `regex` | PyPcre edge |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -78,7 +78,7 @@ The measurements below used `8` threads sharing one compiled pattern in the same
 | Extract only `WARN` / `ERROR` lines | `8` | `28.58 ms` | `65.54 ms` | `73.55 ms` | `2.29x` vs `re`, `2.57x` vs `regex` |
 | Per-line full-name extraction | `8` | `31.68 ms` | `123.44 ms` | `164.80 ms` | `3.90x` vs `re`, `5.20x` vs `regex` |
 
-`stdlib.re` is a strong baseline, but PyPcre is built to be the better all-around package when you want more from regular expressions: full `PCRE2` features, more expressive syntax, JIT, explicit free-threaded support, and a stable `re`-style API surface. It keeps Python ergonomics while giving you a substantially more capable engine. 🚀
+PyPcre is the stronger all-around choice when you want more than the baseline: full `PCRE2` features, more expressive syntax, JIT, explicit free-threaded support, and a stable `re`-compatible API surface. It keeps Python ergonomics while giving you a substantially more capable engine. 🚀
 
 ## Installation 📦
 
@@ -86,7 +86,7 @@ The measurements below used `8` threads sharing one compiled pattern in the same
 pip install PyPcre
 ```
 
-The package prefers linking against the system `libpcre2-8` shared library for fast installs and to inherit security updates from the OS. See [Building](#building) for manual build details.
+By default, the package links against the system `libpcre2-8` shared library for fast installs and to inherit OS security updates. See [Building](#building) for manual build details.
 
 ## Platform Support (Validated) ✅
 
@@ -95,15 +95,13 @@ The package prefers linking against the system `libpcre2-8` shared library for f
 
 ## Usage 🛠️
 
-If you already rely on the standard library `re`, migrating is as
-simple as changing your import:
+If you already use the standard library `re`, migration is often just an import swap:
 
 ```python
 import pcre as re
 ```
 
-The high-level API keeps the standard library shape, so most existing `re`
-code can move over with little or no rewriting.
+The high-level API stays close to the standard library, so most existing `re` code can move over with little or no rewriting.
 
 ### Quick start 🚀
 
@@ -117,7 +115,7 @@ pattern = compile(rb"\d+", flags=Flag.MULTILINE)
 numbers = pattern.findall(b"line 1\nline 22")
 ```
 
-### User-facing API 🧭
+### API Overview 🧭
 
 - Module helpers: `prefixmatch`, `match`, `search`, `fullmatch`, `finditer`,
   `findall`, `split`, `sub`, `subn`, `compile`, `escape`, `purge`, and
@@ -231,8 +229,7 @@ the conversion without repeating the flag.
 
 ## Building 🏗️
 
-The extension links against an existing PCRE2 installation (the `libpcre2-8`
-variant). Install the development headers for your platform before building,
+The extension links against an existing `libpcre2-8` installation. Install the development headers for your platform before building,
 for example `apt install libpcre2-dev` on Debian/Ubuntu, `dnf install pcre2-devel`
 on Fedora/RHEL derivatives, or `brew install pcre2` on macOS.
 
