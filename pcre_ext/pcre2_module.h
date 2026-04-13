@@ -59,15 +59,25 @@ typedef struct {
     int first_literal_caseless;
 } PatternObject;
 
+/*
+ * MatchObject is the single match carrier used by both the low-level C API and
+ * the higher-level Python wrapper. `pattern` always points at the compiled C
+ * pattern that produced the match, while `public_pattern` optionally points at
+ * the high-level `pcre.Pattern` wrapper so public `match.re` parity can be
+ * preserved without allocating a second Python-side wrapper object.
+ */
 typedef struct {
     PyObject_HEAD
     PatternObject *pattern;
+    PyObject *public_pattern;
     PyObject *subject;
     PyObject *utf8_owner;
     const char *utf8_data;
     Py_ssize_t utf8_length;
     Py_ssize_t *ovector;
     uint32_t ovec_count;
+    Py_ssize_t public_pos;
+    Py_ssize_t public_endpos;
     int subject_is_bytes;
 } MatchObject;
 

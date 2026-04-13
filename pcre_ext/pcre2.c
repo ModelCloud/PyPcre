@@ -27,9 +27,11 @@ resolve_pcre2_prerelease(void)
     return raw;
 }
 
+/* Process-wide library metadata cached once during module initialization. */
 static char pcre2_library_version[64] = "unknown";
 static ATOMIC_VAR(int) pcre2_version_initialized = 0;
 #if defined(PCRE2_USE_OFFSET_LIMIT)
+/* -1 unknown, 0 unsupported, 1 supported by the loaded PCRE2 runtime. */
 static ATOMIC_VAR(int) offset_limit_support = ATOMIC_VAR_INIT(-1);
 #endif
 
@@ -162,6 +164,7 @@ static void
 Match_dealloc(MatchObject *self)
 {
     Py_XDECREF(self->pattern);
+    Py_XDECREF(self->public_pattern);
     Py_XDECREF(self->subject);
     Py_XDECREF(self->utf8_owner);
     pcre_free(self->ovector);
@@ -174,6 +177,64 @@ Match_repr(MatchObject *self)
     Py_ssize_t start = self->ovector[0];
     Py_ssize_t end = self->ovector[1];
     return PyUnicode_FromFormat("<Match span=(%zd, %zd) pattern=%R>", start, end, self->pattern->pattern);
+}
+
+static inline PyObject *
+match_public_pattern(MatchObject *self)
+{
+    if (self->public_pattern != NULL) {
+        return self->public_pattern;
+    }
+    return (PyObject *)self->pattern;
+}
+
+static int
+match_resolve_span(MatchObject *self,
+                   Py_ssize_t index,
+                   Py_ssize_t *start_out,
+                   Py_ssize_t *end_out,
+                   int allow_missing)
+{
+    /*
+     * Convert the raw byte-oriented ovector entry into the user-visible span.
+     * For bytes subjects the PCRE2 offsets are already correct. For text
+     * subjects we translate byte offsets back to Python code-point indexes.
+     */
+    if (index < 0 || (uint32_t)index >= self->ovec_count) {
+        PyErr_SetString(PyExc_IndexError, "group index out of range");
+        return -1;
+    }
+
+    Py_ssize_t start = self->ovector[index * 2];
+    Py_ssize_t end = self->ovector[index * 2 + 1];
+    if (start < 0 || end < 0) {
+        if (allow_missing) {
+            *start_out = -1;
+            *end_out = -1;
+            return 0;
+        }
+        return 1;
+    }
+
+    if (self->subject_is_bytes) {
+        *start_out = start;
+        *end_out = end;
+        return 0;
+    }
+
+    const char *data = self->utf8_data;
+    Py_ssize_t start_index = utf8_offset_to_index(data, start);
+    if (start_index < 0 && PyErr_Occurred()) {
+        return -1;
+    }
+    Py_ssize_t end_index = utf8_offset_to_index(data, end);
+    if (end_index < 0 && PyErr_Occurred()) {
+        return -1;
+    }
+
+    *start_out = start_index;
+    *end_out = end_index;
+    return 0;
 }
 
 static int
@@ -309,28 +370,16 @@ Match_span(MatchObject *self, PyObject *args)
     if (resolve_group_key(self, key, &index) < 0) {
         return NULL;
     }
-    if (index < 0 || (uint32_t)index >= self->ovec_count) {
-        PyErr_SetString(PyExc_IndexError, "group index out of range");
+    Py_ssize_t start = 0;
+    Py_ssize_t end = 0;
+    int rc = match_resolve_span(self, index, &start, &end, 0);
+    if (rc < 0) {
         return NULL;
     }
-    Py_ssize_t start = self->ovector[index * 2];
-    Py_ssize_t end = self->ovector[index * 2 + 1];
-    if (start < 0 || end < 0) {
+    if (rc > 0) {
         Py_RETURN_NONE;
     }
-    if (self->subject_is_bytes) {
-        return Py_BuildValue("(nn)", start, end);
-    }
-    const char *data = self->utf8_data;
-    Py_ssize_t start_index = utf8_offset_to_index(data, start);
-    if (start_index < 0 && PyErr_Occurred()) {
-        return NULL;
-    }
-    Py_ssize_t end_index = utf8_offset_to_index(data, end);
-    if (end_index < 0 && PyErr_Occurred()) {
-        return NULL;
-    }
-    return Py_BuildValue("(nn)", start_index, end_index);
+    return Py_BuildValue("(nn)", start, end);
 }
 
 static PyObject *
@@ -415,6 +464,139 @@ Match_get_string(MatchObject *self, void *closure)
     return self->subject;
 }
 
+static PyObject *
+Match_get_re(MatchObject *self, void *closure)
+{
+    PyObject *pattern = match_public_pattern(self);
+    Py_INCREF(pattern);
+    return pattern;
+}
+
+static PyObject *
+Match_get_pos(MatchObject *self, void *closure)
+{
+    return PyLong_FromSsize_t(self->public_pos);
+}
+
+static PyObject *
+Match_get_endpos(MatchObject *self, void *closure)
+{
+    return PyLong_FromSsize_t(self->public_endpos);
+}
+
+static PyObject *
+Match_get_lastindex(MatchObject *self, void *closure)
+{
+    if (self->ovec_count <= 1) {
+        Py_RETURN_NONE;
+    }
+
+    for (Py_ssize_t index = (Py_ssize_t)self->ovec_count - 1; index >= 1; --index) {
+        Py_ssize_t start = self->ovector[index * 2];
+        Py_ssize_t end = self->ovector[index * 2 + 1];
+        if (start >= 0 && end >= 0) {
+            return PyLong_FromSsize_t(index);
+        }
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+Match_get_lastgroup(MatchObject *self, void *closure)
+{
+    PyObject *lastindex_obj = Match_get_lastindex(self, closure);
+    if (lastindex_obj == NULL || lastindex_obj == Py_None) {
+        return lastindex_obj;
+    }
+
+    PyObject *key = NULL;
+    PyObject *value = NULL;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(self->pattern->groupindex, &pos, &key, &value)) {
+        int matches = PyObject_RichCompareBool(value, lastindex_obj, Py_EQ);
+        if (matches < 0) {
+            Py_DECREF(lastindex_obj);
+            return NULL;
+        }
+        if (matches) {
+            Py_INCREF(key);
+            Py_DECREF(lastindex_obj);
+            return key;
+        }
+    }
+
+    Py_DECREF(lastindex_obj);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+Match_get_regs(MatchObject *self, void *closure)
+{
+    PyObject *result = PyTuple_New(self->ovec_count);
+    if (result == NULL) {
+        return NULL;
+    }
+
+    for (uint32_t index = 0; index < self->ovec_count; ++index) {
+        Py_ssize_t start = 0;
+        Py_ssize_t end = 0;
+        if (match_resolve_span(self, (Py_ssize_t)index, &start, &end, 1) < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyObject *span = Py_BuildValue("(nn)", start, end);
+        if (span == NULL) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(result, index, span);
+    }
+
+    return result;
+}
+
+static PyObject *
+Match_expand(MatchObject *self, PyObject *template_obj)
+{
+    /* Delegate template parsing to the Python compatibility helper. */
+    PyObject *module = PyImport_ImportModule("pcre.re_compat");
+    if (module == NULL) {
+        return NULL;
+    }
+
+    PyObject *helper = PyObject_GetAttrString(module, "expand_match_template");
+    Py_DECREF(module);
+    if (helper == NULL) {
+        return NULL;
+    }
+
+    PyObject *result = PyObject_CallFunctionObjArgs(
+        helper,
+        (PyObject *)self,
+        template_obj,
+        NULL
+    );
+    Py_DECREF(helper);
+    return result;
+}
+
+static int
+match_set_public_pattern(MatchObject *self, PyObject *public_pattern)
+{
+    /* The high-level wrapper reuses this C object and swaps in its owner here. */
+    if (public_pattern == NULL) {
+        Py_XDECREF(self->public_pattern);
+        self->public_pattern = NULL;
+        return 0;
+    }
+
+    Py_INCREF(public_pattern);
+    Py_XDECREF(self->public_pattern);
+    self->public_pattern = public_pattern;
+    return 0;
+}
+
 static PyMethodDef Match_methods[] = {
     {"group", (PyCFunction)Match_group, METH_VARARGS, PyDoc_STR("Return one or more capture groups.")},
     {"groups", (PyCFunction)Match_groups, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return all capture groups as a tuple." )},
@@ -422,11 +604,18 @@ static PyMethodDef Match_methods[] = {
     {"span", (PyCFunction)Match_span, METH_VARARGS, PyDoc_STR("Return the (start, end) span for a group." )},
     {"start", (PyCFunction)Match_start, METH_VARARGS, PyDoc_STR("Return the start index for a group." )},
     {"end", (PyCFunction)Match_end, METH_VARARGS, PyDoc_STR("Return the end index for a group." )},
+    {"expand", (PyCFunction)Match_expand, METH_O, PyDoc_STR("Apply a replacement template to the match." )},
     {NULL, NULL, 0, NULL},
 };
 
 static PyGetSetDef Match_getset[] = {
+    {"re", (getter)Match_get_re, NULL, PyDoc_STR("Pattern object used for the match."), NULL},
     {"string", (getter)Match_get_string, NULL, PyDoc_STR("Original subject."), NULL},
+    {"pos", (getter)Match_get_pos, NULL, PyDoc_STR("Original search start position."), NULL},
+    {"endpos", (getter)Match_get_endpos, NULL, PyDoc_STR("Original search end position."), NULL},
+    {"lastindex", (getter)Match_get_lastindex, NULL, PyDoc_STR("Index of the last matched capturing group."), NULL},
+    {"lastgroup", (getter)Match_get_lastgroup, NULL, PyDoc_STR("Name of the last matched capturing group."), NULL},
+    {"regs", (getter)Match_get_regs, NULL, PyDoc_STR("Tuple of span pairs for the whole match and each group."), NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -450,6 +639,7 @@ typedef struct {
     int subject_is_bytes;
     Py_ssize_t subject_length_bytes;
     Py_ssize_t logical_length;
+    Py_ssize_t origin_pos;
     Py_ssize_t current_pos;
     Py_ssize_t current_byte;
     Py_ssize_t resolved_end;
@@ -468,11 +658,18 @@ typedef struct {
     int utf8_is_ascii;
 } FindIterObject;
 
+/*
+ * Iteration over Unicode subjects frequently needs byte<->code-point
+ * conversions. These caches keep the common forward-only scan cheap rather than
+ * rescanning the full subject for every match.
+ */
 static MatchObject *create_match_object(PatternObject *pattern,
                                         PyObject *subject_obj,
                                         PyObject *utf8_owner,
                                         const char *utf8_data,
                                         Py_ssize_t utf8_length,
+                                        Py_ssize_t pos,
+                                        Py_ssize_t endpos,
                                         uint32_t ovec_count,
                                         PCRE2_SIZE *ovector);
 
@@ -480,6 +677,7 @@ static MatchObject *create_match_object(PatternObject *pattern,
 static inline Py_ssize_t
 utf8_index_to_offset_fast(const char *data, Py_ssize_t data_len, Py_ssize_t index)
 {
+    /* Walk UTF-8 once, collapsing ASCII runs so index->byte conversion stays cheap. */
     if (index <= 0) {
         return 0;
     }
@@ -524,6 +722,7 @@ utf8_index_to_offset_fast(const char *data, Py_ssize_t data_len, Py_ssize_t inde
 static Py_ssize_t
 finditer_byte_to_index(FindIterObject *self, Py_ssize_t target_byte)
 {
+    /* Convert a byte offset back to a code-point index using the forward cache. */
     if (target_byte < 0) {
         self->byte_to_index_cached_index = 0;
         self->byte_to_index_cached_byte = 0;
@@ -595,6 +794,7 @@ finditer_byte_to_index(FindIterObject *self, Py_ssize_t target_byte)
 static Py_ssize_t
 finditer_index_to_byte(FindIterObject *self, Py_ssize_t target_index)
 {
+    /* Convert a code-point index to a byte offset using the forward cache. */
     if (target_index < 0) {
         self->index_to_byte_cached_index = 0;
         self->index_to_byte_cached_byte = 0;
@@ -820,6 +1020,8 @@ matched:
         self->utf8_owner,
         self->utf8_data,
         self->subject_length_bytes,
+        self->origin_pos,
+        self->resolved_end,
         (uint32_t)expected_pairs,
         ovector);
     if (match == NULL) {
@@ -888,9 +1090,15 @@ create_match_object(PatternObject *pattern,
                     PyObject *utf8_owner,
                     const char *utf8_data,
                     Py_ssize_t utf8_length,
+                    Py_ssize_t pos,
+                    Py_ssize_t endpos,
                     uint32_t ovec_count,
                     PCRE2_SIZE *ovector)
 {
+    /*
+     * Materialize a standalone match snapshot. The ovector is copied because
+     * PCRE2 reuses match-data buffers from caches across calls and threads.
+     */
     MatchObject *match = PyObject_New(MatchObject, &MatchType);
     if (match == NULL) {
         return NULL;
@@ -910,6 +1118,7 @@ create_match_object(PatternObject *pattern,
 
     Py_INCREF(pattern);
     match->pattern = pattern;
+    match->public_pattern = NULL;
 
     Py_INCREF(subject_obj);
     match->subject = subject_obj;
@@ -918,6 +1127,8 @@ create_match_object(PatternObject *pattern,
     match->utf8_owner = utf8_owner;
     match->utf8_data = utf8_data;
     match->utf8_length = utf8_length;
+    match->public_pos = pos;
+    match->public_endpos = endpos;
     match->subject_is_bytes = PyBytes_Check(subject_obj);
 
     return match;
@@ -943,6 +1154,7 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->subject_is_bytes = 0;
     iter->subject_length_bytes = 0;
     iter->logical_length = 0;
+    iter->origin_pos = 0;
     iter->current_pos = 0;
     iter->current_byte = 0;
     iter->resolved_end = 0;
@@ -1045,6 +1257,7 @@ Pattern_create_finditer(PatternObject *pattern,
     }
 
     iter->current_pos = pos;
+    iter->origin_pos = pos;
     iter->current_byte = current_byte;
     iter->resolved_end = resolved_end;
     iter->resolved_end_byte = resolved_end_byte;
@@ -1569,6 +1782,8 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         utf8_owner,
         buffer,
         subject_length_bytes,
+        pos,
+        adjusted_endpos >= 0 ? adjusted_endpos : logical_length,
         (uint32_t)expected_pairs,
         ovector);
 
@@ -1968,6 +2183,33 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     Py_RETURN_FALSE;
 }
 
+static PyObject *
+module_attach_match(PyObject *Py_UNUSED(module), PyObject *args)
+{
+    /*
+     * The public Python wrapper keeps using the same C MatchObject and only
+     * stamps in the high-level owner here. That avoids a second Python object
+     * allocation on every successful search/match call.
+     */
+    PyObject *match_obj = NULL;
+    PyObject *pattern_obj = NULL;
+    if (!PyArg_ParseTuple(args, "OO", &match_obj, &pattern_obj)) {
+        return NULL;
+    }
+
+    if (!PyObject_TypeCheck(match_obj, &MatchType)) {
+        PyErr_SetString(PyExc_TypeError, "expected pcre.Match instance");
+        return NULL;
+    }
+
+    if (match_set_public_pattern((MatchObject *)match_obj, pattern_obj) < 0) {
+        return NULL;
+    }
+
+    Py_INCREF(match_obj);
+    return match_obj;
+}
+
 static PyObject *module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static PyObject *module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static void initialize_pcre2_version(void);
@@ -1979,6 +2221,7 @@ static PyMethodDef module_methods[] = {
     {"search", (PyCFunction)module_search, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search a string for a pattern." )},
     {"fullmatch", (PyCFunction)module_fullmatch, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the entire string." )},
     {"configure", (PyCFunction)module_configure, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Get or set module-wide defaults (currently only 'jit')." )},
+    {"_attach_match", (PyCFunction)module_attach_match, METH_VARARGS, PyDoc_STR("Attach a public pattern owner to a low-level match object." )},
     {"get_match_data_cache_size", (PyCFunction)module_get_match_data_cache_size, METH_NOARGS, PyDoc_STR("Return the capacity of the reusable match-data cache." )},
     {"set_match_data_cache_size", (PyCFunction)module_set_match_data_cache_size, METH_VARARGS, PyDoc_STR("Set the capacity of the reusable match-data cache." )},
     {"clear_match_data_cache", (PyCFunction)module_clear_match_data_cache, METH_NOARGS, PyDoc_STR("Release all cached PCRE2 match-data buffers." )},

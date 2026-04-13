@@ -28,7 +28,7 @@ NO_JIT: int = int(Flag.NO_JIT)
 NO_UTF: int = int(Flag.NO_UTF)
 NO_UCP: int = int(Flag.NO_UCP)
 from .re_compat import (
-    Match,
+    Match as _CompatMatch,
     TemplatePatternStub,
     coerce_group_value,
     coerce_subject_slice,
@@ -53,6 +53,9 @@ from .threads import (
 
 _CPattern = _pcre2.Pattern
 PcreError = _pcre2.PcreError
+Match = getattr(_pcre2, "Match", _CompatMatch)
+_ATTACH_MATCH = getattr(_pcre2, "_attach_match", None)
+_RAW_MATCH_TYPE = getattr(_pcre2, "Match", None)
 
 FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 
@@ -63,6 +66,14 @@ _DEFAULT_COMPAT_REGEX = False
 _THREAD_MODE_DISABLED = "disabled"
 _THREAD_MODE_ENABLED = "enabled"
 _THREAD_MODE_AUTO = "auto"
+
+
+def _can_attach_match(raw: Any) -> bool:
+    return (
+        _ATTACH_MATCH is not None
+        and _RAW_MATCH_TYPE is not None
+        and isinstance(raw, _RAW_MATCH_TYPE)
+    )
 
 
 def _resolve_jit_setting(jit: bool | None) -> bool:
@@ -162,13 +173,6 @@ def _normalise_flags(flags: FlagInput) -> int:
     raise TypeError("flags must be an int, stdlib re flag, or an iterable of those")
 
 
-def _call_with_optional_end(method, subject: Any, pos: int, endpos: int | None, options: int):
-    resolved_end = resolve_endpos(subject, endpos)
-    if endpos is None:
-        return method(subject, pos=pos, options=options), resolved_end
-    return method(subject, pos=pos, endpos=resolved_end, options=options), resolved_end
-
-
 class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
@@ -223,8 +227,10 @@ class Pattern:
         self._thread_mode = _THREAD_MODE_AUTO
 
     def _update_group_hint(self, match: Match) -> None:
+        if self._groups_hint is not None:
+            return
         groups_count = len(match.groups())
-        if self._groups_hint is None or groups_count > self._groups_hint:
+        if groups_count > 0:
             self._groups_hint = groups_count
 
     def _wrap_match(
@@ -236,7 +242,9 @@ class Pattern:
     ) -> Match | None:
         if raw is None:
             return None
-        wrapped = Match(self, raw, subject, pos, end_boundary)
+        if _can_attach_match(raw):
+            return _ATTACH_MATCH(raw, self)
+        wrapped = _CompatMatch(self, raw, subject, pos, end_boundary)
         self._update_group_hint(wrapped)
         return wrapped
 
@@ -248,8 +256,22 @@ class Pattern:
         endpos: int | None = None,
         options: int = 0,
     ) -> Match | None:
-        subject = prepare_subject(subject)
-        raw, resolved_end = _call_with_optional_end(self._pattern.match, subject, pos, endpos, options)
+        if type(subject) is memoryview:
+            subject = subject.tobytes()
+        if endpos is None:
+            raw = self._pattern.match(subject, pos=pos, options=options)
+            if raw is None:
+                return None
+            if _can_attach_match(raw):
+                return _ATTACH_MATCH(raw, self)
+            resolved_end = len(subject)
+        else:
+            resolved_end = resolve_endpos(subject, endpos)
+            raw = self._pattern.match(subject, pos=pos, endpos=resolved_end, options=options)
+            if raw is None:
+                return None
+            if _can_attach_match(raw):
+                return _ATTACH_MATCH(raw, self)
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     prefixmatch = match
@@ -262,8 +284,22 @@ class Pattern:
         endpos: int | None = None,
         options: int = 0,
     ) -> Match | None:
-        subject = prepare_subject(subject)
-        raw, resolved_end = _call_with_optional_end(self._pattern.search, subject, pos, endpos, options)
+        if type(subject) is memoryview:
+            subject = subject.tobytes()
+        if endpos is None:
+            raw = self._pattern.search(subject, pos=pos, options=options)
+            if raw is None:
+                return None
+            if _can_attach_match(raw):
+                return _ATTACH_MATCH(raw, self)
+            resolved_end = len(subject)
+        else:
+            resolved_end = resolve_endpos(subject, endpos)
+            raw = self._pattern.search(subject, pos=pos, endpos=resolved_end, options=options)
+            if raw is None:
+                return None
+            if _can_attach_match(raw):
+                return _ATTACH_MATCH(raw, self)
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     def fullmatch(
@@ -274,8 +310,22 @@ class Pattern:
         endpos: int | None = None,
         options: int = 0,
     ) -> Match | None:
-        subject = prepare_subject(subject)
-        raw, resolved_end = _call_with_optional_end(self._pattern.fullmatch, subject, pos, endpos, options)
+        if type(subject) is memoryview:
+            subject = subject.tobytes()
+        if endpos is None:
+            raw = self._pattern.fullmatch(subject, pos=pos, options=options)
+            if raw is None:
+                return None
+            if _can_attach_match(raw):
+                return _ATTACH_MATCH(raw, self)
+            resolved_end = len(subject)
+        else:
+            resolved_end = resolve_endpos(subject, endpos)
+            raw = self._pattern.fullmatch(subject, pos=pos, endpos=resolved_end, options=options)
+            if raw is None:
+                return None
+            if _can_attach_match(raw):
+                return _ATTACH_MATCH(raw, self)
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     def finditer(
@@ -286,7 +336,8 @@ class Pattern:
         endpos: int | None = None,
         options: int = 0,
     ) -> Generator[Match, None, None]:
-        subject = prepare_subject(subject)
+        if type(subject) is memoryview:
+            subject = subject.tobytes()
         origin_pos = pos
         resolved_end = resolve_endpos(subject, endpos)
         backend_iter = getattr(self._pattern, "finditer", None)
@@ -298,9 +349,7 @@ class Pattern:
                 raw_iter = None
             if raw_iter is not None:
                 for raw in raw_iter:
-                    match_obj = Match(self, raw, subject, origin_pos, resolved_end)
-                    self._update_group_hint(match_obj)
-                    yield match_obj
+                    yield self._wrap_match(raw, subject, origin_pos, resolved_end)
                 return
 
         search_end = resolved_end if endpos is not None else -1
@@ -312,8 +361,7 @@ class Pattern:
             if raw is None:
                 break
 
-            match_obj = Match(self, raw, subject, origin_pos, resolved_end)
-            self._update_group_hint(match_obj)
+            match_obj = self._wrap_match(raw, subject, origin_pos, resolved_end)
             yield match_obj
 
             start, end = match_obj.span()
@@ -334,6 +382,25 @@ class Pattern:
         endpos: int | None = None,
         options: int = 0,
     ) -> List[Any]:
+        if type(subject) is memoryview:
+            subject = subject.tobytes()
+        backend_iter = getattr(self._pattern, "finditer", None)
+        if backend_iter is not None:
+            compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
+            try:
+                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+            except TypeError:
+                raw_iter = None
+            if raw_iter is not None:
+                results: List[Any] = []
+                for raw in raw_iter:
+                    groups = raw.groups()
+                    if groups:
+                        results.append(groups[0] if len(groups) == 1 else groups)
+                    else:
+                        results.append(raw.group(0))
+                return results
+
         results: List[Any] = []
         for match_obj in self.finditer(subject, pos=pos, endpos=endpos, options=options):
             groups = match_obj.groups()
