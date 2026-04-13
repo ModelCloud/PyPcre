@@ -151,6 +151,24 @@ def render_template(parsed: Any, match: "Match", *, is_bytes: bool, empty: Any) 
     return join_parts(pieces, is_bytes=is_bytes)
 
 
+def expand_match_template(match: Any, template: Any) -> Any:
+    is_bytes = is_bytes_like(match.string)
+    empty = b"" if is_bytes else ""
+    if is_bytes:
+        if not is_bytes_like(template):
+            raise TypeError("template must be bytes-like for bytes matches")
+        template = bytes(template)
+    else:
+        if not isinstance(template, str):
+            raise TypeError("template must be str for text matches")
+
+    parsed = _parser.parse_template(
+        template,
+        TemplatePatternStub(match.re.groups, match.re.groupindex),
+    )
+    return render_template(parsed, match, is_bytes=is_bytes, empty=empty)
+
+
 def maybe_infer_group_count(pattern_source: Any) -> int | None:
     normalised = pattern_source
     if isinstance(normalised, memoryview):
@@ -270,21 +288,7 @@ class Match:
         return self._match.span(group)
 
     def expand(self, template: Any) -> Any:
-        is_bytes = is_bytes_like(self._string)
-        empty = b"" if is_bytes else ""
-        if is_bytes:
-            if not is_bytes_like(template):
-                raise TypeError("template must be bytes-like for bytes matches")
-            template = bytes(template)
-        else:
-            if not isinstance(template, str):
-                raise TypeError("template must be str for text matches")
-
-        parsed = _parser.parse_template(
-            template,
-            TemplatePatternStub(self.re.groups, self.re.groupindex),
-        )
-        return render_template(parsed, self, is_bytes=is_bytes, empty=empty)
+        return expand_match_template(self, template)
 
     @property
     def re(self) -> Any:
