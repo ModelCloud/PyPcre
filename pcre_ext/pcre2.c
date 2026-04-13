@@ -2394,7 +2394,7 @@ PyInit_pcre_ext_c(void)
         goto error_cache;
     }
 
-    if (PyModule_AddStringConstant(module, "__version__", "0.1.0") < 0) {
+    if (PyModule_AddStringConstant(module, "__version__", "0.3.0") < 0) {
         goto error_cache;
     }
 
