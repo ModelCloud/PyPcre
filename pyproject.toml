@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 [build-system]
-requires = ["setuptools>=70.2.0", "wheel", "cmake>=3.27", "ninja"]
+requires = ["setuptools>=77.0.1,<83", "wheel", "cmake>=3.27", "ninja"]
 build-backend = "setuptools.build_meta"
 
 [project]
