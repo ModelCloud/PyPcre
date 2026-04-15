@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 [build-system]
-requires = ["setuptools>=70.2.0", "wheel", "cmake>=3.27", "ninja"]
+requires = ["setuptools>=77.0.1,<83", "wheel", "cmake>=3.27", "ninja"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,7 +13,7 @@ version = "0.3.1"
 description = "Modern, GIL-friendly, Fast Python bindings for PCRE2 with auto caching and JIT of compiled patterns."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
