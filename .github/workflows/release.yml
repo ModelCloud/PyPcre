@@ -56,7 +56,7 @@ jobs:
 
       - name: Build package
         run: |
-          python -m build --sdist
+          python -m build -w --no-isolation
           twine check dist/*
 
       - name: Upload source artifact
@@ -105,7 +105,7 @@ jobs:
       - name: Compile
         run: |
           python -V
-          python setup.py bdist_wheel
+          python -m build -w --no-isolation
 
       - name: Test install
         shell: bash
