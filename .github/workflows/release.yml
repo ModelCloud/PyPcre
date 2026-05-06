@@ -104,12 +104,12 @@ jobs:
           which python
           python -V
           pip install uv
-          uv pip install build setuptools twine packaging -U --system
+          uv pip install build setuptools twine packaging cmake wheel ninja -U --system
 
       - name: Compile
         run: |
           python -V
-          python setup.py bdist_wheel
+          python -m build -w --no-isolation
 
       - name: Test install
         shell: bash
