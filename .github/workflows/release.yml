@@ -52,12 +52,15 @@ jobs:
           cache: 'pip'
 
       - name: Install requirements
-        run: pip install pip build setuptools twine packaging -U
+        run: |
+          pip install uv
+          uv pip isntall build setuptools twine packaging -U
 
       - name: Build package
         run: |
           python -m build --sdist
           twine check dist/*
+          uv pip install dist/*
 
       - name: Upload source artifact
         uses: actions/upload-artifact@v7
@@ -100,7 +103,8 @@ jobs:
         run:  |
           which python
           python -V
-          pip install build setuptools twine packaging -U
+          pip install uv
+          uv pip install build setuptools twine packaging -U
 
       - name: Compile
         run: |
@@ -114,6 +118,7 @@ jobs:
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
           twine check dist/$whl
+          uv pip install dist/*
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
