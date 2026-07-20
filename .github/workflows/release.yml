@@ -42,11 +42,11 @@ jobs:
     if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.ref }}
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: 3.14
           cache: 'pip'
@@ -88,12 +88,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           ref: ${{ env.ref }}
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.py }}
           cache: 'pip'
