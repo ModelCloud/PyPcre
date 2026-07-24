@@ -378,6 +378,68 @@ def test_cache_strategy_cannot_switch_after_use(monkeypatch: pytest.MonkeyPatch)
         cache_mod.cache_strategy("global")
 
 
+def test_set_cache_limit_zero_clears_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern)
+
+    def wrapper(raw: Any) -> Any:
+        return raw
+
+    store = _fresh_thread_cache()
+    cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+    assert len(store) == 1
+
+    cache_mod.set_cache_limit(0)
+    assert cache_mod.get_cache_limit() == 0
+    assert len(store) == 0
+
+    # With the limit set to 0, compilation should not be cached.
+    cache_mod.cached_compile("expr", 0, wrapper, jit=False)
+    assert len(store) == 0
+
+
+def test_set_cache_limit_shrink_evicts_oldest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern)
+
+    def wrapper(raw: Any) -> Any:
+        return raw
+
+    store = _fresh_thread_cache()
+    cache_mod.set_cache_limit(10)
+    for i in range(5):
+        cache_mod.cached_compile(str(i), 0, wrapper, jit=False)
+    assert len(store) == 5
+
+    cache_mod.set_cache_limit(2)
+    assert len(store) == 2
+    assert list(store.keys()) == [("3", 0, False), ("4", 0, False)]
+
+
+def test_cached_compile_bypasses_cache_for_unhashable_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Any] = []
+
+    def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> Any:
+        calls.append(pattern)
+        return pattern
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+
+    def wrapper(raw: Any) -> Any:
+        return raw
+
+    store = _fresh_thread_cache()
+    # A list is not hashable, so the cache lookup must fall back to compiling each time.
+    first = cache_mod.cached_compile(["unhashable"], 0, wrapper, jit=False)
+    second = cache_mod.cached_compile(["unhashable"], 0, wrapper, jit=False)
+    assert first == second
+    assert len(store) == 0
+    assert calls == [["unhashable"], ["unhashable"]]
+
+
+def test_set_cache_limit_rejects_negative() -> None:
+    with pytest.raises(ValueError):
+        cache_mod.set_cache_limit(-1)
+
+
 def test_thread_cache_cleanup_no_leak() -> None:
     script = textwrap.dedent(
         """

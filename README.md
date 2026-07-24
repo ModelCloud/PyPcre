@@ -24,6 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
+* 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
 * 04/13/2026 [0.3.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.3.0): Lower-overhead public `Match` objects, faster hot-path `match()` / `search()` / `fullmatch()` / `findall()`, and tighter free-threaded execution. ⚡
 * 03/22/2026 [0.2.15](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.15): Python 3.15 `re` compatibility (`prefixmatch`, `NOFLAG`) ✅
 * 03/21/2026 [0.2.14](https://github.com/ModelCloud/PyPcre/releases/tag/v0.2.14): Python 3.14 compatibility 🐍
@@ -62,26 +63,44 @@ PyPcre pairs Python's familiar `re`-compatible API with the real `PCRE2` engine.
 
 ### Benchmark Highlights 🏁
 
-Measured on a `Python 3.14.3` free-threaded build on x86_64 Linux with compiled-pattern reuse. Times are best-of-5; lower is better.
+Measured on a `Python 3.14.5` free-threaded build on x86_64 Linux with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. Only workloads where PyPcre is decisively faster than both `stdlib.re` and `regex` are shown.
 
-| Workload | Operation | PyPcre | `re` | `regex` | PyPcre edge |
-| --- | --- | ---: | ---: | ---: | --- |
-| First `ERROR` line in a multiline log buffer | `search` | `3.68 ms` | `51.72 ms` | `5.67 ms` | `14.0x` vs `re`, `1.54x` vs `regex` |
-| Extract only `WARN` / `ERROR` lines | `findall` | `6.41 ms` | `91.84 ms` | `91.14 ms` | `14.3x` vs `re`, `14.2x` vs `regex` |
-| Per-line full-name extraction | `findall` | `22.28 ms` | `172.38 ms` | `218.29 ms` | `7.74x` vs `re`, `9.80x` vs `regex` |
-| Lookbehind + negative-lookahead extraction | `findall` | `50.23 ms` | `53.35 ms` | `57.03 ms` | `1.06x` vs `re`, `1.14x` vs `regex` |
-| UUID extraction | `findall` | `77.49 ms` | `83.19 ms` | `134.87 ms` | `1.07x` vs `re`, `1.74x` vs `regex` |
-| Boundary-aware token scan | `findall` | `127.76 ms` | `128.03 ms` | `146.37 ms` | effectively tied with `re`, `1.15x` vs `regex` |
+A reproducible version of this benchmark lives in [`benchmarks/competitor_bench.py`](benchmarks/competitor_bench.py).
+
+#### `findall` — large multiline and lookaround workloads
+
+| Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
+| --- | ---: | ---: | ---: | --- |
+| Extract `WARN` / `ERROR` lines (multiline) | `0.60` | `29.35` | `30.85` | **49x** vs `re`, **52x** vs `regex` |
+| Per-line full-name extraction (multiline) | `1.02` | `29.50` | `15.95` | **29x** vs `re`, **16x** vs `regex` |
+| Lookbehind + negative-lookahead tokens | `3.78` | `11.81` | `10.42` | **3.1x** vs `re`, **2.8x** vs `regex` |
+
+Patterns used:
+
+```python
+# WARN/ERROR lines and full-name extraction
+^(?:WARN|ERROR).*?$        # with re.MULTILINE / pcre.Flag.MULTILINE
+^[A-Z][a-z]+ [A-Z][a-z]+   # with re.MULTILINE / pcre.Flag.MULTILINE
+
+# lookbehind + negative lookahead
+(?:(?<=foo)bar|baz)(?!qux)
+```
+
+#### `finditer` — same workloads
+
+| Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
+| --- | ---: | ---: | ---: | --- |
+| Extract `WARN` / `ERROR` lines | `0.60` | `29.33` | `31.23` | **49x** vs `re`, **52x** vs `regex` |
+| Per-line full-name extraction | `1.02` | `30.09` | `16.25` | **29x** vs `re`, **16x** vs `regex` |
 
 ### Free-Threaded Benchmark Highlights 🧵
 
-Measured in the same environment with `8` threads sharing one compiled pattern. Times are best-of-3; lower is better.
+Measured in the same environment with `8` threads fanning out over independent copies of each workload. Times are the best of several runs; lower is better.
 
-| Workload | Threads | PyPcre | `re` | `regex` | PyPcre edge |
-| --- | ---: | ---: | ---: | ---: | --- |
-| First `ERROR` line in a multiline log buffer | `8` | `25.34 ms` | `38.83 ms` | `40.34 ms` | `1.53x` vs `re`, `1.59x` vs `regex` |
-| Extract only `WARN` / `ERROR` lines | `8` | `28.58 ms` | `65.54 ms` | `73.55 ms` | `2.29x` vs `re`, `2.57x` vs `regex` |
-| Per-line full-name extraction | `8` | `31.68 ms` | `123.44 ms` | `164.80 ms` | `3.90x` vs `re`, `5.20x` vs `regex` |
+| Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
+| --- | ---: | ---: | ---: | --- |
+| Extract `WARN` / `ERROR` lines (`findall`) | `3.26` | `32.57` | `34.41` | **10.0x** vs `re`, **10.6x** vs `regex` |
+| Per-line full-name extraction (`findall`) | `3.18` | `31.84` | `17.31` | **10.0x** vs `re`, **5.4x** vs `regex` |
 
 PyPcre is the stronger all-around choice when you want more than the baseline: full `PCRE2` features, more expressive syntax, JIT, explicit free-threaded support, and a stable `re`-compatible API surface. It keeps Python ergonomics while giving you a substantially more capable engine. 🚀
 

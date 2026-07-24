@@ -59,12 +59,50 @@ bytes_from_text(PyObject *obj)
 Py_ssize_t
 utf8_offset_to_index(const char *data, Py_ssize_t length)
 {
-    PyObject *tmp = PyUnicode_DecodeUTF8(data, length, "strict");
-    if (tmp == NULL) {
-        return -1;
+    /*
+     * Convert a UTF-8 byte offset to a code-point index without allocating a
+     * temporary Python unicode object.  This is used heavily by Match.span()/start()
+     * /end() and is therefore kept allocation-free.
+     *
+     * The number of code points in the first N bytes equals the number of
+     * non-continuation bytes (i.e. UTF-8 lead bytes and ASCII bytes) in those N
+     * bytes.  We count those in 8-byte chunks with a bit-trick and popcount,
+     * then handle the tail one byte at a time.
+     */
+    if (length <= 0) {
+        return 0;
     }
-    Py_ssize_t index = PyUnicode_GET_LENGTH(tmp);
-    Py_DECREF(tmp);
+
+    const unsigned char *u = (const unsigned char *)data;
+    Py_ssize_t index = 0;
+    Py_ssize_t offset = 0;
+    const Py_ssize_t chunk = (Py_ssize_t)sizeof(uint64_t);
+    const uint64_t high_mask = 0x8080808080808080ULL;
+    const uint64_t bit6_mask = 0x4040404040404040ULL;
+
+    while (offset + chunk <= length) {
+        uint64_t w;
+        memcpy(&w, u + offset, sizeof(uint64_t));
+        /* A byte is a continuation byte iff its top bit is 1 and its second-top
+         * bit is 0 (0b10xxxxxx).  In the common all-ASCII case we can skip the
+         * popcount entirely; otherwise count continuation bytes and subtract. */
+        if ((w & high_mask) == 0) {
+            index += chunk;
+        } else {
+            uint64_t bit6_shifted = (w & bit6_mask) << 1;
+            uint64_t cont = (w & high_mask) & ~bit6_shifted;
+            index += chunk - (Py_ssize_t)popcountll(cont);
+        }
+        offset += chunk;
+    }
+
+    while (offset < length) {
+        if ((u[offset] & 0xC0) != 0x80) {
+            index += 1;
+        }
+        offset += 1;
+    }
+
     return index;
 }
 
@@ -124,17 +162,79 @@ utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset
         return 0;
     }
 
+    /*
+     * For 2-byte and 4-byte Unicode kinds, read the UTF-8 cache and scan it
+     * in 8-byte chunks counting starter bytes.  This is the inverse of
+     * utf8_offset_to_index and is much faster than per-code-point iteration for
+     * large indexes.
+     */
+    Py_ssize_t utf8_length = 0;
+    const char *utf8_data = PyUnicode_AsUTF8AndSize(unicode_obj, &utf8_length);
+    if (utf8_data == NULL) {
+        return -1;
+    }
+
+    if (index <= 0) {
+        *offset_out = 0;
+        return 0;
+    }
+    if (index >= length) {
+        *offset_out = utf8_length;
+        return 0;
+    }
+
+    const unsigned char *u = (const unsigned char *)utf8_data;
+    Py_ssize_t remaining = index;
     Py_ssize_t offset = 0;
-    for (Py_ssize_t i = 0; i < index; ++i) {
-        Py_UCS4 ch = PyUnicode_READ(kind, data, i);
-        if (ch <= 0x7F) {
+    const Py_ssize_t chunk = (Py_ssize_t)sizeof(uint64_t);
+    const uint64_t high_mask = 0x8080808080808080ULL;
+    const uint64_t bit6_mask = 0x4040404040404040ULL;
+
+    while (offset + chunk <= utf8_length) {
+        uint64_t w;
+        memcpy(&w, u + offset, sizeof(uint64_t));
+        if ((w & high_mask) == 0) {
+            if (remaining >= chunk) {
+                remaining -= chunk;
+                offset += chunk;
+                continue;
+            }
+            offset += remaining;
+            remaining = 0;
+            break;
+        }
+
+        uint64_t bit6_shifted = (w & bit6_mask) << 1;
+        uint64_t cont = (w & high_mask) & ~bit6_shifted;
+        Py_ssize_t starters = chunk - (Py_ssize_t)popcountll(cont);
+        if (remaining >= starters) {
+            remaining -= starters;
+            offset += chunk;
+            continue;
+        }
+
+        for (Py_ssize_t i = 0; i < chunk; ++i) {
+            if ((u[offset + i] & 0xC0) != 0x80) {
+                if (remaining == 0) {
+                    offset += i;
+                    remaining = 0;
+                    break;
+                }
+                remaining -= 1;
+            }
+        }
+        break;
+    }
+
+    if (remaining > 0) {
+        while (offset < utf8_length) {
+            if ((u[offset] & 0xC0) != 0x80) {
+                if (remaining == 0) {
+                    break;
+                }
+                remaining -= 1;
+            }
             offset += 1;
-        } else if (ch <= 0x7FF) {
-            offset += 2;
-        } else if (ch <= 0xFFFF) {
-            offset += 3;
-        } else {
-            offset += 4;
         }
     }
 
@@ -165,12 +265,17 @@ create_groupindex_dict(pcre2_code *code)
         return NULL;
     }
 
+    size_t name_max = (entry_size > 2) ? (size_t)(entry_size - 2) : 0;
     for (uint32_t i = 0; i < namecount; ++i) {
         const unsigned char *entry = (const unsigned char *)(table + i * entry_size);
+        if (entry_size < 2) {
+            continue;
+        }
         uint16_t number = (uint16_t)((entry[0] << 8) | entry[1]);
         const char *name = (const char *)(entry + 2);
 
-        PyObject *key = PyUnicode_FromString(name);
+        size_t name_len = strnlen(name, name_max);
+        PyObject *key = PyUnicode_FromStringAndSize(name, (Py_ssize_t)name_len);
         PyObject *value = PyLong_FromUnsignedLong((unsigned long)number);
         if (key == NULL || value == NULL) {
             Py_XDECREF(key);

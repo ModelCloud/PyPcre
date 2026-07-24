@@ -25,7 +25,8 @@ static void *current_handle = NULL;
 static alloc_fn current_alloc = (alloc_fn)PyMem_Malloc;
 static free_fn current_free = (free_fn)PyMem_Free;
 static const char *current_name = "pymem";
-static int allocator_initialized = 0;
+static ATOMIC_VAR(int) allocator_initialized = ATOMIC_VAR_INIT(0);
+static atomic_flag allocator_init_lock = ATOMIC_FLAG_INIT;
 
 #if defined(_WIN32)
 static int
@@ -95,7 +96,19 @@ equals_ignore_case(const char *value, const char *target)
 int
 pcre_memory_initialize(void)
 {
-    if (allocator_initialized) {
+    if (atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
+        return 0;
+    }
+
+    while (atomic_flag_test_and_set_explicit(&allocator_init_lock, memory_order_acq_rel)) {
+        if (atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
+            atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
+            return 0;
+        }
+    }
+
+    if (atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
+        atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
         return 0;
     }
 
@@ -131,7 +144,8 @@ pcre_memory_initialize(void)
         current_alloc = (alloc_fn)PyMem_Malloc;
         current_free = (free_fn)PyMem_Free;
         current_name = "pymem";
-        allocator_initialized = 1;
+        atomic_store_explicit(&allocator_initialized, 1, memory_order_release);
+    atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
         return 0;
     }
 
@@ -140,18 +154,21 @@ pcre_memory_initialize(void)
         current_alloc = malloc;
         current_free = free;
         current_name = "malloc";
-        allocator_initialized = 1;
+        atomic_store_explicit(&allocator_initialized, 1, memory_order_release);
+    atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
         return 0;
     }
 
     if (equals_ignore_case(forced, "jemalloc")) {
         if (load_allocator(&jemalloc_candidate) == 0) {
-            allocator_initialized = 1;
+            atomic_store_explicit(&allocator_initialized, 1, memory_order_release);
+    atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
             return 0;
         }
     } else if (equals_ignore_case(forced, "tcmalloc")) {
         if (load_allocator(&tcmalloc_candidate) == 0) {
-            allocator_initialized = 1;
+            atomic_store_explicit(&allocator_initialized, 1, memory_order_release);
+    atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
             return 0;
         }
     }
@@ -160,7 +177,8 @@ pcre_memory_initialize(void)
     current_alloc = (alloc_fn)PyMem_Malloc;
     current_free = (free_fn)PyMem_Free;
     current_name = "pymem";
-    allocator_initialized = 1;
+    atomic_store_explicit(&allocator_initialized, 1, memory_order_release);
+    atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
     return 0;
 }
 
@@ -177,13 +195,14 @@ pcre_memory_teardown(void)
     current_alloc = (alloc_fn)PyMem_Malloc;
     current_free = (free_fn)PyMem_Free;
     current_name = "pymem";
-    allocator_initialized = 0;
+    atomic_store_explicit(&allocator_initialized, 0, memory_order_release);
+    atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
 }
 
 void *
 pcre_malloc(size_t size)
 {
-    if (!allocator_initialized) {
+    if (!atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
         if (pcre_memory_initialize() != 0) {
             return NULL;
         }
@@ -197,11 +216,17 @@ pcre_free(void *ptr)
     if (ptr == NULL) {
         return;
     }
+    if (!atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
+        (void)pcre_memory_initialize();
+    }
     current_free(ptr);
 }
 
 const char *
 pcre_memory_allocator_name(void)
 {
+    if (!atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
+        (void)pcre_memory_initialize();
+    }
     return current_name;
 }
