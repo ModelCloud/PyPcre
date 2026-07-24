@@ -37,6 +37,13 @@ static ATOMIC_VAR(int) offset_limit_support = ATOMIC_VAR_INIT(-1);
 
 static void detect_offset_limit_support(void);
 
+/*
+ * Releasing the GIL is only worthwhile when the PCRE2 call is expected to do
+ * enough work to amortize the PyEval_{Save,Restore}Thread overhead.  For very
+ * short matches the extra work is measurable, so only release for large inputs.
+ */
+#define PCRE2_GIL_RELEASE_THRESHOLD 262144ULL
+
 #if defined(Py_GIL_DISABLED)
 #define PCRE2_CALL_RELEASE_GIL(call) \
     do {                             \
@@ -50,6 +57,15 @@ static void detect_offset_limit_support(void);
         PyEval_RestoreThread(_save);          \
     } while (0)
 #endif
+
+#define PCRE2_CALL_MAYBE_RELEASE_GIL(call, length)     \
+    do {                                               \
+        if ((length) > PCRE2_GIL_RELEASE_THRESHOLD) { \
+            PCRE2_CALL_RELEASE_GIL(call);              \
+        } else {                                       \
+            rc = (call);                               \
+        }                                              \
+    } while (0)
 
 static inline pcre2_match_data *
 pattern_match_data_acquire(PatternObject *pattern, int *from_pattern_cache)
@@ -953,13 +969,14 @@ FindIter_iternext(FindIterObject *self)
             }
             pcre2_jit_stack_assign(self->match_context, NULL, self->jit_stack);
         }
-        PCRE2_CALL_RELEASE_GIL(pcre2_jit_match(self->pattern->code,
-                                               (PCRE2_SPTR)buffer,
-                                               exec_length,
-                                               (PCRE2_SIZE)self->current_byte,
-                                               options,
-                                               self->match_data,
-                                               self->match_context));
+        PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->pattern->code,
+                                                     (PCRE2_SPTR)buffer,
+                                                     exec_length,
+                                                     (PCRE2_SIZE)self->current_byte,
+                                                     options,
+                                                     self->match_data,
+                                                     self->match_context),
+                                                   exec_length);
 
         if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
             pattern_jit_set(self->pattern, 0);
@@ -983,13 +1000,14 @@ FindIter_iternext(FindIterObject *self)
     }
 
     if (!pattern_jit_get(self->pattern)) {
-        PCRE2_CALL_RELEASE_GIL(pcre2_match(self->pattern->code,
-                                           (PCRE2_SPTR)buffer,
-                                           exec_length,
-                                           (PCRE2_SIZE)self->current_byte,
-                                           options,
-                                           self->match_data,
-                                           self->match_context));
+        PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->pattern->code,
+                                                 (PCRE2_SPTR)buffer,
+                                                 exec_length,
+                                                 (PCRE2_SIZE)self->current_byte,
+                                                 options,
+                                                 self->match_data,
+                                                 self->match_context),
+                                               exec_length);
 
         if (rc == PCRE2_ERROR_NOMATCH) {
             self->exhausted = 1;
@@ -1728,13 +1746,14 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 
         pcre2_jit_stack_assign(match_context, NULL, jit_stack);
 
-        PCRE2_CALL_RELEASE_GIL(pcre2_jit_match(self->code,
-                                               (PCRE2_SPTR)buffer,
-                                               exec_length,
-                                               (PCRE2_SIZE)byte_start,
-                                               match_options,
-                                               match_data,
-                                               match_context));
+        PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->code,
+                                                     (PCRE2_SPTR)buffer,
+                                                     exec_length,
+                                                     (PCRE2_SIZE)byte_start,
+                                                     match_options,
+                                                     match_data,
+                                                     match_context),
+                                                   exec_length);
 
         pcre2_jit_stack_assign(match_context, NULL, NULL);
         jit_stack_cache_release(jit_stack);
@@ -1758,13 +1777,14 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
 
     if (!pattern_jit_get(self)) {
-        PCRE2_CALL_RELEASE_GIL(pcre2_match(self->code,
-                                           (PCRE2_SPTR)buffer,
-                                           exec_length,
-                                           (PCRE2_SIZE)byte_start,
-                                           match_options,
-                                           match_data,
-                                           match_context));
+        PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->code,
+                                                 (PCRE2_SPTR)buffer,
+                                                 exec_length,
+                                                 (PCRE2_SIZE)byte_start,
+                                                 match_options,
+                                                 match_data,
+                                                 match_context),
+                                               exec_length);
     }
 
     if (rc == PCRE2_ERROR_NOMATCH) {
