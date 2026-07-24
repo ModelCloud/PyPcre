@@ -62,44 +62,45 @@ utf8_offset_to_index(const char *data, Py_ssize_t length)
     /*
      * Convert a UTF-8 byte offset to a code-point index without allocating a
      * temporary Python unicode object.  This is used heavily by Match.span()/start()
-     * /end() and is therefore kept allocation-free and ASCII-vector aware.
+     * /end() and is therefore kept allocation-free.
+     *
+     * The number of code points in the first N bytes equals the number of
+     * non-continuation bytes (i.e. UTF-8 lead bytes and ASCII bytes) in those N
+     * bytes.  We count those in 8-byte chunks with a bit-trick and popcount,
+     * then handle the tail one byte at a time.
      */
     if (length <= 0) {
         return 0;
     }
 
+    const unsigned char *u = (const unsigned char *)data;
     Py_ssize_t index = 0;
     Py_ssize_t offset = 0;
+    const Py_ssize_t chunk = (Py_ssize_t)sizeof(uint64_t);
+    const uint64_t high_mask = 0x8080808080808080ULL;
+    const uint64_t bit6_mask = 0x4040404040404040ULL;
+
+    while (offset + chunk <= length) {
+        uint64_t w;
+        memcpy(&w, u + offset, sizeof(uint64_t));
+        /* A byte is a continuation byte iff its top bit is 1 and its second-top
+         * bit is 0 (0b10xxxxxx).  In the common all-ASCII case we can skip the
+         * popcount entirely; otherwise count continuation bytes and subtract. */
+        if ((w & high_mask) == 0) {
+            index += chunk;
+        } else {
+            uint64_t bit6_shifted = (w & bit6_mask) << 1;
+            uint64_t cont = (w & high_mask) & ~bit6_shifted;
+            index += chunk - (Py_ssize_t)popcountll(cont);
+        }
+        offset += chunk;
+    }
 
     while (offset < length) {
-        Py_ssize_t remaining = length - offset;
-        Py_ssize_t ascii_run = ascii_prefix_length(data + offset, remaining);
-        if (ascii_run > 0) {
-            if (ascii_run > remaining) {
-                ascii_run = remaining;
-            }
-            index += ascii_run;
-            offset += ascii_run;
-            if (offset >= length) {
-                break;
-            }
-            continue;
+        if ((u[offset] & 0xC0) != 0x80) {
+            index += 1;
         }
-
-        unsigned char lead = (unsigned char)data[offset];
-        Py_ssize_t char_bytes = 1;
-        if ((lead & 0xE0) == 0xC0) {
-            char_bytes = 2;
-        } else if ((lead & 0xF0) == 0xE0) {
-            char_bytes = 3;
-        } else if ((lead & 0xF8) == 0xF0) {
-            char_bytes = 4;
-        }
-        if (char_bytes > remaining) {
-            char_bytes = remaining;
-        }
-        offset += char_bytes;
-        index += 1;
+        offset += 1;
     }
 
     return index;
