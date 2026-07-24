@@ -386,6 +386,14 @@ class Pattern:
     ) -> List[Any]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        backend_findall = getattr(self._pattern, "findall", None)
+        if backend_findall is not None:
+            compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
+            try:
+                return backend_findall(subject, pos=pos, endpos=compiled_end, options=options)
+            except TypeError:
+                pass
+
         backend_iter = getattr(self._pattern, "finditer", None)
         if backend_iter is not None:
             compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)

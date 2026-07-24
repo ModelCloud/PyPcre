@@ -59,12 +59,49 @@ bytes_from_text(PyObject *obj)
 Py_ssize_t
 utf8_offset_to_index(const char *data, Py_ssize_t length)
 {
-    PyObject *tmp = PyUnicode_DecodeUTF8(data, length, "strict");
-    if (tmp == NULL) {
-        return -1;
+    /*
+     * Convert a UTF-8 byte offset to a code-point index without allocating a
+     * temporary Python unicode object.  This is used heavily by Match.span()/start()
+     * /end() and is therefore kept allocation-free and ASCII-vector aware.
+     */
+    if (length <= 0) {
+        return 0;
     }
-    Py_ssize_t index = PyUnicode_GET_LENGTH(tmp);
-    Py_DECREF(tmp);
+
+    Py_ssize_t index = 0;
+    Py_ssize_t offset = 0;
+
+    while (offset < length) {
+        Py_ssize_t remaining = length - offset;
+        Py_ssize_t ascii_run = ascii_prefix_length(data + offset, remaining);
+        if (ascii_run > 0) {
+            if (ascii_run > remaining) {
+                ascii_run = remaining;
+            }
+            index += ascii_run;
+            offset += ascii_run;
+            if (offset >= length) {
+                break;
+            }
+            continue;
+        }
+
+        unsigned char lead = (unsigned char)data[offset];
+        Py_ssize_t char_bytes = 1;
+        if ((lead & 0xE0) == 0xC0) {
+            char_bytes = 2;
+        } else if ((lead & 0xF0) == 0xE0) {
+            char_bytes = 3;
+        } else if ((lead & 0xF8) == 0xF0) {
+            char_bytes = 4;
+        }
+        if (char_bytes > remaining) {
+            char_bytes = remaining;
+        }
+        offset += char_bytes;
+        index += 1;
+    }
+
     return index;
 }
 
@@ -165,12 +202,17 @@ create_groupindex_dict(pcre2_code *code)
         return NULL;
     }
 
+    size_t name_max = (entry_size > 2) ? (size_t)(entry_size - 2) : 0;
     for (uint32_t i = 0; i < namecount; ++i) {
         const unsigned char *entry = (const unsigned char *)(table + i * entry_size);
+        if (entry_size < 2) {
+            continue;
+        }
         uint16_t number = (uint16_t)((entry[0] << 8) | entry[1]);
         const char *name = (const char *)(entry + 2);
 
-        PyObject *key = PyUnicode_FromString(name);
+        size_t name_len = strnlen(name, name_max);
+        PyObject *key = PyUnicode_FromStringAndSize(name, (Py_ssize_t)name_len);
         PyObject *value = PyLong_FromUnsignedLong((unsigned long)number);
         if (key == NULL || value == NULL) {
             Py_XDECREF(key);
