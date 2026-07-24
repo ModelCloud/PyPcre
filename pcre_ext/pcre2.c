@@ -301,14 +301,12 @@ match_get_group_value(MatchObject *self, Py_ssize_t index)
     }
 
     const char *data = self->utf8_data;
+    Py_ssize_t length = end - start;
     if (self->subject_is_bytes) {
-        Py_ssize_t length = end - start;
         return PyBytes_FromStringAndSize(data + start, length);
     }
 
-    Py_ssize_t start_index = utf8_offset_to_index(data, start);
-    Py_ssize_t end_index = utf8_offset_to_index(data, end);
-    return PyUnicode_Substring(self->subject, start_index, end_index);
+    return PyUnicode_DecodeUTF8(data + start, length, "strict");
 }
 
 static PyObject *
