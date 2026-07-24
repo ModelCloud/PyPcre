@@ -75,6 +75,12 @@ def test_low_level_compile_reports_bad_options():
     assert exc.error_code is pcre.PcreErrorCode.BAD_OPTIONS
 
 
+def test_error_code_property_returns_none_for_unknown_code():
+    exc = pcre.PcreErrorBadOptions("test")
+    exc.code = 99999
+    assert exc.error_code is None
+
+
 def test_substitution_with_invalid_numeric_group_reference_raises():
     # Regression test: patterns that only expose numeric group names through
     # DUPNAMES should still reject ``\1`` substitutions when no real capture
