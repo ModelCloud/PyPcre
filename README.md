@@ -70,9 +70,20 @@ A reproducible version of this benchmark lives in [`benchmarks/competitor_bench.
 
 | Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
 | --- | ---: | ---: | ---: | --- |
-| Extract `WARN` / `ERROR` lines (`^(?:WARN\|ERROR).*?$`, `MULTILINE`) | `0.60` | `29.35` | `30.85` | **49x** vs `re`, **52x** vs `regex` |
-| Per-line full-name extraction (`^[A-Z][a-z]+ [A-Z][a-z]+`, `MULTILINE`) | `1.02` | `29.50` | `15.95` | **29x** vs `re`, **16x** vs `regex` |
-| Lookbehind + negative-lookahead tokens (`(?:(?<=foo)bar\|baz)(?!qux)`) | `3.78` | `11.81` | `10.42` | **3.1x** vs `re`, **2.8x** vs `regex` |
+| Extract `WARN` / `ERROR` lines (multiline) | `0.60` | `29.35` | `30.85` | **49x** vs `re`, **52x** vs `regex` |
+| Per-line full-name extraction (multiline) | `1.02` | `29.50` | `15.95` | **29x** vs `re`, **16x** vs `regex` |
+| Lookbehind + negative-lookahead tokens | `3.78` | `11.81` | `10.42` | **3.1x** vs `re`, **2.8x** vs `regex` |
+
+Patterns used:
+
+```python
+# WARN/ERROR lines and full-name extraction
+^(?:WARN|ERROR).*?$        # with re.MULTILINE / pcre.Flag.MULTILINE
+^[A-Z][a-z]+ [A-Z][a-z]+   # with re.MULTILINE / pcre.Flag.MULTILINE
+
+# lookbehind + negative lookahead
+(?:(?<=foo)bar|baz)(?!qux)
+```
 
 #### `finditer` — same workloads
 
