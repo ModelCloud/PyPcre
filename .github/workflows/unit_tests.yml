@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           ref: ${{ env.ref }}
@@ -62,12 +62,12 @@ jobs:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
           ref: ${{ env.ref }}
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: 3.14
           cache: 'pip'
@@ -92,7 +92,7 @@ jobs:
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           ref: ${{ env.ref }}
@@ -125,7 +125,7 @@ jobs:
   #      matrix:
   #        test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
   #    steps:
-  #      - uses: actions/checkout@v6
+  #      - uses: actions/checkout@v7
   #        with:
   #          submodules: recursive
   #          ref: ${{ env.ref }}
@@ -164,7 +164,7 @@ jobs:
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.test-files) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           ref: ${{ env.ref }}
@@ -193,8 +193,8 @@ jobs:
     outputs:
       versions: ${{ steps.parser.outputs.versions || '[]' }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
@@ -215,8 +215,8 @@ jobs:
         version: ${{ fromJSON(needs.prepare-setuptools.outputs.versions) }}
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
