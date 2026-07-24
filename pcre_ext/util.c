@@ -162,17 +162,79 @@ utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset
         return 0;
     }
 
+    /*
+     * For 2-byte and 4-byte Unicode kinds, read the UTF-8 cache and scan it
+     * in 8-byte chunks counting starter bytes.  This is the inverse of
+     * utf8_offset_to_index and is much faster than per-code-point iteration for
+     * large indexes.
+     */
+    Py_ssize_t utf8_length = 0;
+    const char *utf8_data = PyUnicode_AsUTF8AndSize(unicode_obj, &utf8_length);
+    if (utf8_data == NULL) {
+        return -1;
+    }
+
+    if (index <= 0) {
+        *offset_out = 0;
+        return 0;
+    }
+    if (index >= length) {
+        *offset_out = utf8_length;
+        return 0;
+    }
+
+    const unsigned char *u = (const unsigned char *)utf8_data;
+    Py_ssize_t remaining = index;
     Py_ssize_t offset = 0;
-    for (Py_ssize_t i = 0; i < index; ++i) {
-        Py_UCS4 ch = PyUnicode_READ(kind, data, i);
-        if (ch <= 0x7F) {
+    const Py_ssize_t chunk = (Py_ssize_t)sizeof(uint64_t);
+    const uint64_t high_mask = 0x8080808080808080ULL;
+    const uint64_t bit6_mask = 0x4040404040404040ULL;
+
+    while (offset + chunk <= utf8_length) {
+        uint64_t w;
+        memcpy(&w, u + offset, sizeof(uint64_t));
+        if ((w & high_mask) == 0) {
+            if (remaining >= chunk) {
+                remaining -= chunk;
+                offset += chunk;
+                continue;
+            }
+            offset += remaining;
+            remaining = 0;
+            break;
+        }
+
+        uint64_t bit6_shifted = (w & bit6_mask) << 1;
+        uint64_t cont = (w & high_mask) & ~bit6_shifted;
+        Py_ssize_t starters = chunk - (Py_ssize_t)popcountll(cont);
+        if (remaining >= starters) {
+            remaining -= starters;
+            offset += chunk;
+            continue;
+        }
+
+        for (Py_ssize_t i = 0; i < chunk; ++i) {
+            if ((u[offset + i] & 0xC0) != 0x80) {
+                if (remaining == 0) {
+                    offset += i;
+                    remaining = 0;
+                    break;
+                }
+                remaining -= 1;
+            }
+        }
+        break;
+    }
+
+    if (remaining > 0) {
+        while (offset < utf8_length) {
+            if ((u[offset] & 0xC0) != 0x80) {
+                if (remaining == 0) {
+                    break;
+                }
+                remaining -= 1;
+            }
             offset += 1;
-        } else if (ch <= 0x7FF) {
-            offset += 2;
-        } else if (ch <= 0xFFFF) {
-            offset += 3;
-        } else {
-            offset += 4;
         }
     }
 
