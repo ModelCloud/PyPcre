@@ -54,7 +54,7 @@ jobs:
       - name: Install requirements
         run: |
           pip install uv
-          uv pip isntall build setuptools twine packaging -U --system
+          uv pip install build "setuptools>=77.0.1,<83" twine packaging -U --system
 
       - name: Build package
         run: |
@@ -107,7 +107,7 @@ jobs:
           which python
           python -V
           pip install uv
-          uv pip install build setuptools twine packaging cmake wheel ninja -U --system
+          uv pip install build "setuptools>=77.0.1,<83" twine packaging cmake wheel ninja -U --system
 
       - name: Compile
         run: |
