@@ -78,7 +78,7 @@ class TestMmapSubject(unittest.TestCase):
 
     def test_split_on_mmap(self):
         pattern = pcre.compile(rb"\s+")
-        parts = pattern.split(self.mm[:20])
+        parts = pattern.split(self.mm)
         self.assertTrue(all(isinstance(p, bytes) for p in parts))
 
     def test_sub_on_mmap(self):
