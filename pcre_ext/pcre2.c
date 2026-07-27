@@ -1171,7 +1171,10 @@ create_match_object(PatternObject *pattern,
     match->utf8_length = utf8_length;
     match->public_pos = pos;
     match->public_endpos = endpos;
-    match->subject_is_bytes = PyBytes_Check(subject_obj);
+    /* Anything that isn't str (bytes, or a buffer-protocol object such as
+       mmap.mmap) is treated as raw byte data: offsets are byte offsets and
+       group values are returned as bytes. */
+    match->subject_is_bytes = !PyUnicode_Check(subject_obj);
 
     return match;
 }
@@ -1255,8 +1258,29 @@ Pattern_create_finditer(PatternObject *pattern,
             iter->subject_length_bytes = utf8_length;
             iter->utf8_data = utf8_data;
         }
+    } else if (PyObject_CheckBuffer(subject_obj)) {
+        /* Zero-copy path for e.g. mmap.mmap: get a pointer straight into the
+           exporter's own storage instead of copying it into a new object. */
+        const char *buf_data = NULL;
+        Py_ssize_t buf_length = 0;
+        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        if (buf_view == NULL) {
+            goto error;
+        }
+        iter->subject_is_bytes = 1;
+        iter->subject_length_bytes = buf_length;
+        iter->logical_length = buf_length;
+        iter->utf8_data = buf_data;
+        iter->utf8_owner = buf_view;
+        if (ensure_valid_utf8_for_bytes_subject(pattern,
+                                                iter->subject_is_bytes,
+                                                iter->utf8_data,
+                                                iter->subject_length_bytes) < 0) {
+            goto error;
+        }
     } else {
-        PyErr_SetString(PyExc_TypeError, "subject must be str or bytes");
+        PyErr_SetString(PyExc_TypeError,
+                        "subject must be str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
         goto error;
     }
 
@@ -1362,7 +1386,7 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->jit_stack = jit_stack;
     /*
      * The UTF-8 validity of the subject has already been established either by
-     * Python (str) or by ensure_valid_utf8_for_bytes_subject (bytes+UTF).
+     * Python (str) or by ensure_valid_utf8_for_bytes_subject (bytes/buffer+UTF).
      * Only skip PCRE2's UTF-8 check for the full validated range so partial
      * byte ranges cannot end inside a multi-byte sequence.
      */
@@ -1557,8 +1581,30 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             buffer = utf8_data;
             subject_length_bytes = utf8_length;
         }
+    } else if (PyObject_CheckBuffer(subject_obj)) {
+        /* Zero-copy path for e.g. mmap.mmap: get a pointer straight into the
+           exporter's own storage instead of copying it into a new object. */
+        const char *buf_data = NULL;
+        Py_ssize_t buf_length = 0;
+        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        if (buf_view == NULL) {
+            return NULL;
+        }
+        utf8_owner = buf_view;
+        buffer = buf_data;
+        subject_length_bytes = buf_length;
+        logical_length = buf_length;
+        subject_is_bytes = 1;
+        if (ensure_valid_utf8_for_bytes_subject(self,
+                                                subject_is_bytes,
+                                                buffer,
+                                                subject_length_bytes) < 0) {
+            Py_DECREF(utf8_owner);
+            return NULL;
+        }
     } else {
-        PyErr_SetString(PyExc_TypeError, "expected str or bytes");
+        PyErr_SetString(PyExc_TypeError,
+                        "expected str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
         return NULL;
     }
 
@@ -1657,9 +1703,9 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
     /*
      * For text subjects we already own a UTF-8 pointer that Python validated.
-     * For bytes subjects with PCRE2_UTF we explicitly validated UTF-8 above.
-     * Only skip the PCRE2 UTF-8 check when the entire validated buffer is used;
-     * partial byte ranges may end inside a multi-byte sequence.
+     * For bytes/buffer-protocol subjects with PCRE2_UTF we explicitly validated
+     * UTF-8 above. Only skip the PCRE2 UTF-8 check when the entire validated
+     * buffer is used; partial byte ranges may end inside a multi-byte sequence.
      */
     if (!subject_is_bytes ||
         (byte_start == 0 && byte_end == subject_length_bytes)) {

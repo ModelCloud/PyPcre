@@ -26,7 +26,17 @@ def prepare_subject(subject: Any) -> Any:
 
 
 def is_bytes_like(value: Any) -> bool:
-    return isinstance(value, (bytes, bytearray, memoryview))
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return True
+    if isinstance(value, str):
+        return False
+    # Covers other buffer-protocol objects (e.g. mmap.mmap) without copying
+    # their contents; memoryview() just borrows the exporter's buffer.
+    try:
+        memoryview(value)
+    except TypeError:
+        return False
+    return True
 
 
 def normalise_count(value: Any) -> int | None:
