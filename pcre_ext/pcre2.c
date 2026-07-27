@@ -34,8 +34,11 @@ static ATOMIC_VAR(int) pcre2_version_initialized = 0;
 /* -1 unknown, 0 unsupported, 1 supported by the loaded PCRE2 runtime. */
 static ATOMIC_VAR(int) offset_limit_support = ATOMIC_VAR_INIT(-1);
 #endif
+/* -1 unknown, 0 compliant, 1 JIT ignores ANCHORED/ENDANCHORED match-time options. */
+static ATOMIC_VAR(int) jit_anchor_fixup_needed_state = ATOMIC_VAR_INIT(-1);
 
 static void detect_offset_limit_support(void);
+static int jit_anchor_fixup_needed(void);
 
 /*
  * Releasing the GIL is only worthwhile when the PCRE2 call is expected to do
@@ -1673,6 +1676,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 
     int rc = 0;
     int attempt_jit = pattern_jit_get(self);
+    int jit_endanchor_uncertain = 0;
     pcre2_match_context *match_context = NULL;
     int match_context_from_pattern = 0;
     int match_context_used_offset_limit = 0;
@@ -1771,18 +1775,46 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             Py_DECREF(utf8_owner);
             raise_pcre_error("jit_match", rc, error_offset);
             return NULL;
+        } else if (jit_anchor_fixup_needed() && rc >= 0 &&
+                   (mode == EXEC_MODE_MATCH || mode == EXEC_MODE_FULLMATCH)) {
+            /*
+             * Some PCRE2 builds' pcre2_jit_match() silently ignore
+             * PCRE2_ANCHORED and PCRE2_ENDANCHORED as match-time options.
+             * Detected at module load; only apply the workaround when
+             * the linked library is non-compliant.
+             */
+            PCRE2_SIZE *jit_ovector = pcre2_get_ovector_pointer(match_data);
+            if (jit_ovector == NULL || jit_ovector[0] != (PCRE2_SIZE)byte_start) {
+                rc = PCRE2_ERROR_NOMATCH;
+            } else if (mode == EXEC_MODE_FULLMATCH && jit_ovector[1] != offset_limit) {
+                jit_endanchor_uncertain = 1;
+            }
         }
     }
 
-    if (!pattern_jit_get(self)) {
+    if (!pattern_jit_get(self) || jit_endanchor_uncertain) {
+        /*
+         * For the fullmatch JIT fallback, truncate the interpreter re-run
+         * to the requested endpos (offset_limit). This guarantees that
+         * PCRE2_ENDANCHORED anchors to the intended boundary even on PCRE2
+         * builds where PCRE2_USE_OFFSET_LIMIT does not influence end
+         * anchoring for the interpreter re-run.
+         */
+        PCRE2_SIZE interpreter_length = exec_length;
+        if (jit_endanchor_uncertain) {
+            interpreter_length = offset_limit;
+            if (interpreter_length < (PCRE2_SIZE)byte_start) {
+                interpreter_length = (PCRE2_SIZE)byte_start;
+            }
+        }
         PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->code,
                                                  (PCRE2_SPTR)buffer,
-                                                 exec_length,
+                                                 interpreter_length,
                                                  (PCRE2_SIZE)byte_start,
                                                  match_options,
                                                  match_data,
                                                  match_context),
-                                               exec_length);
+                                               interpreter_length);
     }
 
     if (rc == PCRE2_ERROR_NOMATCH) {
@@ -2397,6 +2429,7 @@ module_attach_match(PyObject *Py_UNUSED(module), PyObject *args)
 
 static PyObject *module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static PyObject *module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
+static PyObject *module_jit_anchor_fixup_needed(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static void initialize_pcre2_version(void);
 
 
@@ -2422,6 +2455,7 @@ static PyMethodDef module_methods[] = {
     {"get_jit_stack_limits", (PyCFunction)module_get_jit_stack_limits, METH_NOARGS, PyDoc_STR("Return the configured (start, max) JIT stack sizes." )},
     {"set_jit_stack_limits", (PyCFunction)module_set_jit_stack_limits, METH_VARARGS, PyDoc_STR("Set the (start, max) sizes for newly created JIT stacks." )},
     {"get_library_version", (PyCFunction)module_get_pcre2_version, METH_NOARGS, PyDoc_STR("Return the PCRE2 library version string." )},
+    {"_jit_anchor_fixup_needed", (PyCFunction)module_jit_anchor_fixup_needed, METH_NOARGS, PyDoc_STR("Return 1 if the JIT anchoring workaround is active for this PCRE2 build." )},
     {"get_allocator", (PyCFunction)module_memory_allocator, METH_NOARGS, PyDoc_STR("Return the name of the active heap allocator (tcmalloc/jemalloc/malloc)." )},
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
     {"_debug_thread_cache_count", (PyCFunction)module_debug_thread_cache_count, METH_NOARGS, PyDoc_STR("Return the number of live thread cache states (requires PYPCRE_DEBUG=1)." )},
@@ -2495,6 +2529,84 @@ detect_offset_limit_support(void)
 #endif
 }
 
+static int
+jit_anchor_fixup_needed(void)
+{
+    int current = atomic_load_explicit(&jit_anchor_fixup_needed_state, memory_order_acquire);
+    if (current != -1) {
+        return current;
+    }
+
+    int needed = 0;
+    int error_code = 0;
+    PCRE2_SIZE error_offset = 0;
+
+    /*
+     * Probe 1: PCRE2_ANCHORED at match time must force a start-at-offset match.
+     * A compliant JIT run on "X2025-10-08" with pattern \\d+ should return
+     * PCRE2_ERROR_NOMATCH because the subject does not start with a digit.
+     */
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)"\\d+", 3, 0, &error_code, &error_offset, NULL);
+    if (code != NULL) {
+        int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
+        if (jit_rc >= 0) {
+            pcre2_match_data *match_data = pcre2_match_data_create(2, NULL);
+            if (match_data != NULL) {
+                int rc = pcre2_jit_match(code,
+                                         (PCRE2_SPTR)"X2025-10-08",
+                                         11,
+                                         0,
+                                         PCRE2_ANCHORED,
+                                         match_data,
+                                         NULL);
+                if (rc >= 0) {
+                    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
+                    if (ovector != NULL && ovector[0] != 0) {
+                        needed = 1;
+                    }
+                }
+                pcre2_match_data_free(match_data);
+            }
+        }
+        pcre2_code_free(code);
+    }
+
+    if (!needed) {
+        /*
+         * Probe 2: PCRE2_ENDANCHORED at match time must force the match to end
+         * at the end of the subject. Pattern "a|ab" on "ab" must match "ab",
+         * not just "a". A non-compliant JIT may return the shorter match.
+         */
+        code = pcre2_compile((PCRE2_SPTR)"a|ab", 4, 0, &error_code, &error_offset, NULL);
+        if (code != NULL) {
+            int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
+            if (jit_rc >= 0) {
+                pcre2_match_data *match_data = pcre2_match_data_create(2, NULL);
+                if (match_data != NULL) {
+                    int rc = pcre2_jit_match(code,
+                                             (PCRE2_SPTR)"ab",
+                                             2,
+                                             0,
+                                             PCRE2_ANCHORED | PCRE2_ENDANCHORED,
+                                             match_data,
+                                             NULL);
+                    if (rc >= 0) {
+                        PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
+                        if (ovector == NULL || ovector[0] != 0 || ovector[1] != 2) {
+                            needed = 1;
+                        }
+                    }
+                    pcre2_match_data_free(match_data);
+                }
+            }
+            pcre2_code_free(code);
+        }
+    }
+
+    atomic_store_explicit(&jit_anchor_fixup_needed_state, needed, memory_order_release);
+    return needed;
+}
+
 PyMODINIT_FUNC
 PyInit_pcre_ext_c(void)
 {
@@ -2557,6 +2669,7 @@ PyInit_pcre_ext_c(void)
     }
 
     detect_offset_limit_support();
+    (void)jit_anchor_fixup_needed();
 
     Py_INCREF(&PatternType);
     if (PyModule_AddObject(module, "Pattern", (PyObject *)&PatternType) < 0) {
@@ -2624,6 +2737,12 @@ module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
     initialize_pcre2_version();
     return PyUnicode_FromString(pcre2_library_version);
+}
+
+static PyObject *
+module_jit_anchor_fixup_needed(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    return PyLong_FromLong(jit_anchor_fixup_needed());
 }
 
 static void
