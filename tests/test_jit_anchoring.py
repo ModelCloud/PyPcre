@@ -70,6 +70,29 @@ class TestFullmatchAnchoring:
         assert match is not None
         assert match.span() == (0, 1)
 
+    def test_fullmatch_with_endpos_and_trailing_content(self, jit):
+        # endpos sets the PCRE2 offset limit; the match must end at that
+        # limit, not at the end of the full subject buffer.
+        pattern = _compile(rb"\d{4}-\d{2}-\d{2}", jit=jit)
+        match = pattern.fullmatch(b"2025-10-08X", endpos=10)
+        assert match is not None
+        assert match.span() == (0, 10)
+
+    def test_fullmatch_with_endpos_rejects_overrun(self, jit):
+        pattern = _compile(rb"\d{4}-\d{2}-\d{2}", jit=jit)
+        assert pattern.fullmatch(b"2025-10-08XX", endpos=11) is None
+
+    def test_fullmatch_endpos_respects_alternation(self, jit):
+        # With a trailing character after the endpos, the fallback
+        # pcre2_match() re-run must still anchor at endpos.
+        pattern = _compile(rb"a|ab", jit=jit)
+        match = pattern.fullmatch(b"abX", endpos=2)
+        assert match is not None
+        assert match.span() == (0, 2)
+        match = pattern.fullmatch(b"abX", endpos=1)
+        assert match is not None
+        assert match.span() == (0, 1)
+
 
 if __name__ == "__main__":
     import sys
