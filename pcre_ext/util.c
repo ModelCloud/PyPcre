@@ -43,6 +43,41 @@ popcountll(uint64_t value)
 #endif
 
 PyObject *
+buffer_view_from_object(PyObject *obj, const char **data_out, Py_ssize_t *length_out)
+{
+    /*
+     * Wrap any buffer-protocol object (e.g. mmap.mmap, bytearray) in a
+     * memoryview so we get a direct pointer into its existing storage. The
+     * memoryview pins the exporter's buffer (preventing e.g. mmap.close())
+     * for as long as it is kept alive, so callers must hold a reference to
+     * the returned view for as long as data_out/length_out are used.
+     *
+     * PyMemoryView_FromObject is required here rather than a manual
+     * PyObject_GetBuffer + PyMemoryView_FromBuffer: the latter leaves the
+     * exporter's buffer export count permanently elevated (observed as
+     * mmap.close() raising BufferError even after the memoryview and all
+     * its referents are collected), whereas PyMemoryView_FromObject
+     * correctly releases the buffer when the memoryview is deallocated.
+     */
+    PyObject *view = PyMemoryView_FromObject(obj);
+    if (view == NULL) {
+        return NULL;
+    }
+
+    Py_buffer *buffer = PyMemoryView_GET_BUFFER(view);
+    if (buffer->itemsize != 1 || !PyBuffer_IsContiguous(buffer, 'C')) {
+        Py_DECREF(view);
+        PyErr_SetString(PyExc_TypeError,
+                        "subject buffer must be a contiguous sequence of single-byte items");
+        return NULL;
+    }
+
+    *data_out = (const char *)buffer->buf;
+    *length_out = buffer->len;
+    return view;
+}
+
+PyObject *
 bytes_from_text(PyObject *obj)
 {
     if (PyBytes_Check(obj)) {

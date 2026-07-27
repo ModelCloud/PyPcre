@@ -128,6 +128,7 @@ PyObject *module_clear_pattern_cache(PyObject *module, PyObject *args);
 /* Utilities */
 int env_flag_is_true(const char *value);
 PyObject *bytes_from_text(PyObject *obj);
+PyObject *buffer_view_from_object(PyObject *obj, const char **data_out, Py_ssize_t *length_out);
 Py_ssize_t utf8_offset_to_index(const char *data, Py_ssize_t length);
 int utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset_out);
 PyObject *create_groupindex_dict(pcre2_code *code);
