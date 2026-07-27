@@ -94,6 +94,72 @@ class TestFullmatchAnchoring:
         assert match.span() == (0, 1)
 
 
+@pytest.mark.parametrize("jit", [True, False], ids=["jit", "nojit"])
+class TestEndposWithTrailingContent:
+    """endpos must be respected even when the subject buffer is longer."""
+
+    def test_match_endpos_trailing_content(self, jit):
+        pattern = _compile(rb"\d+", jit=jit)
+        match = pattern.match(b"12345X", endpos=3)
+        assert match is not None
+        assert match.span() == (0, 3)
+
+    def test_fullmatch_endpos_trailing_content(self, jit):
+        pattern = _compile(rb"\d+", jit=jit)
+        match = pattern.fullmatch(b"12345X", endpos=3)
+        assert match is not None
+        assert match.span() == (0, 3)
+        assert pattern.fullmatch(b"12345X", endpos=6) is None
+
+    def test_fullmatch_endpos_dot_star(self, jit):
+        pattern = _compile(rb".*", jit=jit)
+        assert pattern.fullmatch(b"abX", endpos=0).span() == (0, 0)
+        assert pattern.fullmatch(b"abX", endpos=1).span() == (0, 1)
+        assert pattern.fullmatch(b"abX", endpos=2).span() == (0, 2)
+        assert pattern.fullmatch(b"abX", endpos=3).span() == (0, 3)
+
+    def test_fullmatch_endpos_alternation(self, jit):
+        pattern = _compile(rb"a|ab", jit=jit)
+        assert pattern.fullmatch(b"abX", endpos=1).span() == (0, 1)
+        assert pattern.fullmatch(b"abX", endpos=2).span() == (0, 2)
+        assert pattern.fullmatch(b"abX", endpos=3) is None
+
+    def test_fullmatch_endpos_pos(self, jit):
+        pattern = _compile(rb"\d+", jit=jit)
+        match = pattern.fullmatch(b"X12345X", pos=1, endpos=6)
+        assert match is not None
+        assert match.span() == (1, 6)
+
+    def test_match_endpos_pos(self, jit):
+        pattern = _compile(rb"\d+", jit=jit)
+        match = pattern.match(b"X12345X", pos=1, endpos=4)
+        assert match is not None
+        assert match.span() == (1, 4)
+
+    def test_search_endpos_trailing_content(self, jit):
+        pattern = _compile(rb"\d+", jit=jit)
+        match = pattern.search(b"X12345X", endpos=4)
+        assert match is not None
+        assert match.span() == (1, 4)
+
+    def test_finditer_endpos_trailing_content(self, jit):
+        pattern = _compile(rb"\d+", jit=jit)
+        matches = list(pattern.finditer(b"12X34", endpos=3))
+        assert [m.group() for m in matches] == [b"12"]
+
+    def test_fullmatch_endpos_text_multibyte(self, jit):
+        pattern = pcre_ext_c.compile(
+            r"\w+",
+            jit=jit,
+            flags=pcre_ext_c.PCRE2_UTF | pcre_ext_c.PCRE2_UCP,
+        )
+        match = pattern.fullmatch("café!", endpos=4)
+        assert match is not None
+        assert match.span() == (0, 4)
+        assert match.group() == "café"
+        assert pattern.fullmatch("café!", endpos=5) is None
+
+
 if __name__ == "__main__":
     import sys
 

@@ -1793,14 +1793,28 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
 
     if (!pattern_jit_get(self) || jit_endanchor_uncertain) {
+        /*
+         * For the fullmatch JIT fallback, truncate the interpreter re-run
+         * to the requested endpos (offset_limit). This guarantees that
+         * PCRE2_ENDANCHORED anchors to the intended boundary even on PCRE2
+         * builds where PCRE2_USE_OFFSET_LIMIT does not influence end
+         * anchoring for the interpreter re-run.
+         */
+        PCRE2_SIZE interpreter_length = exec_length;
+        if (jit_endanchor_uncertain) {
+            interpreter_length = offset_limit;
+            if (interpreter_length < (PCRE2_SIZE)byte_start) {
+                interpreter_length = (PCRE2_SIZE)byte_start;
+            }
+        }
         PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->code,
                                                  (PCRE2_SPTR)buffer,
-                                                 exec_length,
+                                                 interpreter_length,
                                                  (PCRE2_SIZE)byte_start,
                                                  match_options,
                                                  match_data,
                                                  match_context),
-                                               exec_length);
+                                               interpreter_length);
     }
 
     if (rc == PCRE2_ERROR_NOMATCH) {
