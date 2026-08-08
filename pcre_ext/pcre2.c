@@ -290,6 +290,35 @@ resolve_group_key(MatchObject *self, PyObject *key, Py_ssize_t *index)
     return -1;
 }
 
+static inline PyObject *
+extract_value_from_offsets(PyObject *subject_obj,
+                           const char *utf8_data,
+                           int subject_is_bytes,
+                           int subject_is_ascii,
+                           Py_ssize_t start,
+                           Py_ssize_t end)
+{
+    if (start < 0 || end < 0 || end < start) {
+        Py_RETURN_NONE;
+    }
+
+    Py_ssize_t length = end - start;
+    if (subject_is_bytes) {
+        return PyBytes_FromStringAndSize(utf8_data + start, length);
+    }
+
+    if (subject_is_ascii) {
+        PyObject *slice = PyUnicode_New(length, 127);
+        if (slice == NULL) {
+            return NULL;
+        }
+        memcpy(PyUnicode_1BYTE_DATA(slice), utf8_data + start, (size_t)length);
+        return slice;
+    }
+
+    return PyUnicode_DecodeUTF8(utf8_data + start, length, "strict");
+}
+
 static PyObject *
 match_get_group_value(MatchObject *self, Py_ssize_t index)
 {
@@ -299,17 +328,16 @@ match_get_group_value(MatchObject *self, Py_ssize_t index)
     }
     Py_ssize_t start = self->ovector[(size_t)index * 2];
     Py_ssize_t end = self->ovector[(size_t)index * 2 + 1];
-    if (start < 0 || end < 0) {
-        Py_RETURN_NONE;
-    }
+    int subject_is_ascii = !self->subject_is_bytes && PyUnicode_IS_ASCII(self->subject);
 
-    const char *data = self->utf8_data;
-    Py_ssize_t length = end - start;
-    if (self->subject_is_bytes) {
-        return PyBytes_FromStringAndSize(data + start, length);
-    }
-
-    return PyUnicode_DecodeUTF8(data + start, length, "strict");
+    return extract_value_from_offsets(
+        self->subject,
+        self->utf8_data,
+        self->subject_is_bytes,
+        subject_is_ascii,
+        start,
+        end
+    );
 }
 
 static PyObject *
@@ -1988,33 +2016,47 @@ Pattern_fullmatch_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_FULLMATCH);
 }
 
-static PyObject *
-findall_build_value(MatchObject *match)
+static inline PyObject *
+findall_build_value_from_ovector(PyObject *subject_obj,
+                                 const char *utf8_data,
+                                 int subject_is_bytes,
+                                 int subject_is_ascii,
+                                 PCRE2_SIZE *ovector,
+                                 uint32_t ovec_count)
 {
     /*
-     * Reproduce Python findall() semantics:
+     * Reproduce Python findall() semantics from raw PCRE2 ovector:
      *   no groups        -> full match
      *   one group        -> value of group(1)
      *   multiple groups  -> tuple of groups
      */
-    if (match->ovec_count <= 1) {
-        return match_get_group_value(match, 0);
+    if (ovec_count <= 1) {
+        Py_ssize_t start = (Py_ssize_t)ovector[0];
+        Py_ssize_t end = (Py_ssize_t)ovector[1];
+        return extract_value_from_offsets(subject_obj, utf8_data, subject_is_bytes,
+                                            subject_is_ascii, start, end);
     }
-    if (match->ovec_count == 2) {
-        return match_get_group_value(match, 1);
+    if (ovec_count == 2) {
+        Py_ssize_t start = (Py_ssize_t)ovector[2];
+        Py_ssize_t end = (Py_ssize_t)ovector[3];
+        return extract_value_from_offsets(subject_obj, utf8_data, subject_is_bytes,
+                                            subject_is_ascii, start, end);
     }
 
-    PyObject *tuple = PyTuple_New((Py_ssize_t)match->ovec_count - 1);
+    PyObject *tuple = PyTuple_New((Py_ssize_t)ovec_count - 1);
     if (tuple == NULL) {
         return NULL;
     }
-    for (uint32_t i = 1; i < match->ovec_count; ++i) {
-        PyObject *value = match_get_group_value(match, (Py_ssize_t)i);
+    for (uint32_t i = 1; i < ovec_count; ++i) {
+        Py_ssize_t start = (Py_ssize_t)ovector[(size_t)i * 2];
+        Py_ssize_t end = (Py_ssize_t)ovector[(size_t)i * 2 + 1];
+        PyObject *value = extract_value_from_offsets(subject_obj, utf8_data, subject_is_bytes,
+                                                      subject_is_ascii, start, end);
         if (value == NULL) {
             Py_DECREF(tuple);
             return NULL;
         }
-        PyTuple_SET_ITEM(tuple, i - 1, value);
+        PyTuple_SET_ITEM(tuple, (Py_ssize_t)i - 1, value);
     }
     return tuple;
 }
@@ -2026,46 +2068,382 @@ Pattern_findall(PatternObject *self,
                 Py_ssize_t endpos,
                 uint32_t options)
 {
-    PyObject *iter = Pattern_create_finditer(self, subject_obj, pos, endpos, options);
-    if (iter == NULL) {
-        return NULL;
+    PyObject *result = NULL;
+    pcre2_match_data *match_data = NULL;
+    pcre2_match_context *match_context = NULL;
+    pcre2_jit_stack *jit_stack = NULL;
+    int match_data_from_pattern = 0;
+    int match_context_from_pattern = 0;
+    int match_context_used_offset_limit = 0;
+
+    PyObject *utf8_owner = NULL;
+    const char *utf8_data = NULL;
+    Py_ssize_t subject_length_bytes = 0;
+    Py_ssize_t logical_length = 0;
+    int subject_is_bytes = PyBytes_Check(subject_obj);
+    int subject_is_ascii = 0;
+
+    if (subject_is_bytes) {
+        Py_INCREF(subject_obj);
+        utf8_owner = subject_obj;
+        utf8_data = PyBytes_AS_STRING(subject_obj);
+        subject_length_bytes = PyBytes_GET_SIZE(subject_obj);
+        logical_length = subject_length_bytes;
+        if (ensure_valid_utf8_for_bytes_subject(self,
+                                                subject_is_bytes,
+                                                utf8_data,
+                                                subject_length_bytes) < 0) {
+            goto error;
+        }
+    } else if (PyUnicode_Check(subject_obj)) {
+        if (PyUnicode_READY(subject_obj) < 0) {
+            goto error;
+        }
+        Py_INCREF(subject_obj);
+        utf8_owner = subject_obj;
+        logical_length = PyUnicode_GET_LENGTH(subject_obj);
+        if (PyUnicode_IS_ASCII(subject_obj)) {
+            subject_is_ascii = 1;
+            utf8_data = (const char *)PyUnicode_1BYTE_DATA(subject_obj);
+            subject_length_bytes = logical_length;
+        } else {
+            const char *data = PyUnicode_AsUTF8AndSize(subject_obj, &subject_length_bytes);
+            if (data == NULL) {
+                goto error;
+            }
+            utf8_data = data;
+        }
+    } else if (PyObject_CheckBuffer(subject_obj)) {
+        const char *buf_data = NULL;
+        Py_ssize_t buf_length = 0;
+        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        if (buf_view == NULL) {
+            goto error;
+        }
+        utf8_owner = buf_view;
+        utf8_data = buf_data;
+        subject_length_bytes = buf_length;
+        logical_length = buf_length;
+        subject_is_bytes = 1;
+        if (ensure_valid_utf8_for_bytes_subject(self,
+                                                subject_is_bytes,
+                                                utf8_data,
+                                                subject_length_bytes) < 0) {
+            goto error;
+        }
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+                        "subject must be str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
+        goto error;
     }
 
-    PyObject *result = PyList_New(0);
-    if (result == NULL) {
-        Py_DECREF(iter);
-        return NULL;
+    if (pos < 0) {
+        pos += logical_length;
+        if (pos < 0) {
+            pos = 0;
+        }
     }
+    if (pos > logical_length) {
+        pos = logical_length;
+    }
+
+    int has_endpos = 0;
+    Py_ssize_t adjusted_endpos = -1;
+    if (endpos >= 0) {
+        has_endpos = 1;
+        adjusted_endpos = endpos;
+        if (adjusted_endpos > logical_length) {
+            adjusted_endpos = logical_length;
+        }
+        if (adjusted_endpos < pos) {
+            PyErr_SetString(PyExc_ValueError, "endpos must be >= pos");
+            goto error;
+        }
+    }
+
+    int treat_as_bytes = subject_is_bytes || subject_is_ascii;
+    Py_ssize_t byte_start = 0;
+    Py_ssize_t byte_end = subject_length_bytes;
+
+    if (treat_as_bytes) {
+        byte_start = pos;
+        if (has_endpos) {
+            byte_end = adjusted_endpos;
+        }
+    } else {
+        if (pos == 0) {
+            byte_start = 0;
+        } else if (pos == logical_length) {
+            byte_start = subject_length_bytes;
+        } else if (utf8_index_to_offset(subject_obj, pos, &byte_start) < 0) {
+            goto error;
+        }
+
+        if (has_endpos) {
+            if (adjusted_endpos == logical_length) {
+                byte_end = subject_length_bytes;
+            } else if (utf8_index_to_offset(subject_obj, adjusted_endpos, &byte_end) < 0) {
+                goto error;
+            }
+        }
+    }
+
+    if (byte_start > byte_end || byte_start < 0 || byte_end < 0 || byte_end > subject_length_bytes) {
+        PyErr_SetString(PyExc_ValueError, "byte offset mismatch for subject");
+        goto error;
+    }
+
+    match_data = pattern_match_data_acquire(self, &match_data_from_pattern);
+    if (match_data == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+
+    int attempt_jit = pattern_jit_get(self);
+    int need_offset_limit = (has_endpos && byte_end != subject_length_bytes);
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    int use_offset_limit = need_offset_limit && offset_limit_option_enabled();
+#else
+    int use_offset_limit = 0;
+#endif
+    PCRE2_SIZE offset_limit = (PCRE2_SIZE)byte_end;
+
+    if (attempt_jit || use_offset_limit) {
+        match_context = pattern_match_context_acquire(self, use_offset_limit, &match_context_from_pattern);
+        if (match_context == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+    }
+
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    if (use_offset_limit) {
+        int ctx_rc = pcre2_set_offset_limit(match_context, offset_limit);
+        if (ctx_rc < 0) {
+            raise_pcre_error("set_offset_limit", ctx_rc, 0);
+            goto error;
+        }
+        options |= PCRE2_USE_OFFSET_LIMIT;
+        match_context_used_offset_limit = 1;
+    } else
+#endif
+    if (need_offset_limit) {
+        if (offset_limit < (PCRE2_SIZE)byte_start) {
+            offset_limit = (PCRE2_SIZE)byte_start;
+        }
+    }
+
+    if (attempt_jit) {
+        jit_stack = jit_stack_cache_acquire();
+        if (jit_stack == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        pcre2_jit_stack_assign(match_context, NULL, jit_stack);
+    }
+
+    uint32_t match_options = options;
+    if (!subject_is_bytes || (byte_start == 0 && byte_end == subject_length_bytes)) {
+        match_options |= PCRE2_NO_UTF_CHECK;
+    }
+
+    result = PyList_New(0);
+    if (result == NULL) {
+        goto error;
+    }
+
+    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
+    if (ovector == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "PCRE2 returned empty match data");
+        goto error;
+    }
+    uint32_t available_pairs = pcre2_get_ovector_count(match_data);
+    uint64_t expected_pairs = (uint64_t)self->capture_count + 1;
+    if (expected_pairs == 0 || expected_pairs > available_pairs) {
+        expected_pairs = available_pairs;
+    }
+    if (expected_pairs == 0) {
+        PyErr_SetString(PyExc_RuntimeError, "PCRE2 returned empty match data");
+        goto error;
+    }
+
+    PCRE2_SIZE exec_length = (PCRE2_SIZE)subject_length_bytes;
+    if (need_offset_limit && !use_offset_limit) {
+        exec_length = offset_limit;
+        if (exec_length < (PCRE2_SIZE)byte_start) {
+            exec_length = (PCRE2_SIZE)byte_start;
+        }
+    }
+
+    Py_ssize_t current_byte = byte_start;
+    Py_ssize_t current_pos = pos;
 
     while (1) {
-        PyObject *match_obj = (PyObject *)FindIter_iternext((FindIterObject *)iter);
-        if (match_obj == NULL) {
-            if (PyErr_Occurred()) {
-                Py_DECREF(result);
-                Py_DECREF(iter);
-                return NULL;
-            }
+        if (current_byte > subject_length_bytes) {
+            break;
+        }
+        if (has_endpos && current_pos >= adjusted_endpos) {
+            break;
+        }
+        if (!has_endpos && current_pos > logical_length) {
+            break;
+        }
+        if (has_endpos && current_byte >= byte_end) {
             break;
         }
 
-        PyObject *value = findall_build_value((MatchObject *)match_obj);
-        Py_DECREF(match_obj);
-        if (value == NULL) {
-            Py_DECREF(result);
-            Py_DECREF(iter);
-            return NULL;
+        int rc = 0;
+        int use_jit = attempt_jit;
+
+        if (use_jit) {
+            rc = pcre2_jit_match(self->code,
+                                 (PCRE2_SPTR)utf8_data,
+                                 exec_length,
+                                 (PCRE2_SIZE)current_byte,
+                                 match_options,
+                                 match_data,
+                                 match_context);
+
+            if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
+                pattern_jit_set(self, 0);
+                attempt_jit = 0;
+                if (match_context != NULL) {
+                    pcre2_jit_stack_assign(match_context, NULL, NULL);
+                }
+                if (jit_stack != NULL) {
+                    jit_stack_cache_release(jit_stack);
+                    jit_stack = NULL;
+                }
+                use_jit = 0;
+            } else if (rc == PCRE2_ERROR_NOMATCH) {
+                break;
+            } else if (rc < 0) {
+                PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
+                raise_pcre_error("jit_match", rc, error_offset);
+                goto error;
+            }
         }
 
+        if (!use_jit) {
+            rc = pcre2_match(self->code,
+                             (PCRE2_SPTR)utf8_data,
+                             exec_length,
+                             (PCRE2_SIZE)current_byte,
+                             match_options,
+                             match_data,
+                             match_context);
+
+            if (rc == PCRE2_ERROR_NOMATCH) {
+                break;
+            }
+            if (rc < 0) {
+                PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
+                raise_pcre_error("match", rc, error_offset);
+                goto error;
+            }
+        }
+
+        Py_ssize_t start_byte = (Py_ssize_t)ovector[0];
+        Py_ssize_t end_byte = (Py_ssize_t)ovector[1];
+
+        PyObject *value = findall_build_value_from_ovector(
+            subject_obj,
+            utf8_data,
+            subject_is_bytes,
+            subject_is_ascii,
+            ovector,
+            (uint32_t)expected_pairs);
+        if (value == NULL) {
+            goto error;
+        }
         if (PyList_Append(result, value) < 0) {
             Py_DECREF(value);
-            Py_DECREF(result);
-            Py_DECREF(iter);
-            return NULL;
+            goto error;
         }
         Py_DECREF(value);
+
+        Py_ssize_t end_index;
+        if (treat_as_bytes) {
+            end_index = end_byte;
+        } else {
+            Py_ssize_t matched_len = end_byte - current_byte;
+            if (matched_len < 0) {
+                matched_len = 0;
+            }
+            end_index = current_pos + utf8_offset_to_index(utf8_data + current_byte, matched_len);
+        }
+
+        Py_ssize_t next_pos = end_index;
+        if (has_endpos && next_pos >= adjusted_endpos) {
+            next_pos = end_index;
+        } else if (start_byte == end_byte) {
+            next_pos = end_index + 1;
+        }
+
+        if (next_pos <= current_pos) {
+            next_pos = current_pos + 1;
+        }
+
+        Py_ssize_t next_byte = current_byte;
+        if (treat_as_bytes) {
+            next_byte = next_pos;
+            if (next_byte > subject_length_bytes) {
+                next_byte = subject_length_bytes;
+            }
+            if (next_byte < 0) {
+                next_byte = 0;
+            }
+        } else {
+            if (next_pos >= logical_length) {
+                next_byte = subject_length_bytes;
+            } else if (next_pos <= 0) {
+                next_byte = 0;
+            } else if (start_byte != end_byte) {
+                next_byte = end_byte;
+            } else {
+                next_byte = end_byte;
+                if (next_byte < subject_length_bytes) {
+                    unsigned char lead = (unsigned char)utf8_data[next_byte];
+                    Py_ssize_t char_bytes = 1;
+                    if ((lead & 0xE0) == 0xC0) {
+                        char_bytes = 2;
+                    } else if ((lead & 0xF0) == 0xE0) {
+                        char_bytes = 3;
+                    } else if ((lead & 0xF8) == 0xF0) {
+                        char_bytes = 4;
+                    }
+                    if (next_byte + char_bytes > subject_length_bytes) {
+                        char_bytes = subject_length_bytes - next_byte;
+                    }
+                    next_byte += char_bytes;
+                }
+            }
+        }
+
+        current_pos = next_pos;
+        current_byte = next_byte;
     }
 
-    Py_DECREF(iter);
+    goto cleanup;
+
+error:
+    Py_XDECREF(result);
+    result = NULL;
+
+cleanup:
+    if (jit_stack != NULL) {
+        if (match_context != NULL) {
+            pcre2_jit_stack_assign(match_context, NULL, NULL);
+        }
+        jit_stack_cache_release(jit_stack);
+    }
+    if (match_context != NULL) {
+        pattern_match_context_release(self, match_context, match_context_used_offset_limit, match_context_from_pattern);
+    }
+    if (match_data != NULL) {
+        pattern_match_data_release(self, match_data, match_data_from_pattern);
+    }
+    Py_XDECREF(utf8_owner);
     return result;
 }
 
