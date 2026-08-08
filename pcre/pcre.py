@@ -468,6 +468,13 @@ class Pattern:
 
     def split(self, subject: Any, maxsplit: Any = 0) -> List[Any]:
         subject = prepare_subject(subject)
+        backend_split = getattr(self._pattern, "split", None)
+        if backend_split is not None:
+            try:
+                return backend_split(subject, maxsplit)
+            except TypeError:
+                pass
+
         subject_is_bytes = is_bytes_like(subject)
         empty = b"" if subject_is_bytes else ""
         parts: List[Any] = []

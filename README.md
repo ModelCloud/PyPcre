@@ -24,6 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
+* 08/08/2026 **0.7.0**: C-level `split` fast path with direct UTF-8 byte slicing and group extraction. Up to **3x faster** than `stdlib.re` and `regex` on high-volume delimiter workloads, with full `re` semantics for empty matches, capturing groups, bytes, and Unicode. ⚡
 * 08/08/2026 **0.6.0**: C-level `sub`/`subn` fast path using `pcre2_substitute` for string/bytes replacements. Measured 2–9x faster than `stdlib.re` and 2–4x faster than `regex` on high-volume backref workloads, while remaining fully `re`-compatible. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
@@ -103,10 +104,24 @@ A reproducible version lives in [`benchmarks/sub_bench.py`](benchmarks/sub_bench
 
 | Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
 | --- | ---: | ---: | ---: | --- |
-| Literal replacement (`\w+` → `[X]`) | `10.45` | `28.23` | `40.85` | **2.7x** vs `re`, **3.9x** vs `regex` |
-| Single numeric backref (`(w)\d+` → `[\1]`) | `12.21` | `110.86` | `50.28` | **9.1x** vs `re`, **4.1x** vs `regex` |
-| Two numeric backrefs (`(w)(\d+)` → `\2-\1`) | `35.47` | `89.34` | `68.57` | **2.5x** vs `re`, **1.9x** vs `regex` |
-| Named backref (`(?P<g>\w+)` → `<\g<g>>`) | `14.35` | `120.96` | `37.31` | **8.4x** vs `re`, **2.6x** vs `regex` |
+| Literal replacement (`\w+` → `[X]`) | `10.33` | `28.50` | `39.35` | **2.8x** vs `re`, **3.8x** vs `regex` |
+| Single numeric backref (`(w)\d+` → `[\1]`) | `13.19` | `123.55` | `51.65` | **9.4x** vs `re`, **3.9x** vs `regex` |
+| Two numeric backrefs (`(w)(\d+)` → `\2-\1`) | `32.35` | `127.43` | `60.52` | **3.9x** vs `re`, **1.9x** vs `regex` |
+| Named backref (`(?P<g>\w+)` → `<\g<g>>`) | `13.76` | `71.83` | `30.40` | **5.2x** vs `re`, **2.2x** vs `regex` |
+
+#### `split` — high-volume delimiter workloads
+
+Measured on a Python 3.10 x86_64 Linux build with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. The benchmark splits 100,000 space-separated tokens.
+
+A reproducible version lives in [`benchmarks/split_bench.py`](benchmarks/split_bench.py).
+
+| Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
+| --- | ---: | ---: | ---: | --- |
+| Delimiter no group (`\s+`) | `6.85` | `21.38` | `19.03` | **3.1x** vs `re`, **2.8x** vs `regex` |
+| Delimiter with group (`(\s+)`) | `11.08` | `20.46` | `24.25` | **1.9x** vs `re`, **2.2x** vs `regex` |
+| Single char (` `) | `4.29` | `3.82` | `13.89` | parity vs `re`, **3.2x** vs `regex` |
+| Single char with group (`( )`) | `8.11` | `11.12` | `18.09` | **1.4x** vs `re`, **2.2x** vs `regex` |
+| Empty pattern (`''`) | `36.72` | `47.32` | `69.47` | **1.3x** vs `re`, **1.9x** vs `regex` |
 
 ### Free-Threaded Benchmark Highlights 🧵
 
