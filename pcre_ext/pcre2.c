@@ -1584,7 +1584,8 @@ Pattern_finditer_method(PatternObject *self, PyObject *args, PyObject *kwargs)
 
 static PyObject *
 Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
-                Py_ssize_t endpos, uint32_t options, execute_mode mode)
+                Py_ssize_t endpos, uint32_t options, execute_mode mode,
+                PyObject *public_pattern)
 {
     PyObject *utf8_owner = NULL;
     const char *buffer = NULL;
@@ -1979,6 +1980,14 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         return NULL;
     }
 
+    if (public_pattern != NULL && public_pattern != Py_None) {
+        if (match_set_public_pattern(match, public_pattern) < 0) {
+            Py_DECREF(match);
+            Py_DECREF(utf8_owner);
+            return NULL;
+        }
+    }
+
     Py_DECREF(utf8_owner);
     return (PyObject *)match;
 }
@@ -1986,52 +1995,55 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 static PyObject *
 Pattern_match_method(PatternObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"subject", "pos", "endpos", "options", NULL};
+    static char *kwlist[] = {"subject", "pos", "endpos", "options", "owner", NULL};
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
     unsigned long options = 0;
+    PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnk", kwlist,
-                                     &subject, &pos, &endpos, &options)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
+                                     &subject, &pos, &endpos, &options, &owner)) {
         return NULL;
     }
 
-    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_MATCH);
+    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_MATCH, owner);
 }
 
 static PyObject *
 Pattern_search_method(PatternObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"subject", "pos", "endpos", "options", NULL};
+    static char *kwlist[] = {"subject", "pos", "endpos", "options", "owner", NULL};
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
     unsigned long options = 0;
+    PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnk", kwlist,
-                                     &subject, &pos, &endpos, &options)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
+                                     &subject, &pos, &endpos, &options, &owner)) {
         return NULL;
     }
 
-    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_SEARCH);
+    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_SEARCH, owner);
 }
 
 static PyObject *
 Pattern_fullmatch_method(PatternObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"subject", "pos", "endpos", "options", NULL};
+    static char *kwlist[] = {"subject", "pos", "endpos", "options", "owner", NULL};
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
     unsigned long options = 0;
+    PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnk", kwlist,
-                                     &subject, &pos, &endpos, &options)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
+                                     &subject, &pos, &endpos, &options, &owner)) {
         return NULL;
     }
 
-    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_FULLMATCH);
+    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_FULLMATCH, owner);
 }
 
 static inline PyObject *
@@ -3275,7 +3287,7 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_MATCH);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_MATCH, NULL);
     Py_DECREF(pattern);
     return result;
 }
@@ -3304,7 +3316,7 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_SEARCH);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_SEARCH, NULL);
     Py_DECREF(pattern);
     return result;
 }
@@ -3333,7 +3345,7 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_FULLMATCH);
+    PyObject *result = Pattern_execute(pattern, subject, 0, -1, 0, EXEC_MODE_FULLMATCH, NULL);
     Py_DECREF(pattern);
     return result;
 }
@@ -3686,7 +3698,7 @@ PyInit_pcre_ext_c(void)
         goto error_cache;
     }
 
-    if (PyModule_AddStringConstant(module, "__version__", "0.8.0") < 0) {
+    if (PyModule_AddStringConstant(module, "__version__", "0.9.0") < 0) {
         goto error_cache;
     }
 

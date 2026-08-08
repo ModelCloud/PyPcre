@@ -224,10 +224,11 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
 class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
-    __slots__ = ("_pattern", "_groups_hint", "_thread_mode")
+    __slots__ = ("_pattern", "_groups_hint", "_thread_mode", "_is_c_pattern")
 
     def __init__(self, pattern: _CPattern) -> None:
         self._pattern = pattern
+        self._is_c_pattern = isinstance(pattern, _CPattern)
         self._thread_mode = _THREAD_MODE_DISABLED
         try:
             self._groups_hint = pattern.capture_count
@@ -306,20 +307,17 @@ class Pattern:
     ) -> Match | None:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if self._is_c_pattern:
+            compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
+            return self._pattern.match(subject, pos, compiled_end, options, self)
         if endpos is None:
-            raw = self._pattern.match(subject, pos=pos, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
             resolved_end = len(subject)
+            raw = self._pattern.match(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
             raw = self._pattern.match(subject, pos=pos, endpos=resolved_end, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
+        if raw is None:
+            return None
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     prefixmatch = match
@@ -334,20 +332,17 @@ class Pattern:
     ) -> Match | None:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if self._is_c_pattern:
+            compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
+            return self._pattern.search(subject, pos, compiled_end, options, self)
         if endpos is None:
-            raw = self._pattern.search(subject, pos=pos, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
             resolved_end = len(subject)
+            raw = self._pattern.search(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
             raw = self._pattern.search(subject, pos=pos, endpos=resolved_end, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
+        if raw is None:
+            return None
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     def fullmatch(
@@ -360,20 +355,17 @@ class Pattern:
     ) -> Match | None:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if self._is_c_pattern:
+            compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
+            return self._pattern.fullmatch(subject, pos, compiled_end, options, self)
         if endpos is None:
-            raw = self._pattern.fullmatch(subject, pos=pos, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
             resolved_end = len(subject)
+            raw = self._pattern.fullmatch(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
             raw = self._pattern.fullmatch(subject, pos=pos, endpos=resolved_end, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
+        if raw is None:
+            return None
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     def finditer(
@@ -390,6 +382,10 @@ class Pattern:
         backend_iter = getattr(self._pattern, "finditer", None)
         if backend_iter is not None:
             compiled_end = resolved_end if endpos is not None else -1
+            if self._is_c_pattern:
+                # The C iterator stamps each Match with this public Pattern, so
+                # we can return it directly without per-match Python wrapping.
+                return backend_iter(subject, pos, compiled_end, options, self)
             raw_iter = None
             try:
                 raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options, owner=self)
@@ -401,8 +397,8 @@ class Pattern:
                     raw_iter = None
             if raw_iter is not None:
                 # Peek to detect whether the backend already stamped the public
-                # owner on its Match objects.  If it did, we can return the C
-                # iterator directly; otherwise wrap the raw results as before.
+                # owner on its Match objects.  If it did, we can yield from the
+                # raw iterator; otherwise wrap the raw results as before.
                 try:
                     peek = next(raw_iter)
                 except StopIteration:
