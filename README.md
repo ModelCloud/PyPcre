@@ -24,7 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
-* 08/08/2026: C-level `sub`/`subn` fast path using `pcre2_substitute` for string/bytes replacements. Measured 2–9x faster than `stdlib.re` and 2–4x faster than `regex` on high-volume backref workloads, while remaining fully `re`-compatible. 🚀⚡
+* 08/08/2026 **0.6.0**: C-level `sub`/`subn` fast path using `pcre2_substitute` for string/bytes replacements. Measured 2–9x faster than `stdlib.re` and 2–4x faster than `regex` on high-volume backref workloads, while remaining fully `re`-compatible. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
 * 04/13/2026 [0.3.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.3.0): Lower-overhead public `Match` objects, faster hot-path `match()` / `search()` / `fullmatch()` / `findall()`, and tighter free-threaded execution. ⚡
