@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re as _std_re
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Iterator
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
@@ -383,44 +383,67 @@ class Pattern:
         pos: int = 0,
         endpos: int | None = None,
         options: int = 0,
-    ) -> Generator[Match, None, None]:
+    ) -> Iterator[Match]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
-        origin_pos = pos
         resolved_end = resolve_endpos(subject, endpos)
         backend_iter = getattr(self._pattern, "finditer", None)
         if backend_iter is not None:
             compiled_end = resolved_end if endpos is not None else -1
+            raw_iter = None
             try:
-                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options, owner=self)
             except TypeError:
-                raw_iter = None
+                # Older extensions and test doubles may not accept `owner`.
+                try:
+                    raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                except TypeError:
+                    raw_iter = None
             if raw_iter is not None:
-                for raw in raw_iter:
-                    yield self._wrap_match(raw, subject, origin_pos, resolved_end)
-                return
+                # Peek to detect whether the backend already stamped the public
+                # owner on its Match objects.  If it did, we can return the C
+                # iterator directly; otherwise wrap the raw results as before.
+                try:
+                    peek = next(raw_iter)
+                except StopIteration:
+                    return iter([])
+                if _can_attach_match(peek) and peek.re is self:
+                    def _owned_iter():
+                        yield peek
+                        yield from raw_iter
+                    return _owned_iter()
+                def _wrapped_iter():
+                    yield self._wrap_match(peek, subject, pos, resolved_end)
+                    for raw in raw_iter:
+                        yield self._wrap_match(raw, subject, pos, resolved_end)
+                return _wrapped_iter()
 
         search_end = resolved_end if endpos is not None else -1
         current = pos
+        origin_pos = pos
         subject_length = len(subject)
 
-        while True:
-            raw = self._pattern.search(subject, pos=current, endpos=search_end, options=options)
-            if raw is None:
-                break
+        def _generator():
+            nonlocal current
+            while True:
+                raw = self._pattern.search(subject, pos=current, endpos=search_end, options=options)
+                if raw is None:
+                    break
 
-            match_obj = self._wrap_match(raw, subject, origin_pos, resolved_end)
-            yield match_obj
+                match_obj = self._wrap_match(raw, subject, origin_pos, resolved_end)
+                yield match_obj
 
-            start, end = match_obj.span()
-            next_pos = compute_next_pos(current, (start, end), endpos)
-            if next_pos <= current:
-                next_pos = current + 1
-            current = next_pos
-            if current > subject_length:
-                break
-            if endpos is not None and current >= resolved_end:
-                break
+                start, end = match_obj.span()
+                next_pos = compute_next_pos(current, (start, end), endpos)
+                if next_pos <= current:
+                    next_pos = current + 1
+                current = next_pos
+                if current > subject_length:
+                    break
+                if endpos is not None and current >= resolved_end:
+                    break
+
+        return _generator()
 
     def findall(
         self,

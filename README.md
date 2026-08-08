@@ -24,6 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
+* 08/08/2026 **0.8.0**: C-level `finditer` owner-stamping so the backend iterator returns public `Match` objects directly, eliminating per-match Python wrapper overhead. Up to **46x faster** than `stdlib.re` and **48x** vs `regex` on high-volume workloads, with full `re` semantics. ⚡🚀
 * 08/08/2026 **0.7.0**: C-level `split` fast path with direct UTF-8 byte slicing and group extraction. Up to **3x faster** than `stdlib.re` and `regex` on high-volume delimiter workloads, with full `re` semantics for empty matches, capturing groups, bytes, and Unicode. ⚡
 * 08/08/2026 **0.6.0**: C-level `sub`/`subn` fast path using `pcre2_substitute` for string/bytes replacements. Measured 2–9x faster than `stdlib.re` and 2–4x faster than `regex` on high-volume backref workloads, while remaining fully `re`-compatible. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
@@ -91,10 +92,13 @@ Patterns used:
 
 #### `finditer` — same workloads
 
+Measured on a Python 3.10 x86_64 Linux build with compiled-pattern reuse and JIT enabled. A reproducible version lives in [`benchmarks/finditer_bench.py`](benchmarks/finditer_bench.py).
+
 | Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
 | --- | ---: | ---: | ---: | --- |
-| Extract `WARN` / `ERROR` lines | `0.60` | `29.33` | `31.23` | **49x** vs `re`, **52x** vs `regex` |
-| Per-line full-name extraction | `1.02` | `30.09` | `16.25` | **29x** vs `re`, **16x** vs `regex` |
+| Extract `WARN` / `ERROR` lines | `0.67` | `30.94` | `32.17` | **46x** vs `re`, **48x** vs `regex` |
+| Per-line full-name extraction | `0.92` | `29.12` | `14.18` | **32x** vs `re`, **15x** vs `regex` |
+| Lookbehind + negative lookahead | `4.47` | `15.83` | `11.99` | **3.5x** vs `re`, **2.7x** vs `regex` |
 
 #### `sub` / `subn` — high-volume replacement workloads
 

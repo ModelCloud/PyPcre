@@ -704,6 +704,7 @@ typedef struct {
     Py_ssize_t index_to_byte_cached_index;
     Py_ssize_t index_to_byte_cached_byte;
     int utf8_is_ascii;
+    PyObject *public_pattern;
 } FindIterObject;
 
 /*
@@ -932,6 +933,7 @@ FindIter_dealloc(FindIterObject *self)
         jit_stack_cache_release(self->jit_stack);
         self->jit_stack = NULL;
     }
+    Py_XDECREF(self->public_pattern);
     Py_XDECREF(self->pattern);
     Py_XDECREF(self->subject);
     Py_XDECREF(self->utf8_owner);
@@ -1083,6 +1085,13 @@ matched:
         return NULL;
     }
 
+    if (self->public_pattern != NULL) {
+        if (match_set_public_pattern(match, self->public_pattern) < 0) {
+            Py_DECREF(match);
+            return NULL;
+        }
+    }
+
     Py_ssize_t next_pos = end_index;
     if (self->has_endpos && end_index >= self->resolved_end) {
         next_pos = end_index;
@@ -1212,7 +1221,8 @@ Pattern_create_finditer(PatternObject *pattern,
                         PyObject *subject_obj,
                         Py_ssize_t pos,
                         Py_ssize_t endpos,
-                        uint32_t options)
+                        uint32_t options,
+                        PyObject *public_pattern)
 {
     FindIterObject *iter = PyObject_New(FindIterObject, &FindIterType);
     if (iter == NULL) {
@@ -1245,6 +1255,12 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->index_to_byte_cached_index = 0;
     iter->index_to_byte_cached_byte = 0;
     iter->utf8_is_ascii = 0;
+    iter->public_pattern = NULL;
+
+    if (public_pattern != NULL && public_pattern != Py_None) {
+        Py_INCREF(public_pattern);
+        iter->public_pattern = public_pattern;
+    }
 
     Py_INCREF(pattern);
     iter->pattern = pattern;
@@ -1439,6 +1455,7 @@ error:
         pcre2_match_context_free(iter->match_context);
         iter->match_context = NULL;
     }
+    Py_XDECREF(iter->public_pattern);
     Py_XDECREF(iter->utf8_owner);
     Py_XDECREF(iter->subject);
     Py_XDECREF(iter->pattern);
@@ -1550,18 +1567,19 @@ Pattern_get_capture_count(PatternObject *self, void *closure)
 static PyObject *
 Pattern_finditer_method(PatternObject *self, PyObject *args, PyObject *kwargs)
 {
-    static char *kwlist[] = {"subject", "pos", "endpos", "options", NULL};
+    static char *kwlist[] = {"subject", "pos", "endpos", "options", "owner", NULL};
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
     unsigned long options = 0;
+    PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnk", kwlist,
-                                     &subject, &pos, &endpos, &options)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
+                                     &subject, &pos, &endpos, &options, &owner)) {
         return NULL;
     }
 
-    return Pattern_create_finditer(self, subject, pos, endpos, (uint32_t)options);
+    return Pattern_create_finditer(self, subject, pos, endpos, (uint32_t)options, owner);
 }
 
 static PyObject *
@@ -3668,7 +3686,7 @@ PyInit_pcre_ext_c(void)
         goto error_cache;
     }
 
-    if (PyModule_AddStringConstant(module, "__version__", "0.7.0") < 0) {
+    if (PyModule_AddStringConstant(module, "__version__", "0.8.0") < 0) {
         goto error_cache;
     }
 
