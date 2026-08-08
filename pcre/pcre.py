@@ -175,6 +175,52 @@ def _normalise_flags(flags: FlagInput) -> int:
     raise TypeError("flags must be an int, stdlib re flag, or an iterable of those")
 
 
+def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
+    """Convert a parsed Python replacement template to a PCRE2 replacement string."""
+
+    if (
+        isinstance(parsed, tuple)
+        and len(parsed) == 2
+        and isinstance(parsed[0], list)
+        and isinstance(parsed[1], list)
+    ):
+        group_slots, literals = parsed
+        slot_to_group = {slot: group for slot, group in group_slots}
+        if is_bytes:
+            parts = []
+            for i, lit in enumerate(literals):
+                if i in slot_to_group:
+                    parts.append(("\\g<" + str(slot_to_group[i]) + ">").encode("ascii"))
+                if lit is not None:
+                    parts.append(lit.replace(b"\\", b"\\\\").replace(b"$", b"$$"))
+            return b"".join(parts)
+
+        parts = []
+        for i, lit in enumerate(literals):
+            if i in slot_to_group:
+                parts.append("\\g<" + str(slot_to_group[i]) + ">")
+            if lit is not None:
+                parts.append(lit.replace("\\", "\\\\").replace("$", "$$"))
+        return "".join(parts)
+
+    if is_bytes:
+        parts = []
+        for item in parsed:
+            if isinstance(item, int):
+                parts.append(("\\g<" + str(item) + ">").encode("ascii"))
+            else:
+                parts.append(item.replace(b"\\", b"\\\\").replace(b"$", b"$$"))
+        return b"".join(parts)
+
+    parts = []
+    for item in parsed:
+        if isinstance(item, int):
+            parts.append("\\g<" + str(item) + ">")
+        else:
+            parts.append(item.replace("\\", "\\\\").replace("$", "$$"))
+    return "".join(parts)
+
+
 class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
@@ -471,6 +517,25 @@ class Pattern:
                 if not isinstance(repl, str):
                     raise TypeError("replacement must be str when substituting on text")
                 template = repl
+
+            if limit is None:
+                backend_substitute = getattr(self._pattern, "substitute", None)
+                if backend_substitute is not None:
+                    try:
+                        parsed_template = _parser.parse_template(
+                            template,
+                            TemplatePatternStub(self.groups, self.groupindex),
+                        )
+                    except (ValueError, _std_re.error, IndexError) as exc:
+                        raise PcreError(str(exc)) from exc
+                    pcre2_repl = _pcre2_replacement_from_parsed(parsed_template, subject_is_bytes)
+                    try:
+                        backend_result = backend_substitute(subject, replacement=pcre2_repl, count=0)
+                    except Exception:
+                        backend_result = NotImplemented
+                    if backend_result is not NotImplemented and backend_result is not None:
+                        return backend_result
+                    parsed_template = None
 
             if self._groups_hint is not None:
                 try:

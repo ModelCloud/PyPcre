@@ -24,6 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
+* 08/08/2026: C-level `sub`/`subn` fast path using `pcre2_substitute` for string/bytes replacements. Measured 2–9x faster than `stdlib.re` and 2–4x faster than `regex` on high-volume backref workloads, while remaining fully `re`-compatible. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
 * 04/13/2026 [0.3.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.3.0): Lower-overhead public `Match` objects, faster hot-path `match()` / `search()` / `fullmatch()` / `findall()`, and tighter free-threaded execution. ⚡
@@ -93,6 +94,19 @@ Patterns used:
 | --- | ---: | ---: | ---: | --- |
 | Extract `WARN` / `ERROR` lines | `0.60` | `29.33` | `31.23` | **49x** vs `re`, **52x** vs `regex` |
 | Per-line full-name extraction | `1.02` | `30.09` | `16.25` | **29x** vs `re`, **16x** vs `regex` |
+
+#### `sub` / `subn` — high-volume replacement workloads
+
+Measured on a Python 3.10 x86_64 Linux build with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. The benchmark replaces 100,000 space-separated tokens.
+
+A reproducible version lives in [`benchmarks/sub_bench.py`](benchmarks/sub_bench.py).
+
+| Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
+| --- | ---: | ---: | ---: | --- |
+| Literal replacement (`\w+` → `[X]`) | `10.45` | `28.23` | `40.85` | **2.7x** vs `re`, **3.9x** vs `regex` |
+| Single numeric backref (`(w)\d+` → `[\1]`) | `12.21` | `110.86` | `50.28` | **9.1x** vs `re`, **4.1x** vs `regex` |
+| Two numeric backrefs (`(w)(\d+)` → `\2-\1`) | `35.47` | `89.34` | `68.57` | **2.5x** vs `re`, **1.9x** vs `regex` |
+| Named backref (`(?P<g>\w+)` → `<\g<g>>`) | `14.35` | `120.96` | `37.31` | **8.4x** vs `re`, **2.6x** vs `regex` |
 
 ### Free-Threaded Benchmark Highlights 🧵
 

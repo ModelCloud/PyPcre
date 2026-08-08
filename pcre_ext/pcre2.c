@@ -2464,8 +2464,265 @@ Pattern_findall_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     return Pattern_findall(self, subject, pos, endpos, (uint32_t)options);
 }
 
+static PyObject *
+Pattern_substitute(PatternObject *self,
+                   PyObject *subject_obj,
+                   PyObject *repl_obj,
+                   Py_ssize_t count)
+{
+    PyObject *result = NULL;
+    PyObject *result_tuple = NULL;
+    PyObject *utf8_owner = NULL;
+    const char *subject_data = NULL;
+    Py_ssize_t subject_length = 0;
+    int subject_is_bytes = 0;
+    int subject_is_ascii = 0;
+
+    const char *repl_data = NULL;
+    Py_ssize_t repl_length = 0;
+    int repl_is_bytes = 0;
+
+    pcre2_match_data *match_data = NULL;
+    pcre2_match_context *match_context = NULL;
+    pcre2_jit_stack *jit_stack = NULL;
+    int match_data_from_pattern = 0;
+    int match_context_from_pattern = 0;
+
+    if (count != 0) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+
+    if (PyBytes_Check(repl_obj)) {
+        repl_is_bytes = 1;
+        repl_data = PyBytes_AS_STRING(repl_obj);
+        repl_length = PyBytes_GET_SIZE(repl_obj);
+    } else if (PyUnicode_Check(repl_obj)) {
+        if (PyUnicode_READY(repl_obj) < 0) {
+            goto error;
+        }
+        if (PyUnicode_IS_ASCII(repl_obj)) {
+            repl_data = (const char *)PyUnicode_1BYTE_DATA(repl_obj);
+            repl_length = PyUnicode_GET_LENGTH(repl_obj);
+        } else {
+            repl_data = PyUnicode_AsUTF8AndSize(repl_obj, &repl_length);
+            if (repl_data == NULL) {
+                goto error;
+            }
+        }
+    } else {
+        PyErr_SetString(PyExc_TypeError, "replacement must be str or bytes");
+        return NULL;
+    }
+
+    if (PyBytes_Check(subject_obj)) {
+        subject_is_bytes = 1;
+        Py_INCREF(subject_obj);
+        utf8_owner = subject_obj;
+        subject_data = PyBytes_AS_STRING(subject_obj);
+        subject_length = PyBytes_GET_SIZE(subject_obj);
+        if (ensure_valid_utf8_for_bytes_subject(self,
+                                              subject_is_bytes,
+                                              subject_data,
+                                              subject_length) < 0) {
+            goto error;
+        }
+    } else if (PyObject_CheckBuffer(subject_obj)) {
+        const char *buf_data = NULL;
+        Py_ssize_t buf_length = 0;
+        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        if (buf_view == NULL) {
+            return NULL;
+        }
+        subject_is_bytes = 1;
+        utf8_owner = buf_view;
+        subject_data = buf_data;
+        subject_length = buf_length;
+        if (ensure_valid_utf8_for_bytes_subject(self,
+                                              subject_is_bytes,
+                                              subject_data,
+                                              subject_length) < 0) {
+            goto error;
+        }
+    } else if (PyUnicode_Check(subject_obj)) {
+        if (PyUnicode_READY(subject_obj) < 0) {
+            goto error;
+        }
+        Py_INCREF(subject_obj);
+        utf8_owner = subject_obj;
+        if (PyUnicode_IS_ASCII(subject_obj)) {
+            subject_is_ascii = 1;
+            subject_data = (const char *)PyUnicode_1BYTE_DATA(subject_obj);
+            subject_length = PyUnicode_GET_LENGTH(subject_obj);
+        } else {
+            subject_data = PyUnicode_AsUTF8AndSize(subject_obj, &subject_length);
+            if (subject_data == NULL) {
+                goto error;
+            }
+        }
+    } else {
+        PyErr_SetString(PyExc_TypeError,
+                        "subject must be str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
+        return NULL;
+    }
+
+    if (subject_is_bytes != repl_is_bytes) {
+        PyErr_SetString(PyExc_TypeError,
+                        "replacement must be the same type as the subject");
+        goto error;
+    }
+
+    match_data = pattern_match_data_acquire(self, &match_data_from_pattern);
+    if (match_data == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+
+    if (pattern_jit_get(self)) {
+        match_context = pattern_match_context_acquire(self, 0, &match_context_from_pattern);
+        if (match_context == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        jit_stack = jit_stack_cache_acquire();
+        if (jit_stack == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        pcre2_jit_stack_assign(match_context, NULL, jit_stack);
+    }
+
+    uint32_t sub_options = PCRE2_SUBSTITUTE_GLOBAL
+                         | PCRE2_SUBSTITUTE_EXTENDED
+                         | PCRE2_SUBSTITUTE_UNSET_EMPTY
+                         | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
+    if (!subject_is_bytes) {
+        sub_options |= PCRE2_NO_UTF_CHECK;
+    }
+
+    PCRE2_SIZE outlen = (PCRE2_SIZE)(subject_length + repl_length + 16);
+    if (outlen < (PCRE2_SIZE)subject_length) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    PCRE2_UCHAR *out = (PCRE2_UCHAR *)PyMem_Malloc(outlen);
+    if (out == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+
+    for (int attempts = 0; attempts < 5; ++attempts) {
+        int rc = pcre2_substitute(self->code,
+                                  (PCRE2_SPTR)subject_data,
+                                  (PCRE2_SIZE)subject_length,
+                                  0,
+                                  sub_options,
+                                  match_data,
+                                  match_context,
+                                  (PCRE2_SPTR)repl_data,
+                                  (PCRE2_SIZE)repl_length,
+                                  out,
+                                  &outlen);
+        if (rc == PCRE2_ERROR_NOMEMORY) {
+            PCRE2_SIZE required = outlen;
+            if (required == (PCRE2_SIZE)-1) {
+                required = (PCRE2_SIZE)(subject_length + repl_length + 16) + (PCRE2_SIZE)subject_length;
+            }
+            if (required < (PCRE2_SIZE)(subject_length + repl_length + 16)) {
+                required = (PCRE2_SIZE)(subject_length + repl_length + 16);
+            }
+            void *new_out = PyMem_Realloc(out, required);
+            if (new_out == NULL) {
+                PyMem_Free(out);
+                PyErr_NoMemory();
+                goto error;
+            }
+            out = (PCRE2_UCHAR *)new_out;
+            outlen = required;
+            continue;
+        }
+        if (rc < 0) {
+            PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
+            PyMem_Free(out);
+            raise_pcre_error("substitute", rc, error_offset);
+            goto error;
+        }
+
+        PyObject *out_obj = NULL;
+        if (subject_is_bytes) {
+            out_obj = PyBytes_FromStringAndSize((const char *)out, (Py_ssize_t)outlen);
+        } else if (subject_is_ascii) {
+            out_obj = PyUnicode_New((Py_ssize_t)outlen, 127);
+            if (out_obj != NULL) {
+                memcpy(PyUnicode_1BYTE_DATA(out_obj), out, (size_t)outlen);
+            }
+        } else {
+            out_obj = PyUnicode_DecodeUTF8((const char *)out, (Py_ssize_t)outlen, "strict");
+        }
+        PyMem_Free(out);
+        if (out_obj == NULL) {
+            goto error;
+        }
+
+        result_tuple = PyTuple_New(2);
+        if (result_tuple == NULL) {
+            Py_DECREF(out_obj);
+            goto error;
+        }
+        PyObject *count_obj = PyLong_FromLong((long)rc);
+        if (count_obj == NULL) {
+            Py_DECREF(out_obj);
+            Py_DECREF(result_tuple);
+            goto error;
+        }
+        PyTuple_SET_ITEM(result_tuple, 0, out_obj);
+        PyTuple_SET_ITEM(result_tuple, 1, count_obj);
+        result = result_tuple;
+        goto cleanup;
+    }
+
+    PyMem_Free(out);
+    PyErr_NoMemory();
+
+error:
+    Py_XDECREF(result);
+    result = NULL;
+
+cleanup:
+    if (jit_stack != NULL) {
+        if (match_context != NULL) {
+            pcre2_jit_stack_assign(match_context, NULL, NULL);
+        }
+        jit_stack_cache_release(jit_stack);
+    }
+    if (match_context != NULL) {
+        pattern_match_context_release(self, match_context, 0, match_context_from_pattern);
+    }
+    if (match_data != NULL) {
+        pattern_match_data_release(self, match_data, match_data_from_pattern);
+    }
+    Py_XDECREF(utf8_owner);
+    return result;
+}
+
+static PyObject *
+Pattern_substitute_method(PatternObject *self, PyObject *args, PyObject *kwargs)
+{
+    static char *kwlist[] = {"subject", "replacement", "count", NULL};
+    PyObject *subject = NULL;
+    PyObject *replacement = NULL;
+    Py_ssize_t count = 0;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOn", kwlist,
+                                     &subject, &replacement, &count)) {
+        return NULL;
+    }
+
+    return Pattern_substitute(self, subject, replacement, count);
+}
+
 static PyMethodDef Pattern_methods[] = {
     {"findall", (PyCFunction)Pattern_findall_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return a list of all non-overlapping matches.")},
+    {"substitute", (PyCFunction)Pattern_substitute_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Fast substitution using pcre2_substitute.")},
     {"finditer", (PyCFunction)Pattern_finditer_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return an iterator over successive matches.")},
     {"match", (PyCFunction)Pattern_match_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match the pattern at the start of the subject.")},
     {"search", (PyCFunction)Pattern_search_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search the subject for the pattern." )},
