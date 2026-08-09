@@ -93,6 +93,8 @@ typedef struct {
     int lastindex_cache;
     /* Lazily materialized immutable regs tuple; protected for GIL=0 callers. */
     PyObject *regs_cache;
+    /* Default groups() result is immutable and safe to reuse per match. */
+    PyObject *groups_cache;
 } MatchObject;
 
 extern PyTypeObject PatternType;

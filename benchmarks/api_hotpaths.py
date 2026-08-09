@@ -37,6 +37,9 @@ def main() -> int:
     subject = "x" * 1000
     short_subject = "x" * 10
     pattern = pcre.compile("(x)")
+    captured = pattern.match(short_subject)
+    if captured is None:
+        raise AssertionError("benchmark pattern failed to produce a match")
     operations: list[tuple[str, Callable[[], object]]] = [
         ("bound.match", lambda: pattern.match(subject)),
         ("bound.search", lambda: pattern.search(subject)),
@@ -46,6 +49,7 @@ def main() -> int:
         ("bound.split", lambda: pattern.split("x " * 8)),
         ("bound.sub.literal", lambda: pattern.sub("[X]", short_subject)),
         ("bound.sub.backref", lambda: pattern.sub(r"[\1]", short_subject)),
+        ("match.groups", captured.groups),
         ("module.match", lambda: pcre.match("(x)", subject)),
         ("module.search", lambda: pcre.search("(x)", subject)),
         ("module.fullmatch", lambda: pcre.fullmatch("(x)", subject)),

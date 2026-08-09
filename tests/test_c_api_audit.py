@@ -202,6 +202,16 @@ def test_regs_is_cached_as_an_immutable_match_snapshot() -> None:
     assert match.regs is first
 
 
+def test_groups_default_tuple_is_cached_but_custom_defaults_are_fresh() -> None:
+    match = pcre.compile(r"(?P<left>a)(?P<optional>b)?").fullmatch("a")
+    assert match is not None
+    first = match.groups()
+    assert first == ("a", None)
+    assert match.groups() is first
+    assert match.groups("missing") == ("a", "missing")
+    assert match.groups("missing") is not match.groups("missing")
+
+
 def test_global_inline_options_are_exposed() -> None:
     assert pcre.compile(r"(?i)a").flags & int(pcre.Flag.CASELESS)
     assert not (pcre.compile(r"(?i:a)").flags & int(pcre.Flag.CASELESS))

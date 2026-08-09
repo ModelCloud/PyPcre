@@ -79,6 +79,7 @@ hard CPU affinity.
 | `parallel_map(search)`, 16 × 1 MiB subjects, 12 workers | **8.57x** | **7.85x** |
 | `parallel_map(findall)`, 48 × 1 MiB subjects, 12 workers | **11.51x** | **11.25x** |
 | Bound backreference `sub` hot path | **1.38 μs** | **1.14 μs** |
+| Repeated `Match.groups()` with the default argument | **0.026 μs** | **0.030 μs** |
 
 The parallel figures are serial-to-parallel speedups and preserve input order and
 exception behavior. Large `findall` scans release the GIL only around the PCRE2

@@ -253,6 +253,7 @@ Match_dealloc(MatchObject *self)
     Py_XDECREF(self->subject);
     Py_XDECREF(self->utf8_owner);
     Py_XDECREF(self->regs_cache);
+    Py_XDECREF(self->groups_cache);
     pcre_free(self->ovector);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -646,6 +647,19 @@ Match_groups(MatchObject *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
+    if (default_value == Py_None) {
+        PyObject *cached = NULL;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        cached = self->groups_cache;
+        if (cached != NULL) {
+            Py_INCREF(cached);
+        }
+        Py_END_CRITICAL_SECTION();
+        if (cached != NULL) {
+            return cached;
+        }
+    }
+
     PyObject *result = PyTuple_New(self->ovec_count - 1);
     if (result == NULL) {
         return NULL;
@@ -663,6 +677,20 @@ Match_groups(MatchObject *self, PyObject *args, PyObject *kwargs)
             value = default_value;
         }
         PyTuple_SET_ITEM(result, i - 1, value);
+    }
+
+    if (default_value == Py_None) {
+        PyObject *cached = NULL;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        if (self->groups_cache == NULL) {
+            self->groups_cache = result;
+            Py_INCREF(result);
+        }
+        cached = self->groups_cache;
+        Py_INCREF(cached);
+        Py_END_CRITICAL_SECTION();
+        Py_DECREF(result);
+        return cached;
     }
 
     return result;
@@ -1767,6 +1795,7 @@ create_match_object(PatternObject *pattern,
     match->replay_options = replay_options;
     match->lastindex_cache = -2;
     match->regs_cache = NULL;
+    match->groups_cache = NULL;
     /* Anything that isn't str (bytes, or a buffer-protocol object such as
        mmap.mmap) is treated as raw byte data: offsets are byte offsets and
        group values are returned as bytes. */
