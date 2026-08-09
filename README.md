@@ -24,7 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
-* 08/08/2026 **0.6.0**: C-level fast paths for `findall`, `sub`/`subn`, `split`, `finditer`, and `match`/`search`/`fullmatch`. Measured up to **53x faster** than `stdlib.re` and **48x faster** than `regex` on `finditer` and `findall` workloads, **3x** on `split`, and **2–9x** on `sub`/`subn` backref workloads, with full `re` semantics. 🚀⚡
+* 08/08/2026 **0.6.0**: `findall`, `finditer`, `sub`/`subn`, `split`, and `match`/`search`/`fullmatch` are now up to **53x faster** than `stdlib.re` and **48x faster** than `regex` on `finditer`/`findall` workloads, **3x** on `split`, and **2–9x** on `sub`/`subn` backref workloads, with full `re` semantics. Free-threaded `findall` reaches **13.9x** vs `re` on 8 threads. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
 * 04/13/2026 [0.3.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.3.0): Lower-overhead public `Match` objects, faster hot-path `match()` / `search()` / `fullmatch()` / `findall()`, and tighter free-threaded execution. ⚡
