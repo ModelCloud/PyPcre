@@ -40,6 +40,38 @@ def test_match_repr_uses_character_offsets() -> None:
     assert "span=(0, 1)" in repr(match)
 
 
+def test_ascii_match_accessors_preserve_offsets_without_prefix_rescans() -> None:
+    """Late ASCII matches must retain byte/code-point offset identity.
+
+    This also exercises the C fast path used by span/start/end/regs.  ASCII
+    subjects are common in logs and protocol tokens; their UTF-8 offsets are
+    already Python character indexes, so no prefix scan is necessary.
+    """
+    subject = "x" * 100_000 + "token"
+    match = pcre.search("token", subject)
+    assert match is not None
+    assert match.span() == (100_000, 100_005)
+    assert match.start() == 100_000
+    assert match.end() == 100_005
+    assert match.regs == ((100_000, 100_005),)
+
+
+def test_large_findall_scan_preserves_capture_results() -> None:
+    pattern = raw.compile(r"(\d+)", flags=TEXT_FLAGS, jit=False)
+    subject = "x" * 300_000 + "123 x45"
+    assert pattern.findall(subject) == ["123", "45"]
+
+
+def test_match_expand_literal_template_keeps_replacement_semantics() -> None:
+    match = pcre.compile(r"(?P<word>word)").fullmatch("word")
+    assert match is not None
+    assert match.expand("literal $1") == "literal $1"
+    assert match.expand(r"literal\g<word>") == "literalword"
+    bytes_match = pcre.compile(b"(?P<word>word)").fullmatch(b"word")
+    assert bytes_match is not None
+    assert bytes_match.expand(bytearray(b"literal $1")) == b"literal $1"
+
+
 def test_pattern_clamps_start_past_end_for_empty_match() -> None:
     pattern = raw.compile("", flags=TEXT_FLAGS, jit=False)
     for method_name in ("match", "search", "fullmatch"):

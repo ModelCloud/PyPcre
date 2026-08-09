@@ -45,6 +45,39 @@ def test_flat_replacement_conversion_paths() -> None:
     assert pcre_mod._pcre2_replacement_from_parsed([1, "$"], False) == r"\g<1>$$"
 
 
+def test_replacement_template_cache_reuses_and_clears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pattern = pcre.compile(r"(x)")
+    pcre_mod._cached_replacement_parts.cache_clear()
+    original = pcre_mod._parser.parse_template
+    calls = 0
+
+    def counted_parse(template: Any, state: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original(template, state)
+
+    monkeypatch.setattr(pcre_mod._parser, "parse_template", counted_parse)
+    assert pattern.sub(r"[\1]", "x") == "[x]"
+    assert pattern.sub(r"[\1]", "x") == "[x]"
+    assert calls == 1
+
+    pcre.clear_cache()
+    assert pattern.sub(r"[\1]", "x") == "[x]"
+    assert calls == 2
+
+
+def test_replacement_fallbacks_cover_subclasses_and_bounded_templates() -> None:
+    class DerivedPattern(pcre_mod.Pattern):
+        pass
+
+    backend = pcre_mod._pcre2.compile("(x)", jit=False)
+    derived = DerivedPattern(backend)
+    assert derived.sub(r"[\1]", "x") == "[x]"
+    assert derived.sub(r"[\1]", "x", count=1) == "[x]"
+
+
 class _LegacyFastDispatchPattern:
     pattern = "x"
     groupindex: ClassVar[dict[str, int]] = {"g": 1}

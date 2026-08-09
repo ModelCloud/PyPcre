@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re as _std_re
 from collections.abc import Iterable, Iterator, Mapping
+from functools import lru_cache
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
@@ -17,7 +18,6 @@ from ._stdlib_re import RE_TEMPLATE, RE_TEMPLATE_FLAG, RE_UNICODE_FLAG, _parser
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
 from .flags import Flag, strip_py_only_flags
-
 
 # Cache frequently used flag values as plain integers to avoid the overhead of
 # IntFlag arithmetic in hot paths such as module-level search helpers.
@@ -52,7 +52,6 @@ from .threads import (
     get_thread_pool_size,
     threading_supported,
 )
-
 
 _CPattern = _pcre2.Pattern
 PcreError = _pcre2.PcreError
@@ -139,7 +138,9 @@ def _apply_default_unicode_flags(pattern: Any, flags: int) -> int:
 
 
 def _coerce_stdlib_regexflag(flag: _std_re.RegexFlag) -> int:
-    unsupported_bits = int(flag) & ~(_STD_RE_FLAG_MASK | RE_TEMPLATE_FLAG | RE_UNICODE_FLAG)
+    unsupported_bits = int(flag) & ~(
+        _STD_RE_FLAG_MASK | RE_TEMPLATE_FLAG | RE_UNICODE_FLAG
+    )
     if unsupported_bits:
         unsupported = _std_re.RegexFlag(unsupported_bits)
         raise ValueError(
@@ -316,7 +317,9 @@ class Pattern:
             raw = self._pattern.match(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
-            raw = self._pattern.match(subject, pos=pos, endpos=resolved_end, options=options)
+            raw = self._pattern.match(
+                subject, pos=pos, endpos=resolved_end, options=options
+            )
         if raw is None:
             return None
         return self._wrap_match(raw, subject, pos, resolved_end)
@@ -341,7 +344,9 @@ class Pattern:
             raw = self._pattern.search(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
-            raw = self._pattern.search(subject, pos=pos, endpos=resolved_end, options=options)
+            raw = self._pattern.search(
+                subject, pos=pos, endpos=resolved_end, options=options
+            )
         if raw is None:
             return None
         return self._wrap_match(raw, subject, pos, resolved_end)
@@ -364,7 +369,9 @@ class Pattern:
             raw = self._pattern.fullmatch(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
-            raw = self._pattern.fullmatch(subject, pos=pos, endpos=resolved_end, options=options)
+            raw = self._pattern.fullmatch(
+                subject, pos=pos, endpos=resolved_end, options=options
+            )
         if raw is None:
             return None
         return self._wrap_match(raw, subject, pos, resolved_end)
@@ -392,11 +399,15 @@ class Pattern:
                 return backend_iter(subject, pos, compiled_end, options, self)
             raw_iter = None
             try:
-                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options, owner=self)
+                raw_iter = backend_iter(
+                    subject, pos=pos, endpos=compiled_end, options=options, owner=self
+                )
             except TypeError:
                 # Older extensions and test doubles may not accept `owner`.
                 try:
-                    raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                    raw_iter = backend_iter(
+                        subject, pos=pos, endpos=compiled_end, options=options
+                    )
                 except TypeError:
                     raw_iter = None
             if raw_iter is not None:
@@ -408,14 +419,18 @@ class Pattern:
                 except StopIteration:
                     return iter([])
                 if _can_attach_match(peek) and peek.re is self:
+
                     def _owned_iter():
                         yield peek
                         yield from raw_iter
+
                     return _owned_iter()
+
                 def _wrapped_iter():
                     yield self._wrap_match(peek, subject, pos, resolved_end)
                     for raw in raw_iter:
                         yield self._wrap_match(raw, subject, pos, resolved_end)
+
                 return _wrapped_iter()
 
         search_end = resolved_end if endpos is not None else -1
@@ -426,7 +441,9 @@ class Pattern:
         def _generator():
             nonlocal current
             while True:
-                raw = self._pattern.search(subject, pos=current, endpos=search_end, options=options)
+                raw = self._pattern.search(
+                    subject, pos=current, endpos=search_end, options=options
+                )
                 if raw is None:
                     break
 
@@ -470,7 +487,9 @@ class Pattern:
                 if fast is not None:
                     return fast(subject)
             try:
-                return backend_findall(subject, pos=pos, endpos=compiled_end, options=options)
+                return backend_findall(
+                    subject, pos=pos, endpos=compiled_end, options=options
+                )
             except TypeError:
                 pass
 
@@ -478,7 +497,9 @@ class Pattern:
         if backend_iter is not None:
             compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
             try:
-                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                raw_iter = backend_iter(
+                    subject, pos=pos, endpos=compiled_end, options=options
+                )
             except TypeError:
                 raw_iter = None
             if raw_iter is not None:
@@ -492,7 +513,9 @@ class Pattern:
                 return results
 
         results: List[Any] = []
-        for match_obj in self.finditer(subject, pos=pos, endpos=endpos, options=options):
+        for match_obj in self.finditer(
+            subject, pos=pos, endpos=endpos, options=options
+        ):
             groups = match_obj.groups()
             if groups:
                 results.append(groups[0] if len(groups) == 1 else groups)
@@ -514,7 +537,11 @@ class Pattern:
         # Empty patterns split at every code point/byte; avoid per-match overhead.
         if limit is None and self.pattern in ("", b""):
             if is_bytes_like(subject):
-                return [b""] + [bytes(subject[i : i + 1]) for i in range(len(subject))] + [b""]
+                return (
+                    [b""]
+                    + [bytes(subject[i : i + 1]) for i in range(len(subject))]
+                    + [b""]
+                )
             return [""] + list(subject) + [""]
 
         backend_split = getattr(self._pattern, "split", None)
@@ -538,17 +565,29 @@ class Pattern:
                 break
 
             start, end = match_obj.span()
-            parts.append(coerce_subject_slice(subject, last_end, start, is_bytes=subject_is_bytes))
+            parts.append(
+                coerce_subject_slice(
+                    subject, last_end, start, is_bytes=subject_is_bytes
+                )
+            )
 
             groups = match_obj.groups()
             if groups:
                 for value in groups:
-                    parts.append(coerce_group_value(value, is_bytes=subject_is_bytes, empty=empty))
+                    parts.append(
+                        coerce_group_value(
+                            value, is_bytes=subject_is_bytes, empty=empty
+                        )
+                    )
 
             last_end = end
             splits_done += 1
 
-        parts.append(coerce_subject_slice(subject, last_end, len(subject), is_bytes=subject_is_bytes))
+        parts.append(
+            coerce_subject_slice(
+                subject, last_end, len(subject), is_bytes=subject_is_bytes
+            )
+        )
         return parts
 
     def sub(self, repl: Any, subject: Any, count: Any = 0) -> Any:
@@ -569,7 +608,9 @@ class Pattern:
         if not callable_repl:
             if subject_is_bytes:
                 if not is_bytes_like(repl):
-                    raise TypeError("replacement must be bytes-like when substituting on bytes")
+                    raise TypeError(
+                        "replacement must be bytes-like when substituting on bytes"
+                    )
                 template = bytes(repl)
             else:
                 if not isinstance(repl, str):
@@ -579,8 +620,7 @@ class Pattern:
             has_extended_syntax = (
                 b"\\" in template or b"$" in template
                 if subject_is_bytes
-                else str.__contains__(template, "\\")
-                or str.__contains__(template, "$")
+                else str.__contains__(template, "\\") or str.__contains__(template, "$")
             )
 
             if limit is None:
@@ -594,28 +634,46 @@ class Pattern:
                     # Pattern is used concurrently by GIL-free threads.
                     if not has_extended_syntax:
                         try:
-                            fast_substitute = getattr(self._pattern, "_substitute_fast", None)
+                            fast_substitute = getattr(
+                                self._pattern, "_substitute_fast", None
+                            )
                             if fast_substitute is not None:
                                 return fast_substitute(subject, template)
-                            return backend_substitute(subject, replacement=template, count=0)
+                            return backend_substitute(
+                                subject, replacement=template, count=0
+                            )
                         except TypeError:
                             pass
                     try:
-                        parsed_template = _parser.parse_template(
-                            template,
-                            TemplatePatternStub(self.groups, self.groupindex),
-                        )
+                        if type(self) is Pattern and type(template) in (str, bytes):
+                            parsed_template, pcre2_repl = _cached_replacement_parts(
+                                self, template, subject_is_bytes
+                            )
+                        else:
+                            parsed_template = _parser.parse_template(
+                                template,
+                                TemplatePatternStub(self.groups, self.groupindex),
+                            )
+                            pcre2_repl = _pcre2_replacement_from_parsed(
+                                parsed_template, subject_is_bytes
+                            )
                     except (ValueError, _std_re.error, IndexError) as exc:
                         raise PcreError(str(exc)) from exc
-                    pcre2_repl = _pcre2_replacement_from_parsed(parsed_template, subject_is_bytes)
                     try:
-                        fast_substitute = getattr(self._pattern, "_substitute_fast", None)
+                        fast_substitute = getattr(
+                            self._pattern, "_substitute_fast", None
+                        )
                         if fast_substitute is not None:
                             return fast_substitute(subject, pcre2_repl)
-                        backend_result = backend_substitute(subject, replacement=pcre2_repl, count=0)
+                        backend_result = backend_substitute(
+                            subject, replacement=pcre2_repl, count=0
+                        )
                     except Exception:
                         backend_result = NotImplemented
-                    if backend_result is not NotImplemented and backend_result is not None:
+                    if (
+                        backend_result is not NotImplemented
+                        and backend_result is not None
+                    ):
                         return backend_result
                     parsed_template = None
 
@@ -625,10 +683,15 @@ class Pattern:
                 parsed_template = [template]
             elif self._groups_hint is not None:
                 try:
-                    parsed_template = _parser.parse_template(
-                        template,
-                        TemplatePatternStub(self._groups_hint, self.groupindex),
-                    )
+                    if type(self) is Pattern and type(template) in (str, bytes):
+                        parsed_template, _ = _cached_replacement_parts(
+                            self, template, subject_is_bytes
+                        )
+                    else:
+                        parsed_template = _parser.parse_template(
+                            template,
+                            TemplatePatternStub(self._groups_hint, self.groupindex),
+                        )
                 except (ValueError, _std_re.error, IndexError) as exc:
                     raise PcreError(str(exc)) from exc
 
@@ -641,14 +704,20 @@ class Pattern:
                 break
 
             start, end = match_obj.span()
-            parts.append(coerce_subject_slice(subject, last_end, start, is_bytes=subject_is_bytes))
+            parts.append(
+                coerce_subject_slice(
+                    subject, last_end, start, is_bytes=subject_is_bytes
+                )
+            )
 
             if not callable_repl:
                 if parsed_template is None:
                     try:
                         parsed_template = _parser.parse_template(
                             template,
-                            TemplatePatternStub(len(match_obj.groups()), self.groupindex),
+                            TemplatePatternStub(
+                                len(match_obj.groups()), self.groupindex
+                            ),
                         )
                     except (ValueError, _std_re.error, IndexError) as exc:
                         raise PcreError(str(exc)) from exc
@@ -661,17 +730,22 @@ class Pattern:
                     empty=empty,
                 )
             else:
-                replacement = normalise_replacement(repl(match_obj), is_bytes=subject_is_bytes)
+                replacement = normalise_replacement(
+                    repl(match_obj), is_bytes=subject_is_bytes
+                )
 
             parts.append(replacement)
 
             substitutions += 1
             last_end = end
 
-        parts.append(coerce_subject_slice(subject, last_end, len(subject), is_bytes=subject_is_bytes))
+        parts.append(
+            coerce_subject_slice(
+                subject, last_end, len(subject), is_bytes=subject_is_bytes
+            )
+        )
         result = join_parts(parts, is_bytes=subject_is_bytes)
         return result, substitutions
-
 
     def parallel_map(
         self,
@@ -706,6 +780,19 @@ _PATTERN_METHODS_FOR_FAST = {
 }
 
 
+@lru_cache(maxsize=256)
+def _cached_replacement_parts(
+    pattern: Pattern, template: str | bytes, is_bytes: bool
+) -> tuple[Any, Any]:
+    """Cache immutable replacement parsing/conversion for repeated substitutions."""
+
+    parsed = _parser.parse_template(
+        template,
+        TemplatePatternStub(pattern.groups, pattern.groupindex),
+    )
+    return parsed, _pcre2_replacement_from_parsed(parsed, is_bytes)
+
+
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     # Fast path for the dominant shape: compile(pattern) with default flags.
     if flags == 0:
@@ -725,7 +812,9 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             native_flags = _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP
         else:
             native_flags = 0
-        compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=_DEFAULT_JIT)
+        compiled = cached_compile(
+            adjusted_pattern, native_flags, Pattern, jit=_DEFAULT_JIT
+        )
         if get_thread_default():
             compiled.enable_auto_threads()
         else:
@@ -739,7 +828,9 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     if threads_requested and no_threads_requested:
         raise ValueError("Flag.THREADS and Flag.NO_THREADS cannot be combined")
 
-    resolved_flags_no_thread_markers = resolved_flags & ~(THREADS | NO_THREADS | COMPAT_UNICODE_ESCAPE)
+    resolved_flags_no_thread_markers = resolved_flags & ~(
+        THREADS | NO_THREADS | COMPAT_UNICODE_ESCAPE
+    )
     jit_override = _extract_jit_override(resolved_flags_no_thread_markers)
     resolved_jit = _resolve_jit_setting(jit_override)
     compat_enabled = bool(_DEFAULT_COMPAT_REGEX or compat_requested)
@@ -749,7 +840,9 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     elif no_threads_requested:
         thread_mode = _THREAD_MODE_DISABLED
     else:
-        thread_mode = _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
 
     if isinstance(pattern, Pattern):
         if resolved_flags_no_thread_markers:
@@ -768,9 +861,13 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
 
     if isinstance(pattern, _CPattern):
         if resolved_flags_no_thread_markers:
-            raise ValueError("Cannot supply flags when using a compiled pattern instance.")
+            raise ValueError(
+                "Cannot supply flags when using a compiled pattern instance."
+            )
         if jit_override is not None:
-            raise ValueError("Cannot supply jit when using a compiled pattern instance.")
+            raise ValueError(
+                "Cannot supply jit when using a compiled pattern instance."
+            )
         if compat_requested:
             raise ValueError(
                 "Cannot supply Flag.COMPAT_UNICODE_ESCAPE when using a compiled pattern instance."
@@ -829,11 +926,15 @@ def findall(pattern: Any, string: Any, flags: FlagInput = 0) -> List[Any]:
     return compile(pattern, flags=flags).findall(string)
 
 
-def split(pattern: Any, string: Any, maxsplit: Any = 0, flags: FlagInput = 0) -> List[Any]:
+def split(
+    pattern: Any, string: Any, maxsplit: Any = 0, flags: FlagInput = 0
+) -> List[Any]:
     return compile(pattern, flags=flags).split(string, maxsplit=maxsplit)
 
 
-def sub(pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput = 0) -> Any:
+def sub(
+    pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput = 0
+) -> Any:
     return compile(pattern, flags=flags).sub(repl, string, count=count)
 
 
@@ -846,16 +947,21 @@ def subn(
 ) -> tuple[Any, int]:
     return compile(pattern, flags=flags).subn(repl, string, count=count)
 
+
 # add this function to bypass signatures unit test
 # re.template() is deprecated and removed since python 3.12
 def template(pattern, flags=0):
     import warnings
-    warnings.warn("The re.template() function is deprecated "
-                  "as it is an undocumented function "
-                  "without an obvious purpose. "
-                  "Use re.compile() instead.",
-                  DeprecationWarning)
+
+    warnings.warn(
+        "The re.template() function is deprecated "
+        "as it is an undocumented function "
+        "without an obvious purpose. "
+        "Use re.compile() instead.",
+        DeprecationWarning,
+    )
     return compile(pattern, flags | RE_TEMPLATE)
+
 
 _PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})
 
@@ -906,7 +1012,9 @@ def parallel_map(
     method_name = str(method)
     if method_name not in _PARALLEL_EXEC_METHODS:
         allowed = ", ".join(sorted(_PARALLEL_EXEC_METHODS))
-        raise ValueError(f"parallel_map only supports {allowed} methods, got {method_name!r}")
+        raise ValueError(
+            f"parallel_map only supports {allowed} methods, got {method_name!r}"
+        )
 
     pattern_obj = compile(pattern, flags=flags)
     try:
@@ -1027,3 +1135,4 @@ def clear_cache() -> None:
     """Clear the compiled pattern cache and release cached match-data/JIT buffers."""
 
     _clear_cache()
+    _cached_replacement_parts.cache_clear()

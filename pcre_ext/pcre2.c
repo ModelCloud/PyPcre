@@ -302,6 +302,18 @@ match_resolve_span(MatchObject *self,
         return 0;
     }
 
+    /* UTF-8 offsets are identical to Python indexes for ASCII subjects.  This
+       is the hot path for log/token matching: avoid rescanning the prefix for
+       every span/start/end accessor (which otherwise makes a late match in a
+       large ASCII subject O(subject length) per accessor).  The subject is an
+       owned immutable reference for the lifetime of this match, so its ASCII
+       kind cannot change while this snapshot is queried, including GIL=0. */
+    if (PyUnicode_IS_ASCII(self->subject)) {
+        *start_out = start;
+        *end_out = end;
+        return 0;
+    }
+
     const char *data = self->utf8_data;
     *start_out = utf8_offset_to_index(data, start);
     *end_out = utf8_offset_to_index(data, end);
@@ -1054,13 +1066,46 @@ Match_get_regs(MatchObject *self, void *closure)
 static PyObject *
 Match_expand(MatchObject *self, PyObject *template_obj)
 {
+    /* A template without a backslash has no group references or escapes.
+       Return its validated text directly instead of importing the Python
+       parser and allocating its intermediate representation.  This mirrors
+       ``re.Match.expand`` for literal text while keeping subclass conversion
+       in PyUnicode_FromObject. */
+    if (!self->subject_is_bytes && PyUnicode_Check(template_obj)) {
+        Py_ssize_t template_length = PyUnicode_GET_LENGTH(template_obj);
+        if (PyUnicode_FindChar(template_obj, '\\', 0, template_length, 1) < 0 &&
+            !PyErr_Occurred()) {
+            return PyUnicode_FromObject(template_obj);
+        }
+        PyErr_Clear();
+    }
+    if (self->subject_is_bytes &&
+        (PyBytes_Check(template_obj) || PyByteArray_Check(template_obj))) {
+        const char *template_data = PyBytes_Check(template_obj)
+            ? PyBytes_AS_STRING(template_obj)
+            : (const char *)PyByteArray_AS_STRING(template_obj);
+        Py_ssize_t template_length = PyBytes_Check(template_obj)
+            ? PyBytes_GET_SIZE(template_obj)
+            : PyByteArray_GET_SIZE(template_obj);
+        if (memchr(template_data, '\\', (size_t)template_length) == NULL) {
+            return PyBytes_FromObject(template_obj);
+        }
+    }
+
     /* Delegate template parsing to the Python compatibility helper. */
     PyObject *module = PyImport_ImportModule("pcre.re_compat");
     if (module == NULL) {
         return NULL;
     }
 
-    PyObject *helper = PyObject_GetAttrString(module, "expand_match_template");
+    /* The helper is a module function, so a direct dictionary lookup avoids
+       attribute lookup machinery on every expand() call while retaining the
+       module's normal import/refcount lifetime. */
+    PyObject *helper = PyDict_GetItemString(
+        PyModule_GetDict(module),
+        "expand_match_template"
+    );
+    Py_XINCREF(helper);
     Py_DECREF(module);
     if (helper == NULL) {
         return NULL;
@@ -2871,6 +2916,16 @@ Pattern_findall(PatternObject *self,
     Py_ssize_t current_byte = byte_start;
     Py_ssize_t current_pos = pos;
     int retry_nonempty = 0;
+    /*
+     * A findall scan usually performs one expensive PCRE2 call followed by
+     * Python object construction.  Release the GIL for that first large
+     * scan, but stop doing so after a match: patterns such as ``.`` can
+     * produce millions of tiny matches and repeatedly saving/restoring the
+     * GIL would cost more than the matcher.  Each worker owns its match data
+     * and keeps ``utf8_owner`` alive, so the PCRE2 call remains thread-safe.
+     */
+    int release_gil_for_match =
+        subject_length_bytes > (Py_ssize_t)PCRE2_GIL_RELEASE_THRESHOLD;
 
     while (1) {
         if (current_byte > subject_length_bytes) {
@@ -2894,15 +2949,26 @@ Pattern_findall(PatternObject *self,
         int use_jit = attempt_jit && !retry_nonempty;
 
         if (use_jit) {
-            jit_guard_acquire();
-            rc = pcre2_jit_match(self->code,
-                                 (PCRE2_SPTR)utf8_data,
-                                 exec_length,
-                                 (PCRE2_SIZE)current_byte,
-                                 current_options,
-                                 match_data,
-                                 match_context);
-            jit_guard_release();
+            if (release_gil_for_match) {
+                PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->code,
+                                                                 (PCRE2_SPTR)utf8_data,
+                                                                 exec_length,
+                                                                 (PCRE2_SIZE)current_byte,
+                                                                 current_options,
+                                                                 match_data,
+                                                                 match_context),
+                                                 exec_length);
+            } else {
+                jit_guard_acquire();
+                rc = pcre2_jit_match(self->code,
+                                     (PCRE2_SPTR)utf8_data,
+                                     exec_length,
+                                     (PCRE2_SIZE)current_byte,
+                                     current_options,
+                                     match_data,
+                                     match_context);
+                jit_guard_release();
+            }
 
             if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
                 pattern_jit_set(self, 0);
@@ -2925,13 +2991,24 @@ Pattern_findall(PatternObject *self,
         }
 
         if (!use_jit) {
-            rc = pcre2_match(self->code,
-                             (PCRE2_SPTR)utf8_data,
-                             exec_length,
-                             (PCRE2_SIZE)current_byte,
-                             current_options,
-                             match_data,
-                             match_context);
+            if (release_gil_for_match) {
+                PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->code,
+                                                         (PCRE2_SPTR)utf8_data,
+                                                         exec_length,
+                                                         (PCRE2_SIZE)current_byte,
+                                                         current_options,
+                                                         match_data,
+                                                         match_context),
+                                             exec_length);
+            } else {
+                rc = pcre2_match(self->code,
+                                 (PCRE2_SPTR)utf8_data,
+                                 exec_length,
+                                 (PCRE2_SIZE)current_byte,
+                                 current_options,
+                                 match_data,
+                                 match_context);
+            }
 
             if (rc == PCRE2_ERROR_NOMATCH) {
                 goto findall_no_match;
@@ -2956,6 +3033,7 @@ Pattern_findall(PatternObject *self,
         if (value == NULL) {
             goto error;
         }
+        release_gil_for_match = 0;
         if (PyList_Append(result, value) < 0) {
             Py_DECREF(value);
             goto error;
