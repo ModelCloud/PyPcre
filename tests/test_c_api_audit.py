@@ -212,6 +212,20 @@ def test_groups_default_tuple_is_cached_but_custom_defaults_are_fresh() -> None:
     assert match.groups("missing") is not match.groups("missing")
 
 
+def test_module_default_fast_dispatch_preserves_public_pattern_and_results() -> None:
+    compiled = pcre.compile(r"(x)")
+    match = pcre.match(r"(x)", "x")
+    assert match is not None
+    assert match.re is compiled
+    assert [item.span() for item in pcre.finditer(r"(x)", "xx")] == [
+        (0, 1),
+        (1, 2),
+    ]
+    assert pcre.findall(r"(x)", "xx") == ["x", "x"]
+    assert pcre.split(r"(x)", "xx") == ["", "x", "", "x", ""]
+    assert pcre.subn(r"(x)", "[X]", "xx") == ("[X][X]", 2)
+
+
 def test_global_inline_options_are_exposed() -> None:
     assert pcre.compile(r"(?i)a").flags & int(pcre.Flag.CASELESS)
     assert not (pcre.compile(r"(?i:a)").flags & int(pcre.Flag.CASELESS))

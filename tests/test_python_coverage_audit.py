@@ -78,6 +78,45 @@ def test_replacement_fallbacks_cover_subclasses_and_bounded_templates() -> None:
     assert derived.sub(r"[\1]", "x", count=1) == "[x]"
 
 
+def test_module_fast_dispatch_falls_back_for_legacy_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LegacyPattern:
+        _is_c_pattern = True
+        _pattern = object()
+
+        def match(self, value: Any) -> str:
+            return f"match:{value}"
+
+        def search(self, value: Any) -> str:
+            return f"search:{value}"
+
+        def fullmatch(self, value: Any) -> str:
+            return f"full:{value}"
+
+        def finditer(self, value: Any) -> list[str]:
+            return [f"iter:{value}"]
+
+        def findall(self, value: Any) -> list[str]:
+            return [f"all:{value}"]
+
+        def split(self, value: Any, *, maxsplit: int) -> list[Any]:
+            return [value, maxsplit]
+
+        def subn(self, repl: Any, value: Any, *, count: int) -> tuple[Any, int]:
+            return (f"sub:{repl}:{value}", count)
+
+    legacy = LegacyPattern()
+    monkeypatch.setattr(pcre_mod, "_module_compile", lambda *args: legacy)
+    assert pcre_mod.match("x", "a") == "match:a"
+    assert pcre_mod.search("x", "a") == "search:a"
+    assert pcre_mod.fullmatch("x", "a") == "full:a"
+    assert pcre_mod.finditer("x", "a") == ["iter:a"]
+    assert pcre_mod.findall("x", "a") == ["all:a"]
+    assert pcre_mod.split("x", "a") == ["a", 0]
+    assert pcre_mod.subn("x", "r", "a") == ("sub:r:a", 0)
+
+
 class _LegacyFastDispatchPattern:
     pattern = "x"
     groupindex: ClassVar[dict[str, int]] = {"g": 1}

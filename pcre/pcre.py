@@ -903,39 +903,93 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     return compiled
 
 
+@lru_cache(maxsize=256)
+def _cached_module_pattern(
+    pattern: str | bytes,
+    jit: bool,
+    compat_regex: bool,
+) -> Pattern:
+    """Reuse canonical wrappers for exact default-flag module calls.
+
+    The public ``compile`` cache remains authoritative, so match ``.re``
+    identity is unchanged.  This small bounded layer removes repeated Python
+    cache-key construction and wrapper setup from module-level helpers while
+    keeping configuration changes in the cache key.
+    """
+    return compile(pattern, flags=0)
+
+
+def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
+    if type(pattern) in (str, bytes) and type(flags) is int and flags == 0:
+        return _cached_module_pattern(pattern, _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX)
+    return compile(pattern, flags=flags)
+
+
+def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: str) -> Any:
+    compiled = _module_compile(pattern, flags)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) is int
+        and flags == 0
+        and type(string) in (str, bytes)
+        and compiled._is_c_pattern
+    ):
+        fast = getattr(compiled._pattern, f"_{method}_fast", None)
+        if fast is not None:
+            if method == "findall":
+                return fast(string)
+            if method == "finditer":
+                return fast(string, 0, -1, 0, compiled)
+            return fast(string, compiled)
+    return getattr(compiled, method)(string)
+
+
 def prefixmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return compile(pattern, flags=flags).match(string)
+    return _module_lookup(pattern, string, flags, "match")
 
 
 match = prefixmatch
 
 
 def search(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return compile(pattern, flags=flags).search(string)
+    return _module_lookup(pattern, string, flags, "search")
 
 
 def fullmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return compile(pattern, flags=flags).fullmatch(string)
+    return _module_lookup(pattern, string, flags, "fullmatch")
 
 
 def finditer(pattern: Any, string: Any, flags: FlagInput = 0) -> Iterable[Match]:
-    return compile(pattern, flags=flags).finditer(string)
+    return _module_lookup(pattern, string, flags, "finditer")
 
 
 def findall(pattern: Any, string: Any, flags: FlagInput = 0) -> List[Any]:
-    return compile(pattern, flags=flags).findall(string)
+    return _module_lookup(pattern, string, flags, "findall")
 
 
 def split(
     pattern: Any, string: Any, maxsplit: Any = 0, flags: FlagInput = 0
 ) -> List[Any]:
-    return compile(pattern, flags=flags).split(string, maxsplit=maxsplit)
+    compiled = _module_compile(pattern, flags)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) is int
+        and flags == 0
+        and type(string) in (str, bytes)
+        and type(maxsplit) is int
+        and compiled._is_c_pattern
+    ):
+        fast = getattr(compiled._pattern, "_split_fast", None)
+        if fast is not None:
+            return fast(string, maxsplit)
+    return compiled.split(string, maxsplit=maxsplit)
 
 
 def sub(
     pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput = 0
 ) -> Any:
-    return compile(pattern, flags=flags).sub(repl, string, count=count)
+    result = subn(pattern, repl, string, count=count, flags=flags)
+    return result[0]
 
 
 def subn(
@@ -945,7 +999,25 @@ def subn(
     count: Any = 0,
     flags: FlagInput = 0,
 ) -> tuple[Any, int]:
-    return compile(pattern, flags=flags).subn(repl, string, count=count)
+    compiled = _module_compile(pattern, flags)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) is int
+        and flags == 0
+        and type(string) in (str, bytes)
+        and type(repl) is type(string)
+        and type(count) is int
+        and count == 0
+        and compiled._is_c_pattern
+        and (
+            (type(repl) is str and "\\" not in repl and "$" not in repl)
+            or (type(repl) is bytes and b"\\" not in repl and b"$" not in repl)
+        )
+    ):
+        fast = getattr(compiled._pattern, "_substitute_fast", None)
+        if fast is not None:
+            return fast(string, repl)
+    return compiled.subn(repl, string, count=count)
 
 
 # add this function to bypass signatures unit test
@@ -1135,4 +1207,5 @@ def clear_cache() -> None:
     """Clear the compiled pattern cache and release cached match-data/JIT buffers."""
 
     _clear_cache()
+    _cached_module_pattern.cache_clear()
     _cached_replacement_parts.cache_clear()
