@@ -110,6 +110,40 @@ def test_expand_template_legacy_groupindex_falls_back() -> None:
     assert match.expand(r"[\1]") == "[x]"
 
 
+def test_expand_render_single_capture_fast_shapes() -> None:
+    class RawMatch:
+        def group(self, index: int) -> str:
+            assert index == 1
+            return "x"
+
+    raw = RawMatch()
+    assert (
+        compat.render_template(([(0, 1)], [None]), raw, is_bytes=False, empty="") == "x"
+    )
+    assert (
+        compat.render_template(
+            ([(1, 1)], ["[", None, "]"]), raw, is_bytes=False, empty=""
+        )
+        == "[x]"
+    )
+    assert compat.render_template([1], raw, is_bytes=False, empty="") == "x"
+    assert compat.render_template(["[", 1, "]"], raw, is_bytes=False, empty="") == "[x]"
+
+    class TwoGroupRawMatch:
+        def group(self, index: int) -> str:
+            return "x" if index == 1 else "y"
+
+    assert (
+        compat.render_template(
+            ["[", 1, "-", 2, "]"],
+            TwoGroupRawMatch(),
+            is_bytes=False,
+            empty="",
+        )
+        == "[x-y]"
+    )
+
+
 def test_replacement_fallbacks_cover_subclasses_and_bounded_templates() -> None:
     class DerivedPattern(pcre_mod.Pattern):
         pass

@@ -163,6 +163,31 @@ def render_template(parsed: Any, match: "Match", *, is_bytes: bool, empty: Any) 
         and isinstance(parsed[1], list)
     ):
         group_slots, literals = parsed
+        if (
+            len(group_slots) == 1
+            and len(literals) == 1
+            and group_slots[0][0] == 0
+            and group_slots[0][1] >= 0
+            and literals[0] is None
+        ):
+            return coerce_group_value(
+                match.group(group_slots[0][1]),
+                is_bytes=is_bytes,
+                empty=empty,
+            )
+        if (
+            len(group_slots) == 1
+            and len(literals) == 3
+            and group_slots[0][0] == 1
+            and group_slots[0][1] >= 0
+            and literals[1] is None
+        ):
+            group_value = coerce_group_value(
+                match.group(group_slots[0][1]),
+                is_bytes=is_bytes,
+                empty=empty,
+            )
+            return literals[0] + group_value + literals[2]
         # Copy literals so repeated substitutions reuse the cached template.
         pieces: List[Any] = [empty if part is None else part for part in literals]
         for slot_index, group_index in group_slots:
@@ -173,6 +198,25 @@ def render_template(parsed: Any, match: "Match", *, is_bytes: bool, empty: Any) 
                 empty=empty,
             )
         return join_parts(pieces, is_bytes=is_bytes)
+
+    if len(parsed) == 1 and isinstance(parsed[0], int):
+        return coerce_group_value(
+            match.group(parsed[0]),
+            is_bytes=is_bytes,
+            empty=empty,
+        )
+    if (
+        len(parsed) == 3
+        and isinstance(parsed[1], int)
+        and not isinstance(parsed[0], int)
+        and not isinstance(parsed[2], int)
+    ):
+        group_value = coerce_group_value(
+            match.group(parsed[1]),
+            is_bytes=is_bytes,
+            empty=empty,
+        )
+        return parsed[0] + group_value + parsed[2]
 
     pieces: List[Any] = []
     for item in parsed:
