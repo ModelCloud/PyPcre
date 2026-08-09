@@ -10,14 +10,21 @@
 typedef struct {
     PyObject *map;
     PyObject *order;
+    PyObject *cleanup_token;
     Py_ssize_t limit;
 } PatternCacheState;
 
 static Py_tss_t pattern_cache_tss = Py_tss_NEEDS_INIT;
 static ATOMIC_VAR(int) pattern_cache_tss_ready = ATOMIC_VAR_INIT(0);
-static PatternCacheState global_pattern_cache = {NULL, NULL, MODULE_COMPILE_CACHE_LIMIT};
+static PatternCacheState global_pattern_cache = {NULL, NULL, NULL, MODULE_COMPILE_CACHE_LIMIT};
 static PyThread_type_lock global_pattern_cache_lock = NULL;
 static ATOMIC_VAR(int) pattern_cache_global_mode = ATOMIC_VAR_INIT(0);
+static PyObject *pattern_cache_cleanup_key = NULL;
+
+#define PATTERN_CACHE_CAPSULE_NAME "pcre.pattern_cache.thread_state"
+
+static void pattern_cache_thread_state_free(PatternCacheState *state);
+static void pattern_cache_capsule_destructor(PyObject *capsule);
 
 static inline int
 pattern_cache_is_global(void)
@@ -70,6 +77,36 @@ thread_pattern_cache_state_get_or_create(void)
         PyErr_SetString(PyExc_RuntimeError, "failed to store pattern cache state");
         return NULL;
     }
+
+    PyObject *dict = PyThreadState_GetDict();
+    if (dict == NULL || pattern_cache_cleanup_key == NULL) {
+        PyThread_tss_set(&pattern_cache_tss, NULL);
+        pattern_cache_thread_state_free(state);
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_RuntimeError, "thread state dictionary unavailable");
+        }
+        return NULL;
+    }
+    {
+        PyObject *capsule = PyCapsule_New(
+            state,
+            PATTERN_CACHE_CAPSULE_NAME,
+            pattern_cache_capsule_destructor
+        );
+        if (capsule == NULL) {
+            PyThread_tss_set(&pattern_cache_tss, NULL);
+            PyMem_Free(state);
+            return NULL;
+        }
+        if (PyDict_SetItem(dict, pattern_cache_cleanup_key, capsule) < 0) {
+            Py_DECREF(capsule);
+            PyThread_tss_set(&pattern_cache_tss, NULL);
+            PyMem_Free(state);
+            return NULL;
+        }
+        state->cleanup_token = capsule;
+        Py_DECREF(capsule);
+    }
     return state;
 }
 
@@ -108,6 +145,38 @@ pattern_cache_state_clear(PatternCacheState *state)
     }
     Py_CLEAR(state->map);
     Py_CLEAR(state->order);
+}
+
+static void
+pattern_cache_thread_state_free(PatternCacheState *state)
+{
+    if (state == NULL) {
+        return;
+    }
+    pattern_cache_state_clear(state);
+    PyMem_Free(state);
+}
+
+static void
+pattern_cache_capsule_destructor(PyObject *capsule)
+{
+    PatternCacheState *state = PyCapsule_GetPointer(
+        capsule,
+        PATTERN_CACHE_CAPSULE_NAME
+    );
+    if (state == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    if (state->cleanup_token != capsule) {
+        return;
+    }
+    state->cleanup_token = NULL;
+    if (atomic_load_explicit(&pattern_cache_tss_ready, memory_order_acquire) &&
+        thread_pattern_cache_state_get() == state) {
+        (void)PyThread_tss_set(&pattern_cache_tss, NULL);
+    }
+    pattern_cache_thread_state_free(state);
 }
 
 static int
@@ -179,6 +248,12 @@ pattern_cache_initialize(int global_mode)
     if (pattern_cache_tss_initialize() < 0) {
         return -1;
     }
+    if (pattern_cache_cleanup_key == NULL) {
+        pattern_cache_cleanup_key = PyUnicode_FromString("_pcre2_pattern_cache_state");
+        if (pattern_cache_cleanup_key == NULL) {
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -192,6 +267,7 @@ pattern_cache_teardown(void)
             global_pattern_cache_lock = NULL;
         }
         atomic_store_explicit(&pattern_cache_global_mode, 0, memory_order_release);
+        Py_CLEAR(pattern_cache_cleanup_key);
         return;
     }
 
@@ -202,13 +278,22 @@ pattern_cache_teardown(void)
 
     PatternCacheState *state = thread_pattern_cache_state_get();
     if (state != NULL) {
-        pattern_cache_state_clear(state);
-        PyMem_Free(state);
-        PyThread_tss_set(&pattern_cache_tss, NULL);
+        if (state->cleanup_token != NULL) {
+            PyObject *dict = PyThreadState_GetDict();
+            if (dict != NULL && pattern_cache_cleanup_key != NULL) {
+                if (PyDict_DelItem(dict, pattern_cache_cleanup_key) < 0) {
+                    PyErr_Clear();
+                }
+            }
+        } else {
+            pattern_cache_thread_state_free(state);
+            PyThread_tss_set(&pattern_cache_tss, NULL);
+        }
     }
     PyThread_tss_delete(&pattern_cache_tss);
     atomic_store_explicit(&pattern_cache_tss_ready, 0, memory_order_release);
     atomic_store_explicit(&pattern_cache_global_mode, 0, memory_order_release);
+    Py_CLEAR(pattern_cache_cleanup_key);
 }
 
 int
@@ -276,12 +361,17 @@ pattern_cache_store(PyObject *cache_key, PatternObject *pattern)
         return 0;
     }
 
+    int already_present = PyDict_Contains(state->map, cache_key);
+    if (already_present < 0) {
+        pattern_cache_release_state(lock_held);
+        return -1;
+    }
     if (PyDict_SetItem(state->map, cache_key, (PyObject *)pattern) < 0) {
         pattern_cache_release_state(lock_held);
         return -1;
     }
 
-    if (state->order != NULL) {
+    if (!already_present && state->order != NULL) {
         if (PyList_Append(state->order, cache_key) < 0) {
             PyErr_Clear();
         } else {

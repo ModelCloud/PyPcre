@@ -20,17 +20,15 @@ class TestBytesHandling(unittest.TestCase):
         self.assertFalse(pattern.flags & pcre.Flag.UTF)
         self.assertFalse(pattern.flags & pcre.Flag.UCP)
 
-    def test_bytes_pattern_accepts_text_subject(self):
+    def test_bytes_pattern_rejects_text_subject(self):
         pattern = pcre.compile(br"data")
-        match = pattern.search("data")
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group(0), "data")
+        with self.assertRaisesRegex(TypeError, "bytes pattern"):
+            pattern.search("data")
 
-    def test_text_pattern_accepts_bytes_subject(self):
+    def test_text_pattern_rejects_bytes_subject(self):
         pattern = pcre.compile(r"data")
-        match = pattern.search(b"data")
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group(0), b"data")
+        with self.assertRaisesRegex(TypeError, "string pattern"):
+            pattern.search(b"data")
 
     def test_module_level_helpers_work_with_bytes(self):
         haystack = b"prefix\x00foo\xffbar\x10baz"

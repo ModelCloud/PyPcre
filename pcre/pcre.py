@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re as _std_re
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
@@ -243,7 +243,7 @@ class Pattern:
         return self._pattern.pattern
 
     @property
-    def groupindex(self) -> dict[str, int]:
+    def groupindex(self) -> Mapping[str, int]:
         return self._pattern.groupindex
 
     @property

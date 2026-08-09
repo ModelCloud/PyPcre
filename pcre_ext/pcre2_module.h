@@ -31,6 +31,13 @@
 
 #include "atomic_compat.h"
 
+/* Object critical sections were added with free-threaded CPython.  On older
+ * supported releases the process-wide GIL already provides the same exclusion. */
+#if !defined(Py_BEGIN_CRITICAL_SECTION)
+#  define Py_BEGIN_CRITICAL_SECTION(object) { (void)(object)
+#  define Py_END_CRITICAL_SECTION() }
+#endif
+
 #if ATOMIC_COMPAT_HAVE_ATOMICS
 #   define PCRE_EXT_HAVE_ATOMICS 1
 #endif
@@ -42,17 +49,20 @@ typedef struct {
     PyObject *pattern_bytes;
     PyObject *groupindex;
     uint32_t compile_options;
+    uint32_t original_compile_options;
     uint32_t capture_count;
     int pattern_is_bytes;
 #if defined(PCRE_EXT_HAVE_ATOMICS)
     ATOMIC_VAR(int) jit_enabled;
     ATOMIC_VAR(pcre2_match_data *) cached_match_data;
     ATOMIC_VAR(pcre2_match_context *) cached_match_context;
+    ATOMIC_VAR(pcre2_code *) lastindex_replay_code;
 #else
     PyThread_type_lock jit_lock;
     int jit_enabled;
     pcre2_match_data *cached_match_data;
     pcre2_match_context *cached_match_context;
+    pcre2_code *lastindex_replay_code;
 #endif
     int has_first_literal;
     uint32_t first_literal;
@@ -79,6 +89,8 @@ typedef struct {
     Py_ssize_t public_pos;
     Py_ssize_t public_endpos;
     int subject_is_bytes;
+    uint32_t replay_options;
+    int lastindex_cache;
 } MatchObject;
 
 extern PyTypeObject PatternType;
@@ -94,7 +106,7 @@ void raise_pcre_error(const char *context, int error_code, PCRE2_SIZE error_offs
 int pcre_flag_add_constants(PyObject *module);
 
 /* Cache helpers */
-int cache_initialize(void);
+int cache_initialize(int global_mode);
 void cache_teardown(void);
 pcre2_match_data *match_data_cache_acquire(PatternObject *self);
 void match_data_cache_release(pcre2_match_data *match_data);
@@ -128,7 +140,7 @@ PyObject *module_clear_pattern_cache(PyObject *module, PyObject *args);
 /* Utilities */
 int env_flag_is_true(const char *value);
 PyObject *bytes_from_text(PyObject *obj);
-PyObject *buffer_view_from_object(PyObject *obj, const char **data_out, Py_ssize_t *length_out);
+PyObject *buffer_bytes_from_object(PyObject *obj, const char **data_out, Py_ssize_t *length_out);
 Py_ssize_t utf8_offset_to_index(const char *data, Py_ssize_t length);
 int utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset_out);
 PyObject *create_groupindex_dict(pcre2_code *code);

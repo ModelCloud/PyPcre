@@ -41,11 +41,14 @@ def test_compile_error_loop_keeps_compiler_stable(flags: Flag) -> None:
 
 
 def test_jit_compile_error_does_not_poison_future_compiles() -> None:
-    failing_pattern = "\\C"
+    # Bytes + explicit UTF keeps exercising PCRE2's JIT rejection without
+    # relying on unsafe raw-code-unit matching for Python text patterns.
+    failing_pattern = b"\\C"
+    jit_flags = Flag.JIT | Flag.UTF
 
     first_error: pcre.PcreError | None = None
     try:
-        pcre.compile(failing_pattern, flags=Flag.JIT)
+        pcre.compile(failing_pattern, flags=jit_flags)
     except pcre.PcreError as exc:  # capture the first failure to pin expectations
         first_error = exc
     else:
@@ -63,12 +66,12 @@ def test_jit_compile_error_does_not_poison_future_compiles() -> None:
 
     for _ in range(8):
         with pytest.raises(expected_type) as info:
-            pcre.compile(failing_pattern, flags=Flag.JIT)
+            pcre.compile(failing_pattern, flags=jit_flags)
         assert info.value.args and info.value.args[0] == "jit_compile"
         assert getattr(info.value, "macro", None) == expected_macro
 
-    compiled_no_jit = pcre.compile(failing_pattern, flags=Flag.NO_JIT)
-    assert compiled_no_jit.match("A") is not None
+    compiled_no_jit = pcre.compile(failing_pattern, flags=Flag.NO_JIT | Flag.UTF)
+    assert compiled_no_jit.match(b"A") is not None
 
     healthy = pcre.compile("a+", flags=Flag.JIT)
     assert healthy.jit is True

@@ -30,6 +30,8 @@ resolve_pcre2_prerelease(void)
 /* Process-wide library metadata cached once during module initialization. */
 static char pcre2_library_version[64] = "unknown";
 static ATOMIC_VAR(int) pcre2_version_initialized = 0;
+/* Module execution is limited to one interpreter because these are process globals. */
+static ATOMIC_VAR(PyInterpreterState *) primary_interpreter = ATOMIC_VAR_INIT(NULL);
 #if defined(PCRE2_USE_OFFSET_LIMIT)
 /* -1 unknown, 0 unsupported, 1 supported by the loaded PCRE2 runtime. */
 static ATOMIC_VAR(int) offset_limit_support = ATOMIC_VAR_INIT(-1);
@@ -39,6 +41,30 @@ static ATOMIC_VAR(int) jit_anchor_fixup_needed_state = ATOMIC_VAR_INIT(-1);
 
 static void detect_offset_limit_support(void);
 static int jit_anchor_fixup_needed(void);
+
+static int
+coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
+{
+    if (value == NULL) {
+        *out = 0;
+        return 0;
+    }
+    PyObject *index = PyNumber_Index(value);
+    if (index == NULL) {
+        return -1;
+    }
+    unsigned long long parsed = PyLong_AsUnsignedLongLong(index);
+    Py_DECREF(index);
+    if (parsed == (unsigned long long)-1 && PyErr_Occurred()) {
+        return -1;
+    }
+    if (parsed > UINT32_MAX) {
+        PyErr_Format(PyExc_OverflowError, "%s must fit in uint32_t", name);
+        return -1;
+    }
+    *out = (uint32_t)parsed;
+    return 0;
+}
 
 /*
  * Releasing the GIL is only worthwhile when the PCRE2 call is expected to do
@@ -69,6 +95,31 @@ static int jit_anchor_fixup_needed(void);
             rc = (call);                               \
         }                                              \
     } while (0)
+
+#if defined(Py_GIL_DISABLED)
+#define PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(call, length) \
+    do {                                                \
+        (void)(length);                                 \
+        jit_guard_acquire();                            \
+        rc = (call);                                    \
+        jit_guard_release();                            \
+    } while (0)
+#else
+#define PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(call, length)       \
+    do {                                                     \
+        if ((length) > PCRE2_GIL_RELEASE_THRESHOLD) {       \
+            PyThreadState *_save = PyEval_SaveThread();     \
+            jit_guard_acquire();                            \
+            rc = (call);                                    \
+            jit_guard_release();                            \
+            PyEval_RestoreThread(_save);                    \
+        } else {                                             \
+            jit_guard_acquire();                            \
+            rc = (call);                                    \
+            jit_guard_release();                            \
+        }                                                    \
+    } while (0)
+#endif
 
 static inline pcre2_match_data *
 pattern_match_data_acquire(PatternObject *pattern, int *from_pattern_cache)
@@ -188,6 +239,12 @@ offset_limit_option_enabled(void)
 
 
 /* Match type */
+static int match_resolve_span(MatchObject *self,
+                              Py_ssize_t index,
+                              Py_ssize_t *start_out,
+                              Py_ssize_t *end_out,
+                              int allow_missing);
+
 static void
 Match_dealloc(MatchObject *self)
 {
@@ -202,18 +259,12 @@ Match_dealloc(MatchObject *self)
 static PyObject *
 Match_repr(MatchObject *self)
 {
-    Py_ssize_t start = self->ovector[0];
-    Py_ssize_t end = self->ovector[1];
-    return PyUnicode_FromFormat("<Match span=(%zd, %zd) pattern=%R>", start, end, self->pattern->pattern);
-}
-
-static inline PyObject *
-match_public_pattern(MatchObject *self)
-{
-    if (self->public_pattern != NULL) {
-        return self->public_pattern;
+    Py_ssize_t start = 0;
+    Py_ssize_t end = 0;
+    if (match_resolve_span(self, 0, &start, &end, 1) < 0) {
+        return NULL;
     }
-    return (PyObject *)self->pattern;
+    return PyUnicode_FromFormat("<Match span=(%zd, %zd) pattern=%R>", start, end, self->pattern->pattern);
 }
 
 static int
@@ -272,19 +323,55 @@ resolve_group_key(MatchObject *self, PyObject *key, Py_ssize_t *index)
         return 0;
     }
     if (PyUnicode_Check(key)) {
-        PyObject *item = PyDict_GetItemWithError(self->pattern->groupindex, key);
-        if (item == NULL) {
-            if (!PyErr_Occurred()) {
-                PyErr_Format(PyExc_IndexError, "no such group '%U'", key);
+        Py_ssize_t key_length = 0;
+        const char *key_text = PyUnicode_AsUTF8AndSize(key, &key_length);
+        if (key_text == NULL) {
+            return -1;
+        }
+
+        uint32_t name_count = 0;
+        uint32_t entry_size = 0;
+        PCRE2_SPTR name_table = NULL;
+        if (pcre2_pattern_info(self->pattern->code, PCRE2_INFO_NAMECOUNT, &name_count) != 0 ||
+            pcre2_pattern_info(self->pattern->code, PCRE2_INFO_NAMEENTRYSIZE, &entry_size) != 0 ||
+            pcre2_pattern_info(self->pattern->code, PCRE2_INFO_NAMETABLE, &name_table) != 0 ||
+            name_table == NULL || entry_size < 3) {
+            PyErr_Format(PyExc_IndexError, "no such group '%U'", key);
+            return -1;
+        }
+
+        Py_ssize_t first_match = -1;
+        size_t name_max = (size_t)entry_size - 2;
+        for (uint32_t i = 0; i < name_count; ++i) {
+            const unsigned char *entry = (const unsigned char *)(
+                name_table + (size_t)i * entry_size
+            );
+            const char *name = (const char *)(entry + 2);
+            size_t name_length = strnlen(name, name_max);
+            if ((Py_ssize_t)name_length != key_length ||
+                memcmp(name, key_text, name_length) != 0) {
+                continue;
             }
-            return -1;
+
+            Py_ssize_t candidate = (Py_ssize_t)((entry[0] << 8) | entry[1]);
+            if (first_match < 0) {
+                first_match = candidate;
+            }
+            if (candidate >= 0 && (size_t)candidate < self->ovec_count) {
+                Py_ssize_t start = self->ovector[(size_t)candidate * 2];
+                Py_ssize_t end = self->ovector[(size_t)candidate * 2 + 1];
+                if (start >= 0 && end >= 0) {
+                    *index = candidate;
+                    return 0;
+                }
+            }
         }
-        Py_ssize_t value = PyLong_AsSsize_t(item);
-        if (value == -1 && PyErr_Occurred()) {
-            return -1;
+        if (first_match >= 0) {
+            *index = first_match;
+            return 0;
         }
-        *index = value;
-        return 0;
+        PyErr_Format(PyExc_IndexError, "no such group '%U'", key);
+        return -1;
     }
     PyErr_SetString(PyExc_TypeError, "group indices must be integers or strings");
     return -1;
@@ -363,6 +450,26 @@ advance_one_character(const char *utf8_data,
         char_bytes = subject_length_bytes - byte_offset;
     }
     return byte_offset + char_bytes;
+}
+
+static int
+ensure_subject_type_compatible(PatternObject *pattern, int subject_is_bytes)
+{
+    if (pattern->pattern_is_bytes == subject_is_bytes) {
+        return 0;
+    }
+    if (pattern->pattern_is_bytes) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "cannot use a bytes pattern on a string-like object"
+        );
+    } else {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "cannot use a string pattern on a bytes-like object"
+        );
+    }
+    return -1;
 }
 
 static PyObject *
@@ -466,7 +573,7 @@ Match_span(MatchObject *self, PyObject *args)
     }
     Py_ssize_t start = 0;
     Py_ssize_t end = 0;
-    int rc = match_resolve_span(self, index, &start, &end, 0);
+    int rc = match_resolve_span(self, index, &start, &end, 1);
     if (rc < 0) {
         return NULL;
     }
@@ -519,18 +626,12 @@ Match_groupdict(MatchObject *self, PyObject *args, PyObject *kwargs)
     PyObject *key, *value;
     Py_ssize_t pos = 0;
     while (PyDict_Next(self->pattern->groupindex, &pos, &key, &value)) {
-        Py_ssize_t index = PyLong_AsSsize_t(value);
-        if (index == -1 && PyErr_Occurred()) {
+        Py_ssize_t index = 0;
+        if (resolve_group_key(self, key, &index) < 0) {
             Py_DECREF(result);
             return NULL;
         }
-        PyObject *group_args = Py_BuildValue("(n)", index);
-        if (group_args == NULL) {
-            Py_DECREF(result);
-            return NULL;
-        }
-        PyObject *group_value = Match_group(self, group_args);
-        Py_DECREF(group_args);
+        PyObject *group_value = match_get_group_value(self, index);
         if (group_value == NULL) {
             Py_DECREF(result);
             return NULL;
@@ -561,8 +662,13 @@ Match_get_string(MatchObject *self, void *closure)
 static PyObject *
 Match_get_re(MatchObject *self, void *closure)
 {
-    PyObject *pattern = match_public_pattern(self);
+    PyObject *pattern = NULL;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    pattern = self->public_pattern != NULL
+        ? self->public_pattern
+        : (PyObject *)self->pattern;
     Py_INCREF(pattern);
+    Py_END_CRITICAL_SECTION();
     return pattern;
 }
 
@@ -578,6 +684,198 @@ Match_get_endpos(MatchObject *self, void *closure)
     return PyLong_FromSsize_t(self->public_endpos);
 }
 
+typedef struct {
+    uint32_t capture_last;
+    int seen;
+} LastIndexReplayState;
+
+static pcre2_code *
+pattern_get_lastindex_replay_code(PatternObject *pattern)
+{
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    pcre2_code *cached = atomic_load_explicit(
+        &pattern->lastindex_replay_code,
+        memory_order_acquire
+    );
+    if (cached != NULL) {
+        return cached;
+    }
+#else
+    PyThread_acquire_lock(pattern->jit_lock, WAIT_LOCK);
+    if (pattern->lastindex_replay_code != NULL) {
+        pcre2_code *cached = pattern->lastindex_replay_code;
+        PyThread_release_lock(pattern->jit_lock);
+        return cached;
+    }
+#endif
+
+    Py_ssize_t pattern_length = PyBytes_GET_SIZE(pattern->pattern_bytes);
+    const char *pattern_data = PyBytes_AS_STRING(pattern->pattern_bytes);
+    uint32_t compile_options = pattern->original_compile_options |
+                               PCRE2_AUTO_CALLOUT;
+    int error_code = 0;
+    PCRE2_SIZE error_offset = 0;
+    pcre2_code *compiled = pcre2_compile(
+        (PCRE2_SPTR)pattern_data,
+        (PCRE2_SIZE)pattern_length,
+        compile_options,
+        &error_code,
+        &error_offset,
+        NULL
+    );
+    if (compiled == NULL) {
+#if !defined(PCRE_EXT_HAVE_ATOMICS)
+        PyThread_release_lock(pattern->jit_lock);
+#endif
+        raise_pcre_error("lastindex compile", error_code, error_offset);
+        return NULL;
+    }
+
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+    pcre2_code *expected = NULL;
+    if (!atomic_compare_exchange_strong_explicit(
+            &pattern->lastindex_replay_code,
+            &expected,
+            compiled,
+            memory_order_release,
+            memory_order_acquire)) {
+        pcre2_code_free(compiled);
+        return expected;
+    }
+#else
+    pattern->lastindex_replay_code = compiled;
+    PyThread_release_lock(pattern->jit_lock);
+#endif
+    return compiled;
+}
+
+static int
+lastindex_replay_callout(pcre2_callout_block *block, void *data)
+{
+    LastIndexReplayState *state = (LastIndexReplayState *)data;
+    /*
+     * PCRE2_AUTO_CALLOUT exposes capture_last at every pattern item and at the
+     * successful end of ordinary patterns. Keeping the most recent value also
+     * covers an early (*ACCEPT), which succeeds before the terminal callout.
+     */
+    state->capture_last = block->capture_last;
+    state->seen = 1;
+    return 0;
+}
+
+static int
+match_replay_lastindex(MatchObject *self, int *lastindex_out)
+{
+    pcre2_code *replay_code = pattern_get_lastindex_replay_code(self->pattern);
+    if (replay_code == NULL) {
+        return -1;
+    }
+
+    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(
+        replay_code,
+        NULL
+    );
+    if (match_data == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+
+    pcre2_match_context *match_context = pcre2_match_context_create(NULL);
+    if (match_context == NULL) {
+        pcre2_match_data_free(match_data);
+        PyErr_NoMemory();
+        return -1;
+    }
+
+    LastIndexReplayState state = {0, 0};
+    int ctx_rc = pcre2_set_callout(
+        match_context,
+        lastindex_replay_callout,
+        &state
+    );
+    if (ctx_rc < 0) {
+        pcre2_match_context_free(match_context);
+        pcre2_match_data_free(match_data);
+        raise_pcre_error("lastindex set_callout", ctx_rc, 0);
+        return -1;
+    }
+
+    Py_ssize_t replay_length = self->utf8_length;
+    if (self->subject_is_bytes) {
+        replay_length = self->public_endpos;
+    } else if (self->public_endpos < PyUnicode_GET_LENGTH(self->subject)) {
+        if (utf8_index_to_offset(self->subject,
+                                 self->public_endpos,
+                                 &replay_length) < 0) {
+            pcre2_match_context_free(match_context);
+            pcre2_match_data_free(match_data);
+            return -1;
+        }
+    }
+
+    uint32_t replay_options = self->replay_options;
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    replay_options &= ~PCRE2_USE_OFFSET_LIMIT;
+#endif
+    replay_options |= PCRE2_ANCHORED;
+    if (!self->subject_is_bytes ||
+        (replay_length == self->utf8_length && self->ovector[0] == 0)) {
+        replay_options |= PCRE2_NO_UTF_CHECK;
+    } else {
+        replay_options &= ~PCRE2_NO_UTF_CHECK;
+    }
+
+    int rc = pcre2_match(
+        replay_code,
+        (PCRE2_SPTR)self->utf8_data,
+        (PCRE2_SIZE)replay_length,
+        (PCRE2_SIZE)self->ovector[0],
+        replay_options,
+        match_data,
+        match_context
+    );
+
+    PCRE2_SIZE *replay_ovector = rc >= 0
+        ? pcre2_get_ovector_pointer(match_data)
+        : NULL;
+    uint32_t replay_ovec_count = rc >= 0
+        ? pcre2_get_ovector_count(match_data)
+        : 0;
+    int replay_matches = replay_ovector != NULL &&
+                         replay_ovec_count >= self->ovec_count;
+    if (replay_matches) {
+        size_t offset_count = (size_t)self->ovec_count * 2;
+        for (size_t i = 0; i < offset_count; ++i) {
+            if ((Py_ssize_t)replay_ovector[i] != self->ovector[i]) {
+                replay_matches = 0;
+                break;
+            }
+        }
+    }
+
+    pcre2_match_context_free(match_context);
+    pcre2_match_data_free(match_data);
+
+    if (rc < 0) {
+        raise_pcre_error("lastindex replay", rc, 0);
+        return -1;
+    }
+    if (!replay_matches || !state.seen) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "lastindex replay did not reproduce the original match"
+        );
+        return -1;
+    }
+    if (state.capture_last > self->pattern->capture_count) {
+        PyErr_SetString(PyExc_RuntimeError, "PCRE2 returned an invalid capture_last");
+        return -1;
+    }
+
+    *lastindex_out = (int)state.capture_last;
+    return 0;
+}
+
 static PyObject *
 Match_get_lastindex(MatchObject *self, void *closure)
 {
@@ -585,15 +883,28 @@ Match_get_lastindex(MatchObject *self, void *closure)
         Py_RETURN_NONE;
     }
 
-    for (Py_ssize_t index = (Py_ssize_t)self->ovec_count - 1; index >= 1; --index) {
-        Py_ssize_t start = self->ovector[(size_t)index * 2];
-        Py_ssize_t end = self->ovector[(size_t)index * 2 + 1];
-        if (start >= 0 && end >= 0) {
-            return PyLong_FromSsize_t(index);
+    int lastindex = -1;
+    int replay_ok = 0;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (self->lastindex_cache == -2) {
+        int replayed = 0;
+        if (match_replay_lastindex(self, &replayed) == 0) {
+            self->lastindex_cache = replayed == 0 ? -1 : replayed;
+            replay_ok = 1;
         }
+    } else {
+        replay_ok = 1;
     }
+    lastindex = self->lastindex_cache;
+    Py_END_CRITICAL_SECTION();
 
-    Py_RETURN_NONE;
+    if (!replay_ok) {
+        return NULL;
+    }
+    if (lastindex < 0) {
+        Py_RETURN_NONE;
+    }
+    return PyLong_FromLong(lastindex);
 }
 
 static PyObject *
@@ -604,23 +915,43 @@ Match_get_lastgroup(MatchObject *self, void *closure)
         return lastindex_obj;
     }
 
-    PyObject *key = NULL;
-    PyObject *value = NULL;
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(self->pattern->groupindex, &pos, &key, &value)) {
-        int matches = PyObject_RichCompareBool(value, lastindex_obj, Py_EQ);
-        if (matches < 0) {
-            Py_DECREF(lastindex_obj);
-            return NULL;
-        }
-        if (matches) {
-            Py_INCREF(key);
-            Py_DECREF(lastindex_obj);
-            return key;
+    unsigned long lastindex = PyLong_AsUnsignedLong(lastindex_obj);
+    Py_DECREF(lastindex_obj);
+    if (lastindex == (unsigned long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+
+    uint32_t name_count = 0;
+    uint32_t entry_size = 0;
+    PCRE2_SPTR name_table = NULL;
+    if (pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMECOUNT,
+                           &name_count) != 0 ||
+        name_count == 0 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMEENTRYSIZE,
+                           &entry_size) != 0 ||
+        entry_size < 3 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMETABLE,
+                           &name_table) != 0 ||
+        name_table == NULL) {
+        Py_RETURN_NONE;
+    }
+
+    size_t name_max = (size_t)entry_size - 2;
+    for (uint32_t i = 0; i < name_count; ++i) {
+        const unsigned char *entry = (const unsigned char *)(
+            name_table + (size_t)i * entry_size
+        );
+        uint32_t group_number = ((uint32_t)entry[0] << 8) | entry[1];
+        if (group_number == lastindex) {
+            const char *name = (const char *)(entry + 2);
+            size_t name_length = strnlen(name, name_max);
+            return PyUnicode_DecodeUTF8(name, (Py_ssize_t)name_length, "strict");
         }
     }
 
-    Py_DECREF(lastindex_obj);
     Py_RETURN_NONE;
 }
 
@@ -675,19 +1006,41 @@ Match_expand(MatchObject *self, PyObject *template_obj)
     return result;
 }
 
+static PyObject *
+Match_subscript(MatchObject *self, PyObject *key)
+{
+    Py_ssize_t index = 0;
+    if (resolve_group_key(self, key, &index) < 0) {
+        return NULL;
+    }
+    return match_get_group_value(self, index);
+}
+
+static PyObject *
+Match_copy(MatchObject *self, PyObject *Py_UNUSED(args))
+{
+    return Py_NewRef(self);
+}
+
+static PyObject *
+Match_deepcopy(MatchObject *self, PyObject *Py_UNUSED(memo))
+{
+    return Py_NewRef(self);
+}
+
 static int
 match_set_public_pattern(MatchObject *self, PyObject *public_pattern)
 {
     /* The high-level wrapper reuses this C object and swaps in its owner here. */
-    if (public_pattern == NULL) {
-        Py_XDECREF(self->public_pattern);
-        self->public_pattern = NULL;
-        return 0;
+    PyObject *old_pattern = NULL;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    old_pattern = self->public_pattern;
+    if (public_pattern != NULL) {
+        Py_INCREF(public_pattern);
     }
-
-    Py_INCREF(public_pattern);
-    Py_XDECREF(self->public_pattern);
     self->public_pattern = public_pattern;
+    Py_END_CRITICAL_SECTION();
+    Py_XDECREF(old_pattern);
     return 0;
 }
 
@@ -699,7 +1052,13 @@ static PyMethodDef Match_methods[] = {
     {"start", (PyCFunction)Match_start, METH_VARARGS, PyDoc_STR("Return the start index for a group." )},
     {"end", (PyCFunction)Match_end, METH_VARARGS, PyDoc_STR("Return the end index for a group." )},
     {"expand", (PyCFunction)Match_expand, METH_O, PyDoc_STR("Apply a replacement template to the match." )},
+    {"__copy__", (PyCFunction)Match_copy, METH_NOARGS, NULL},
+    {"__deepcopy__", (PyCFunction)Match_deepcopy, METH_O, NULL},
     {NULL, NULL, 0, NULL},
+};
+
+static PyMappingMethods Match_as_mapping = {
+    .mp_subscript = (binaryfunc)Match_subscript,
 };
 
 static PyGetSetDef Match_getset[] = {
@@ -722,6 +1081,7 @@ PyTypeObject MatchType = {
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_methods = Match_methods,
     .tp_getset = Match_getset,
+    .tp_as_mapping = &Match_as_mapping,
     .tp_doc = "Match object returned by PCRE2 operations.",
 };
 
@@ -770,7 +1130,8 @@ static MatchObject *create_match_object(PatternObject *pattern,
                                         Py_ssize_t pos,
                                         Py_ssize_t endpos,
                                         uint32_t ovec_count,
-                                        PCRE2_SIZE *ovector);
+                                        PCRE2_SIZE *ovector,
+                                        uint32_t replay_options);
 
 
 static inline Py_ssize_t
@@ -1061,7 +1422,7 @@ retry:
             }
             pcre2_jit_stack_assign(self->match_context, NULL, self->jit_stack);
         }
-        PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->pattern->code,
+        PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->pattern->code,
                                                      (PCRE2_SPTR)buffer,
                                                      exec_length,
                                                      (PCRE2_SIZE)self->current_byte,
@@ -1140,7 +1501,8 @@ matched:
         self->origin_pos,
         self->resolved_end,
         (uint32_t)expected_pairs,
-        ovector);
+        ovector,
+        options);
     if (match == NULL) {
         return NULL;
     }
@@ -1172,10 +1534,20 @@ no_match:
             return NULL;
         }
 
-        self->current_pos += 1;
-        if (self->subject_is_bytes || self->utf8_is_ascii) {
+        if (self->subject_is_bytes) {
+            int single_byte = (self->pattern->compile_options & PCRE2_UTF) == 0;
+            self->current_byte = advance_one_character(
+                self->utf8_data,
+                self->subject_length_bytes,
+                self->current_byte,
+                single_byte
+            );
+            self->current_pos = self->current_byte;
+        } else if (self->utf8_is_ascii) {
+            self->current_pos += 1;
             self->current_byte += 1;
         } else {
+            self->current_pos += 1;
             self->current_byte = finditer_index_to_byte(self, self->current_pos);
         }
         self->byte_to_index_cached_index = self->current_pos;
@@ -1223,7 +1595,8 @@ create_match_object(PatternObject *pattern,
                     Py_ssize_t pos,
                     Py_ssize_t endpos,
                     uint32_t ovec_count,
-                    PCRE2_SIZE *ovector)
+                    PCRE2_SIZE *ovector,
+                    uint32_t replay_options)
 {
     /*
      * Materialize a standalone match snapshot. The ovector is copied because
@@ -1276,6 +1649,8 @@ create_match_object(PatternObject *pattern,
     match->utf8_length = utf8_length;
     match->public_pos = pos;
     match->public_endpos = endpos;
+    match->replay_options = replay_options;
+    match->lastindex_cache = -2;
     /* Anything that isn't str (bytes, or a buffer-protocol object such as
        mmap.mmap) is treated as raw byte data: offsets are byte offsets and
        group values are returned as bytes. */
@@ -1383,7 +1758,7 @@ Pattern_create_finditer(PatternObject *pattern,
            exporter's own storage instead of copying it into a new object. */
         const char *buf_data = NULL;
         Py_ssize_t buf_length = 0;
-        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        PyObject *buf_view = buffer_bytes_from_object(subject_obj, &buf_data, &buf_length);
         if (buf_view == NULL) {
             goto error;
         }
@@ -1401,6 +1776,10 @@ Pattern_create_finditer(PatternObject *pattern,
     } else {
         PyErr_SetString(PyExc_TypeError,
                         "subject must be str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
+        goto error;
+    }
+
+    if (ensure_subject_type_compatible(pattern, iter->subject_is_bytes) < 0) {
         goto error;
     }
 
@@ -1576,6 +1955,14 @@ Pattern_dealloc(PatternObject *self)
     if (cached_context != NULL) {
         pcre2_match_context_free(cached_context);
     }
+    pcre2_code *lastindex_code = atomic_exchange_explicit(
+        &self->lastindex_replay_code,
+        NULL,
+        memory_order_acq_rel
+    );
+    if (lastindex_code != NULL) {
+        pcre2_code_free(lastindex_code);
+    }
 #else
     if (self->cached_match_data != NULL) {
         pcre2_match_data_free(self->cached_match_data);
@@ -1584,6 +1971,10 @@ Pattern_dealloc(PatternObject *self)
     if (self->cached_match_context != NULL) {
         pcre2_match_context_free(self->cached_match_context);
         self->cached_match_context = NULL;
+    }
+    if (self->lastindex_replay_code != NULL) {
+        pcre2_code_free(self->lastindex_replay_code);
+        self->lastindex_replay_code = NULL;
     }
 #endif
     if (self->code != NULL) {
@@ -1634,8 +2025,7 @@ Pattern_get_jit(PatternObject *self, void *closure)
 static PyObject *
 Pattern_get_groupindex(PatternObject *self, void *closure)
 {
-    Py_INCREF(self->groupindex);
-    return self->groupindex;
+    return PyDictProxy_New(self->groupindex);
 }
 
 static PyObject *
@@ -1651,15 +2041,20 @@ Pattern_finditer_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
-    unsigned long options = 0;
+    PyObject *options_obj = NULL;
     PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
-                                     &subject, &pos, &endpos, &options, &owner)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnOO", kwlist,
+                                     &subject, &pos, &endpos, &options_obj, &owner)) {
         return NULL;
     }
 
-    return Pattern_create_finditer(self, subject, pos, endpos, (uint32_t)options, owner);
+    uint32_t options = 0;
+    if (coerce_uint32_argument(options_obj, "options", &options) < 0) {
+        return NULL;
+    }
+
+    return Pattern_create_finditer(self, subject, pos, endpos, options, owner);
 }
 
 static PyObject *
@@ -1713,7 +2108,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
            exporter's own storage instead of copying it into a new object. */
         const char *buf_data = NULL;
         Py_ssize_t buf_length = 0;
-        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        PyObject *buf_view = buffer_bytes_from_object(subject_obj, &buf_data, &buf_length);
         if (buf_view == NULL) {
             return NULL;
         }
@@ -1735,12 +2130,16 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         return NULL;
     }
 
+    if (ensure_subject_type_compatible(self, subject_is_bytes) < 0) {
+        Py_DECREF(utf8_owner);
+        return NULL;
+    }
+
     if (pos < 0) {
         pos = 0;
     }
     if (pos > logical_length) {
-        Py_DECREF(utf8_owner);
-        Py_RETURN_NONE;
+        pos = logical_length;
     }
 
     Py_ssize_t adjusted_endpos = endpos;
@@ -1917,7 +2316,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 
         pcre2_jit_stack_assign(match_context, NULL, jit_stack);
 
-        PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->code,
+        PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->code,
                                                      (PCRE2_SPTR)buffer,
                                                      exec_length,
                                                      (PCRE2_SIZE)byte_start,
@@ -2041,7 +2440,8 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         pos,
         adjusted_endpos >= 0 ? adjusted_endpos : logical_length,
         (uint32_t)expected_pairs,
-        ovector);
+        ovector,
+        match_options);
 
     pattern_match_context_release(
         self,
@@ -2075,15 +2475,20 @@ Pattern_match_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
-    unsigned long options = 0;
+    PyObject *options_obj = NULL;
     PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
-                                     &subject, &pos, &endpos, &options, &owner)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnOO", kwlist,
+                                     &subject, &pos, &endpos, &options_obj, &owner)) {
         return NULL;
     }
 
-    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_MATCH, owner);
+    uint32_t options = 0;
+    if (coerce_uint32_argument(options_obj, "options", &options) < 0) {
+        return NULL;
+    }
+
+    return Pattern_execute(self, subject, pos, endpos, options, EXEC_MODE_MATCH, owner);
 }
 
 static PyObject *
@@ -2093,15 +2498,20 @@ Pattern_search_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
-    unsigned long options = 0;
+    PyObject *options_obj = NULL;
     PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
-                                     &subject, &pos, &endpos, &options, &owner)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnOO", kwlist,
+                                     &subject, &pos, &endpos, &options_obj, &owner)) {
         return NULL;
     }
 
-    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_SEARCH, owner);
+    uint32_t options = 0;
+    if (coerce_uint32_argument(options_obj, "options", &options) < 0) {
+        return NULL;
+    }
+
+    return Pattern_execute(self, subject, pos, endpos, options, EXEC_MODE_SEARCH, owner);
 }
 
 static PyObject *
@@ -2111,15 +2521,20 @@ Pattern_fullmatch_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
-    unsigned long options = 0;
+    PyObject *options_obj = NULL;
     PyObject *owner = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnkO", kwlist,
-                                     &subject, &pos, &endpos, &options, &owner)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnOO", kwlist,
+                                     &subject, &pos, &endpos, &options_obj, &owner)) {
         return NULL;
     }
 
-    return Pattern_execute(self, subject, pos, endpos, (uint32_t)options, EXEC_MODE_FULLMATCH, owner);
+    uint32_t options = 0;
+    if (coerce_uint32_argument(options_obj, "options", &options) < 0) {
+        return NULL;
+    }
+
+    return Pattern_execute(self, subject, pos, endpos, options, EXEC_MODE_FULLMATCH, owner);
 }
 
 static inline PyObject *
@@ -2222,7 +2637,7 @@ Pattern_findall(PatternObject *self,
     } else if (PyObject_CheckBuffer(subject_obj)) {
         const char *buf_data = NULL;
         Py_ssize_t buf_length = 0;
-        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        PyObject *buf_view = buffer_bytes_from_object(subject_obj, &buf_data, &buf_length);
         if (buf_view == NULL) {
             goto error;
         }
@@ -2240,6 +2655,10 @@ Pattern_findall(PatternObject *self,
     } else {
         PyErr_SetString(PyExc_TypeError,
                         "subject must be str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
+        goto error;
+    }
+
+    if (ensure_subject_type_compatible(self, subject_is_bytes) < 0) {
         goto error;
     }
 
@@ -2404,6 +2823,7 @@ Pattern_findall(PatternObject *self,
         int use_jit = attempt_jit && !retry_nonempty;
 
         if (use_jit) {
+            jit_guard_acquire();
             rc = pcre2_jit_match(self->code,
                                  (PCRE2_SPTR)utf8_data,
                                  exec_length,
@@ -2411,6 +2831,7 @@ Pattern_findall(PatternObject *self,
                                  current_options,
                                  match_data,
                                  match_context);
+            jit_guard_release();
 
             if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
                 pattern_jit_set(self, 0);
@@ -2495,11 +2916,18 @@ findall_no_match:
             (has_endpos && current_pos >= adjusted_endpos)) {
             break;
         }
-        current_pos += 1;
+        int single_byte = subject_is_bytes
+            ? (self->compile_options & PCRE2_UTF) == 0
+            : subject_is_ascii;
         current_byte = advance_one_character(utf8_data,
                                              subject_length_bytes,
                                              current_byte,
-                                             treat_as_bytes);
+                                             single_byte);
+        if (subject_is_bytes) {
+            current_pos = current_byte;
+        } else {
+            current_pos += 1;
+        }
     }
 
     goto cleanup;
@@ -2532,14 +2960,19 @@ Pattern_findall_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     PyObject *subject = NULL;
     Py_ssize_t pos = 0;
     Py_ssize_t endpos = -1;
-    unsigned long options = 0;
+    PyObject *options_obj = NULL;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnk", kwlist,
-                                     &subject, &pos, &endpos, &options)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|nnO", kwlist,
+                                     &subject, &pos, &endpos, &options_obj)) {
         return NULL;
     }
 
-    return Pattern_findall(self, subject, pos, endpos, (uint32_t)options);
+    uint32_t options = 0;
+    if (coerce_uint32_argument(options_obj, "options", &options) < 0) {
+        return NULL;
+    }
+
+    return Pattern_findall(self, subject, pos, endpos, options);
 }
 
 static PyObject *
@@ -2606,7 +3039,7 @@ Pattern_substitute(PatternObject *self,
     } else if (PyObject_CheckBuffer(subject_obj)) {
         const char *buf_data = NULL;
         Py_ssize_t buf_length = 0;
-        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        PyObject *buf_view = buffer_bytes_from_object(subject_obj, &buf_data, &buf_length);
         if (buf_view == NULL) {
             return NULL;
         }
@@ -2639,6 +3072,10 @@ Pattern_substitute(PatternObject *self,
         PyErr_SetString(PyExc_TypeError,
                         "subject must be str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
         return NULL;
+    }
+
+    if (ensure_subject_type_compatible(self, subject_is_bytes) < 0) {
+        goto error;
     }
 
     if (subject_is_bytes != repl_is_bytes) {
@@ -2862,7 +3299,7 @@ Pattern_split(PatternObject *self,
     } else if (PyObject_CheckBuffer(subject_obj)) {
         const char *buf_data = NULL;
         Py_ssize_t buf_length = 0;
-        PyObject *buf_view = buffer_view_from_object(subject_obj, &buf_data, &buf_length);
+        PyObject *buf_view = buffer_bytes_from_object(subject_obj, &buf_data, &buf_length);
         if (buf_view == NULL) {
             goto error;
         }
@@ -2880,6 +3317,10 @@ Pattern_split(PatternObject *self,
     } else {
         PyErr_SetString(PyExc_TypeError,
                         "subject must be str, bytes, or a bytes-like buffer object (e.g. mmap.mmap)");
+        goto error;
+    }
+
+    if (ensure_subject_type_compatible(self, subject_is_bytes) < 0) {
         goto error;
     }
 
@@ -2933,6 +3374,9 @@ Pattern_split(PatternObject *self,
     int retry_nonempty = 0;
 
     while (1) {
+        if (maxsplit < 0) {
+            break;
+        }
         if (maxsplit > 0 && splits_done >= maxsplit) {
             break;
         }
@@ -2947,6 +3391,7 @@ Pattern_split(PatternObject *self,
         }
         int use_jit = attempt_jit && !retry_nonempty;
         if (use_jit) {
+            jit_guard_acquire();
             rc = pcre2_jit_match(self->code,
                                  (PCRE2_SPTR)utf8_data,
                                  (PCRE2_SIZE)subject_length_bytes,
@@ -2954,6 +3399,7 @@ Pattern_split(PatternObject *self,
                                  current_options,
                                  match_data,
                                  match_context);
+            jit_guard_release();
             if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
                 pattern_jit_set(self, 0);
                 attempt_jit = 0;
@@ -3043,10 +3489,13 @@ split_no_match:
         if (current_byte >= subject_length_bytes) {
             break;
         }
+        int single_byte = subject_is_bytes
+            ? (self->compile_options & PCRE2_UTF) == 0
+            : subject_is_ascii;
         current_byte = advance_one_character(utf8_data,
                                              subject_length_bytes,
                                              current_byte,
-                                             subject_is_bytes || subject_is_ascii);
+                                             single_byte);
     }
 
     PyObject *tail = extract_value_from_offsets(subject_obj, utf8_data, subject_is_bytes,
@@ -3131,6 +3580,53 @@ PyTypeObject PatternType = {
     .tp_doc = "Compiled PCRE2 pattern.",
 };
 
+static uint32_t
+apply_leading_inline_options(const char *pattern, Py_ssize_t length, uint32_t options)
+{
+    Py_ssize_t offset = 0;
+    while (length - offset >= 4 && pattern[offset] == '(' && pattern[offset + 1] == '?') {
+        Py_ssize_t cursor = offset + 2;
+        int clearing = 0;
+        uint32_t set_mask = 0;
+        uint32_t clear_mask = 0;
+        int valid = 1;
+        while (cursor < length && pattern[cursor] != ')') {
+            char flag = pattern[cursor++];
+            if (flag == '-') {
+                clearing = 1;
+                continue;
+            }
+            uint32_t bit = 0;
+            switch (flag) {
+                case 'i': bit = PCRE2_CASELESS; break;
+                case 'm': bit = PCRE2_MULTILINE; break;
+                case 's': bit = PCRE2_DOTALL; break;
+                case 'x': bit = PCRE2_EXTENDED; break;
+                case 'J': bit = PCRE2_DUPNAMES; break;
+                case 'U': bit = PCRE2_UNGREEDY; break;
+                case 'n': bit = PCRE2_NO_AUTO_CAPTURE; break;
+                default:
+                    valid = 0;
+                    break;
+            }
+            if (!valid) {
+                break;
+            }
+            if (clearing) {
+                clear_mask |= bit;
+            } else {
+                set_mask |= bit;
+            }
+        }
+        if (!valid || cursor >= length || pattern[cursor] != ')') {
+            break;
+        }
+        options = (options | set_mask) & ~clear_mask;
+        offset = cursor + 1;
+    }
+    return options;
+}
+
 static PatternObject *
 Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explicit)
 {
@@ -3143,6 +3639,11 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     int is_bytes = PyBytes_Check(pattern_obj);
 
     uint32_t compile_options = options;
+#if defined(PCRE2_NEVER_BACKSLASH_C)
+    if (!is_bytes) {
+        compile_options |= PCRE2_NEVER_BACKSLASH_C;
+    }
+#endif
 
     int error_code;
     PCRE2_SIZE error_offset;
@@ -3173,6 +3674,7 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     atomic_store_explicit(&pattern->jit_enabled, 0, memory_order_relaxed);
     atomic_store_explicit(&pattern->cached_match_data, NULL, memory_order_relaxed);
     atomic_store_explicit(&pattern->cached_match_context, NULL, memory_order_relaxed);
+    atomic_store_explicit(&pattern->lastindex_replay_code, NULL, memory_order_relaxed);
 #else
     pattern->jit_lock = PyThread_allocate_lock();
     if (pattern->jit_lock == NULL) {
@@ -3185,6 +3687,7 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     pattern->jit_enabled = 0;
     pattern->cached_match_data = NULL;
     pattern->cached_match_context = NULL;
+    pattern->lastindex_replay_code = NULL;
 #endif
 
     pattern->code = code;
@@ -3192,11 +3695,24 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     pattern->pattern = pattern_obj;
     pattern->pattern_bytes = pattern_bytes;
     pattern->pattern_is_bytes = is_bytes;
+    pattern->original_compile_options = compile_options;
     pattern->compile_options = compile_options;
     pattern_jit_set(pattern, 0);
     pattern->has_first_literal = 0;
     pattern->first_literal = 0;
-    pattern->first_literal_caseless = (compile_options & PCRE2_CASELESS) != 0;
+    pattern->first_literal_caseless = 0;
+
+    uint32_t effective_options = compile_options;
+    if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &effective_options) == 0) {
+        pattern->compile_options = effective_options;
+    }
+    pattern->compile_options = apply_leading_inline_options(
+        PyBytes_AS_STRING(pattern_bytes),
+        pattern_length,
+        pattern->compile_options
+    );
+    pattern->first_literal_caseless =
+        (pattern->compile_options & PCRE2_CASELESS) != 0;
 
     uint32_t capture_count = 0;
     if (pcre2_pattern_info(code, PCRE2_INFO_CAPTURECOUNT, &capture_count) != 0) {
@@ -3222,7 +3738,9 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     }
 
     if (jit) {
+        jit_guard_acquire();
         int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
+        jit_guard_release();
         if (jit_rc == 0) {
             pattern_jit_set(pattern, 1);
         } else if (jit_rc == PCRE2_ERROR_JIT_BADOPTION) {
@@ -3246,8 +3764,9 @@ Pattern_compile_cached(PyObject *pattern_obj, uint32_t flags, int jit, int jit_e
 {
     PyObject *flags_obj = NULL;
     PyObject *jit_bool = NULL;
+    PyObject *jit_explicit_bool = NULL;
     PyObject *cache_key = NULL;
-    int use_cache = 1;
+    int use_cache = PyUnicode_CheckExact(pattern_obj) || PyBytes_CheckExact(pattern_obj);
     PatternObject *result = NULL;
 
     flags_obj = PyLong_FromUnsignedLong(flags);
@@ -3259,10 +3778,17 @@ Pattern_compile_cached(PyObject *pattern_obj, uint32_t flags, int jit, int jit_e
         Py_DECREF(flags_obj);
         return NULL;
     }
+    jit_explicit_bool = PyBool_FromLong(jit_explicit != 0);
+    if (jit_explicit_bool == NULL) {
+        Py_DECREF(flags_obj);
+        Py_DECREF(jit_bool);
+        return NULL;
+    }
 
-    cache_key = PyTuple_Pack(3, pattern_obj, flags_obj, jit_bool);
+    cache_key = PyTuple_Pack(4, pattern_obj, flags_obj, jit_bool, jit_explicit_bool);
     Py_DECREF(flags_obj);
     Py_DECREF(jit_bool);
+    Py_DECREF(jit_explicit_bool);
     if (cache_key == NULL) {
         return NULL;
     }
@@ -3301,9 +3827,14 @@ module_compile(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
 {
     static char *kwlist[] = {"pattern", "flags", "jit", NULL};
     PyObject *pattern = NULL;
-    unsigned long flags = 0;
+    PyObject *flags_obj = NULL;
     PyObject *jit_obj = Py_None;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|k$O", kwlist, &pattern, &flags, &jit_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O$O", kwlist, &pattern, &flags_obj, &jit_obj)) {
+        return NULL;
+    }
+
+    uint32_t flags = 0;
+    if (coerce_uint32_argument(flags_obj, "flags", &flags) < 0) {
         return NULL;
     }
 
@@ -3314,7 +3845,7 @@ module_compile(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PatternObject *compiled = Pattern_compile_cached(pattern, (uint32_t)flags, jit, jit_explicit);
+    PatternObject *compiled = Pattern_compile_cached(pattern, flags, jit, jit_explicit);
     return (PyObject *)compiled;
 }
 
@@ -3324,9 +3855,13 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
     PyObject *pattern_obj = NULL;
     PyObject *subject = NULL;
-    unsigned long flags = 0;
+    PyObject *flags_obj = NULL;
     PyObject *jit_obj = Py_None;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k$O", kwlist, &pattern_obj, &subject, &flags, &jit_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O$O", kwlist, &pattern_obj, &subject, &flags_obj, &jit_obj)) {
+        return NULL;
+    }
+    uint32_t flags = 0;
+    if (coerce_uint32_argument(flags_obj, "flags", &flags) < 0) {
         return NULL;
     }
 
@@ -3337,7 +3872,7 @@ module_match(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_compile_cached(pattern_obj, (uint32_t)flags, jit, jit_explicit);
+    PatternObject *pattern = Pattern_compile_cached(pattern_obj, flags, jit, jit_explicit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -3353,9 +3888,13 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
     PyObject *pattern_obj = NULL;
     PyObject *subject = NULL;
-    unsigned long flags = 0;
+    PyObject *flags_obj = NULL;
     PyObject *jit_obj = Py_None;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k$O", kwlist, &pattern_obj, &subject, &flags, &jit_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O$O", kwlist, &pattern_obj, &subject, &flags_obj, &jit_obj)) {
+        return NULL;
+    }
+    uint32_t flags = 0;
+    if (coerce_uint32_argument(flags_obj, "flags", &flags) < 0) {
         return NULL;
     }
 
@@ -3366,7 +3905,7 @@ module_search(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_compile_cached(pattern_obj, (uint32_t)flags, jit, jit_explicit);
+    PatternObject *pattern = Pattern_compile_cached(pattern_obj, flags, jit, jit_explicit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -3382,9 +3921,13 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
     PyObject *pattern_obj = NULL;
     PyObject *subject = NULL;
-    unsigned long flags = 0;
+    PyObject *flags_obj = NULL;
     PyObject *jit_obj = Py_None;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k$O", kwlist, &pattern_obj, &subject, &flags, &jit_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O$O", kwlist, &pattern_obj, &subject, &flags_obj, &jit_obj)) {
+        return NULL;
+    }
+    uint32_t flags = 0;
+    if (coerce_uint32_argument(flags_obj, "flags", &flags) < 0) {
         return NULL;
     }
 
@@ -3395,7 +3938,7 @@ module_fullmatch(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_compile_cached(pattern_obj, (uint32_t)flags, jit, jit_explicit);
+    PatternObject *pattern = Pattern_compile_cached(pattern_obj, flags, jit, jit_explicit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -3411,11 +3954,15 @@ module_findall(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     static char *kwlist[] = {"pattern", "string", "flags", "jit", NULL};
     PyObject *pattern_obj = NULL;
     PyObject *subject = NULL;
-    unsigned long flags = 0;
+    PyObject *flags_obj = NULL;
     PyObject *jit_obj = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|k$O", kwlist,
-                                     &pattern_obj, &subject, &flags, &jit_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|O$O", kwlist,
+                                     &pattern_obj, &subject, &flags_obj, &jit_obj)) {
+        return NULL;
+    }
+    uint32_t flags = 0;
+    if (coerce_uint32_argument(flags_obj, "flags", &flags) < 0) {
         return NULL;
     }
 
@@ -3426,7 +3973,7 @@ module_findall(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PatternObject *pattern = Pattern_compile_cached(pattern_obj, (uint32_t)flags, jit, jit_explicit);
+    PatternObject *pattern = Pattern_compile_cached(pattern_obj, flags, jit, jit_explicit);
     if (pattern == NULL) {
         return NULL;
     }
@@ -3523,12 +4070,26 @@ static PyMethodDef module_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
+static int module_exec(PyObject *module);
+
+static PyModuleDef_Slot module_slots[] = {
+    {Py_mod_exec, module_exec},
+#if PY_VERSION_HEX >= 0x030C0000
+    {Py_mod_multiple_interpreters, Py_MOD_MULTIPLE_INTERPRETERS_NOT_SUPPORTED},
+#endif
+#if PY_VERSION_HEX >= 0x030D0000
+    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
+    {0, NULL},
+};
+
 static struct PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     .m_name = "pcre_ext_c",
     .m_doc = "Low-level bindings to the PCRE2 regular expression engine.",
-    .m_size = -1,
+    .m_size = 0,
     .m_methods = module_methods,
+    .m_slots = module_slots,
 #if defined(Py_MOD_GIL_SAFE_FLAG)
     .m_flags = Py_MOD_GIL_SAFE_FLAG,
 #endif
@@ -3608,10 +4169,13 @@ jit_anchor_fixup_needed(void)
      */
     pcre2_code *code = pcre2_compile((PCRE2_SPTR)"\\d+", 3, 0, &error_code, &error_offset, NULL);
     if (code != NULL) {
+        jit_guard_acquire();
         int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
+        jit_guard_release();
         if (jit_rc >= 0) {
             pcre2_match_data *match_data = pcre2_match_data_create(2, NULL);
             if (match_data != NULL) {
+                jit_guard_acquire();
                 int rc = pcre2_jit_match(code,
                                          (PCRE2_SPTR)"X2025-10-08",
                                          11,
@@ -3619,6 +4183,7 @@ jit_anchor_fixup_needed(void)
                                          PCRE2_ANCHORED,
                                          match_data,
                                          NULL);
+                jit_guard_release();
                 if (rc >= 0) {
                     PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
                     if (ovector != NULL && ovector[0] != 0) {
@@ -3639,10 +4204,13 @@ jit_anchor_fixup_needed(void)
          */
         code = pcre2_compile((PCRE2_SPTR)"a|ab", 4, 0, &error_code, &error_offset, NULL);
         if (code != NULL) {
+            jit_guard_acquire();
             int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
+            jit_guard_release();
             if (jit_rc >= 0) {
                 pcre2_match_data *match_data = pcre2_match_data_create(2, NULL);
                 if (match_data != NULL) {
+                    jit_guard_acquire();
                     int rc = pcre2_jit_match(code,
                                              (PCRE2_SPTR)"ab",
                                              2,
@@ -3650,6 +4218,7 @@ jit_anchor_fixup_needed(void)
                                              PCRE2_ANCHORED | PCRE2_ENDANCHORED,
                                              match_data,
                                              NULL);
+                    jit_guard_release();
                     if (rc >= 0) {
                         PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
                         if (ovector == NULL || ovector[0] != 0 || ovector[1] != 2) {
@@ -3667,10 +4236,25 @@ jit_anchor_fixup_needed(void)
     return needed;
 }
 
-PyMODINIT_FUNC
-PyInit_pcre_ext_c(void)
+static int
+module_exec(PyObject *module)
 {
-    PyObject *module = NULL;
+    PyInterpreterState *current_interpreter = PyInterpreterState_Get();
+    PyInterpreterState *expected_interpreter = NULL;
+    if (!atomic_compare_exchange_strong_explicit(
+            &primary_interpreter,
+            &expected_interpreter,
+            current_interpreter,
+            memory_order_acq_rel,
+            memory_order_acquire) &&
+        expected_interpreter != current_interpreter) {
+        PyErr_SetString(
+            PyExc_ImportError,
+            "pcre_ext_c does not support loading in multiple interpreters"
+        );
+        return -1;
+    }
+
     const char *force_lock_env = NULL;
     const char *context_cache_env = NULL;
     const char *pattern_cache_env = NULL;
@@ -3698,7 +4282,7 @@ PyInit_pcre_ext_c(void)
     }
     pattern_cache_global = env_flag_is_true(pattern_cache_env);
     if (pattern_cache_initialize(pattern_cache_global) < 0) {
-        goto error_jit_support;
+        goto error_pattern_cache;
     }
 
     if (PyType_Ready(&PatternType) < 0) {
@@ -3711,21 +4295,16 @@ PyInit_pcre_ext_c(void)
         goto error_pattern_cache;
     }
 
-    module = PyModule_Create(&moduledef);
-    if (module == NULL) {
-        goto error_pattern_cache;
-    }
-
     if (pcre_memory_initialize() < 0) {
-        goto error_module;
-    }
-
-    if (pcre_error_init(module) < 0) {
         goto error_memory;
     }
 
-    if (cache_initialize() < 0) {
+    if (pcre_error_init(module) < 0) {
         goto error_errors;
+    }
+
+    if (cache_initialize(pattern_cache_global) < 0) {
+        goto error_cache;
     }
 
     detect_offset_limit_support();
@@ -3761,13 +4340,7 @@ PyInit_pcre_ext_c(void)
         goto error_cache;
     }
 
-#if defined(Py_GIL_DISABLED)
-    if (PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED) < 0) {
-        goto error_cache;
-    }
-#endif
-
-    return module;
+    return 0;
 
 error_cache:
     cache_teardown();
@@ -3775,13 +4348,17 @@ error_errors:
     pcre_error_teardown();
 error_memory:
     pcre_memory_teardown();
-error_module:
-    Py_DECREF(module);
 error_pattern_cache:
     pattern_cache_teardown();
 error_jit_support:
     jit_support_teardown();
-    return NULL;
+    return -1;
+}
+
+PyMODINIT_FUNC
+PyInit_pcre_ext_c(void)
+{
+    return PyModuleDef_Init(&moduledef);
 }
 
 
@@ -3813,7 +4390,7 @@ initialize_pcre2_version(void)
     }
 
     char buffer[sizeof(pcre2_library_version)] = {0};
-    if (pcre2_config(PCRE2_CONFIG_VERSION, buffer) == 0 && buffer[0] != '\0') {
+    if (pcre2_config(PCRE2_CONFIG_VERSION, buffer) > 0 && buffer[0] != '\0') {
         strncpy(pcre2_library_version, buffer, sizeof(pcre2_library_version) - 1);
         pcre2_library_version[sizeof(pcre2_library_version) - 1] = '\0';
     } else {

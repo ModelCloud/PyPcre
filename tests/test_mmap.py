@@ -108,7 +108,7 @@ class TestMmapSubject(unittest.TestCase):
         with self.assertRaises(TypeError):
             pattern.search(12345)
 
-    def test_mmap_cannot_close_while_match_alive(self):
+    def test_mmap_match_uses_an_immutable_snapshot(self):
         fd, path = tempfile.mkstemp()
         os.close(fd)
         try:
@@ -119,11 +119,10 @@ class TestMmapSubject(unittest.TestCase):
             pattern = pcre.compile(rb"hello")
             match = pattern.search(mm)
             self.assertIsNotNone(match)
-            with self.assertRaises(BufferError):
-                mm.close()
+            mm.close()
+            self.assertEqual(match.group(0), b"hello")
             del match
             gc.collect()
-            mm.close()
             fp.close()
         finally:
             os.unlink(path)
