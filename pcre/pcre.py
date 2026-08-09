@@ -495,6 +495,13 @@ class Pattern:
                     subject, 0, len(subject), is_bytes=subject_is_bytes
                 )
             ]
+
+        # Empty patterns split at every code point/byte; avoid per-match overhead.
+        if limit is None and self.pattern in ("", b""):
+            if is_bytes_like(subject):
+                return [b""] + [bytes(subject[i : i + 1]) for i in range(len(subject))] + [b""]
+            return [""] + list(subject) + [""]
+
         backend_split = getattr(self._pattern, "split", None)
         if backend_split is not None:
             try:
