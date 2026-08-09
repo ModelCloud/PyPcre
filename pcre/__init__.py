@@ -12,12 +12,12 @@ surfacing PCRE2-specific flags and behaviours.
 
 from __future__ import annotations
 
+import importlib as _importlib
 import re as _std_re
 from typing import Any
 
 import pcre_ext_c as _backend
 
-from . import error as _error_module
 from .cache import cache_strategy, get_cache_limit, set_cache_limit
 from .error import ERRORS_BY_CODE, ERRORS_BY_MACRO, PcreErrorCode
 from .flags import Flag
@@ -43,6 +43,7 @@ from .pcre import (
 from .threads import configure_thread_pool, configure_threads, shutdown_thread_pool
 
 
+_error_module = _importlib.import_module(".error", __name__)
 pcre_ext_c = _backend
 
 __version__ = getattr(_backend, "__version__", "0.0")

@@ -305,44 +305,76 @@ module_translate_unicode_escapes(PyObject *Py_UNUSED(module), PyObject *arg)
     int modified = 0;
 
     while (p < end) {
-        if (p + 1 < end && p[0] == '\\' && (p[1] == 'u' || p[1] == 'U')) {
-            int is_upper = (p[1] == 'U');
-            int hex_len = is_upper ? 8 : 4;
-            if (p + 2 + hex_len <= end) {
-                unsigned int codepoint = 0;
-                int valid = 1;
-                for (int offset = 0; offset < hex_len; ++offset) {
-                    unsigned char digit = (unsigned char)p[2 + offset];
-                    if (!is_hex_digit(digit)) {
-                        valid = 0;
-                        break;
-                    }
-                    codepoint = (codepoint << 4) | hex_value(digit);
-                }
-                if (valid) {
-                    if (codepoint > 0x10FFFFu) {
-                        PyMem_Free(buffer);
-                        PyErr_Format(
-                            PcreError,
-                            "Unicode escape \\%c%.*s exceeds 0x10FFFF",
-                            p[1],
-                            hex_len,
-                            p + 2
-                        );
-                        return NULL;
-                    }
+        if ((size_t)(end - p) >= 3 && p[0] == '(' && p[1] == '?' && p[2] == '#') {
+            const char *comment_end = memchr(p + 3, ')', (size_t)(end - (p + 3)));
+            if (comment_end == NULL) {
+                memcpy(out, p, (size_t)(end - p));
+                out += end - p;
+                p = end;
+                break;
+            }
+            size_t comment_length = (size_t)(comment_end + 1 - p);
+            memcpy(out, p, comment_length);
+            out += comment_length;
+            p = comment_end + 1;
+            continue;
+        }
 
-                    *out++ = '\\';
-                    *out++ = 'x';
-                    *out++ = '{';
-                    memcpy(out, p + 2, (size_t)hex_len);
-                    out += hex_len;
-                    *out++ = '}';
-                    p += 2 + hex_len;
-                    modified = 1;
-                    continue;
+        if (*p == '\\') {
+            const char *run_end = p;
+            while (run_end < end && *run_end == '\\') {
+                ++run_end;
+            }
+            size_t slash_count = (size_t)(run_end - p);
+            if ((slash_count & 1u) != 0 && run_end < end &&
+                (*run_end == 'u' || *run_end == 'U')) {
+                int is_upper = (*run_end == 'U');
+                int hex_len = is_upper ? 8 : 4;
+                size_t remaining = (size_t)(end - run_end);
+                if (remaining >= 1u + (size_t)hex_len) {
+                    unsigned int codepoint = 0;
+                    int valid = 1;
+                    for (int offset = 0; offset < hex_len; ++offset) {
+                        unsigned char digit = (unsigned char)run_end[1 + offset];
+                        if (!is_hex_digit(digit)) {
+                            valid = 0;
+                            break;
+                        }
+                        codepoint = (codepoint << 4) | hex_value(digit);
+                    }
+                    if (valid) {
+                        if (codepoint > 0x10FFFFu) {
+                            PyMem_Free(buffer);
+                            PyErr_Format(
+                                PcreError,
+                                "Unicode escape \\%c%.*s exceeds 0x10FFFF",
+                                *run_end,
+                                hex_len,
+                                run_end + 1
+                            );
+                            return NULL;
+                        }
+
+                        if (slash_count > 1) {
+                            memcpy(out, p, slash_count - 1);
+                            out += slash_count - 1;
+                        }
+                        *out++ = '\\';
+                        *out++ = 'x';
+                        *out++ = '{';
+                        memcpy(out, run_end + 1, (size_t)hex_len);
+                        out += hex_len;
+                        *out++ = '}';
+                        p = run_end + 1 + hex_len;
+                        modified = 1;
+                        continue;
+                    }
                 }
             }
+            memcpy(out, p, slash_count);
+            out += slash_count;
+            p = run_end;
+            continue;
         }
 
         *out++ = *p++;

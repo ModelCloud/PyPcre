@@ -6,6 +6,7 @@
 #include "pcre2_module.h"
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 int
 env_flag_is_true(const char *value)
@@ -43,14 +44,15 @@ popcountll(uint64_t value)
 #endif
 
 PyObject *
-buffer_view_from_object(PyObject *obj, const char **data_out, Py_ssize_t *length_out)
+buffer_bytes_from_object(PyObject *obj, const char **data_out, Py_ssize_t *length_out)
 {
     /*
      * Wrap any buffer-protocol object (e.g. mmap.mmap, bytearray) in a
-     * memoryview so we get a direct pointer into its existing storage. The
-     * memoryview pins the exporter's buffer (preventing e.g. mmap.close())
-     * for as long as it is kept alive, so callers must hold a reference to
-     * the returned view for as long as data_out/length_out are used.
+     * memoryview long enough to validate its shape, then snapshot the bytes.
+     * Holding a raw buffer pointer across a PCRE2 call is unsafe on free-
+     * threaded Python because bytearray, mmap, and custom exporters can mutate
+     * concurrently. The immutable snapshot also prevents validated UTF-8 from
+     * becoming malformed after validation but before/during matching.
      *
      * PyMemoryView_FromObject is required here rather than a manual
      * PyObject_GetBuffer + PyMemoryView_FromBuffer: the latter leaves the
@@ -72,9 +74,23 @@ buffer_view_from_object(PyObject *obj, const char **data_out, Py_ssize_t *length
         return NULL;
     }
 
-    *data_out = (const char *)buffer->buf;
-    *length_out = buffer->len;
-    return view;
+    PyObject *base = PyMemoryView_GET_BASE(view);
+    if (base == NULL) {
+        base = obj;
+    }
+
+    PyObject *snapshot = NULL;
+    Py_BEGIN_CRITICAL_SECTION(base);
+    snapshot = PyBytes_FromStringAndSize((const char *)buffer->buf, buffer->len);
+    Py_END_CRITICAL_SECTION();
+    Py_DECREF(view);
+    if (snapshot == NULL) {
+        return NULL;
+    }
+
+    *data_out = PyBytes_AS_STRING(snapshot);
+    *length_out = PyBytes_GET_SIZE(snapshot);
+    return snapshot;
 }
 
 PyObject *
@@ -277,6 +293,19 @@ utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset
     return 0;
 }
 
+typedef struct {
+    const unsigned char *entry;
+    uint16_t number;
+} named_entry;
+
+static int
+compare_named_entries(const void *left, const void *right)
+{
+    const named_entry *a = (const named_entry *)left;
+    const named_entry *b = (const named_entry *)right;
+    return (a->number > b->number) - (a->number < b->number);
+}
+
 PyObject *
 create_groupindex_dict(pcre2_code *code)
 {
@@ -300,13 +329,35 @@ create_groupindex_dict(pcre2_code *code)
         return NULL;
     }
 
+    if ((size_t)namecount > SIZE_MAX / sizeof(named_entry)) {
+        Py_DECREF(mapping);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    named_entry *entries = PyMem_Malloc((size_t)namecount * sizeof(*entries));
+    if (entries == NULL) {
+        Py_DECREF(mapping);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (uint32_t i = 0; i < namecount; ++i) {
+        const unsigned char *entry = (const unsigned char *)(
+            table + (size_t)i * entry_size
+        );
+        entries[i].entry = entry;
+        entries[i].number = entry_size >= 2
+            ? (uint16_t)((entry[0] << 8) | entry[1])
+            : 0;
+    }
+    qsort(entries, (size_t)namecount, sizeof(*entries), compare_named_entries);
+
     size_t name_max = (entry_size > 2) ? (size_t)(entry_size - 2) : 0;
     for (uint32_t i = 0; i < namecount; ++i) {
-        const unsigned char *entry = (const unsigned char *)(table + i * entry_size);
+        const unsigned char *entry = entries[i].entry;
         if (entry_size < 2) {
             continue;
         }
-        uint16_t number = (uint16_t)((entry[0] << 8) | entry[1]);
+        uint16_t number = entries[i].number;
         const char *name = (const char *)(entry + 2);
 
         size_t name_len = strnlen(name, name_max);
@@ -315,12 +366,16 @@ create_groupindex_dict(pcre2_code *code)
         if (key == NULL || value == NULL) {
             Py_XDECREF(key);
             Py_XDECREF(value);
+            PyMem_Free(entries);
             Py_DECREF(mapping);
             return NULL;
         }
-        if (PyDict_SetItem(mapping, key, value) < 0) {
+        int contains = PyDict_Contains(mapping, key);
+        if (contains < 0 ||
+            (!contains && PyDict_SetItem(mapping, key, value) < 0)) {
             Py_DECREF(key);
             Py_DECREF(value);
+            PyMem_Free(entries);
             Py_DECREF(mapping);
             return NULL;
         }
@@ -328,6 +383,7 @@ create_groupindex_dict(pcre2_code *code)
         Py_DECREF(value);
     }
 
+    PyMem_Free(entries);
     return mapping;
 }
 

@@ -54,3 +54,6 @@ venv/
 .dmypy.json
 /experiments/
 /pythonlib/
+
+# Cached CPython headers downloaded by setup.py for local builds
+pcre_ext/python_headers/

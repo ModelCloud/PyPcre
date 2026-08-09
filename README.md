@@ -24,6 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
+* 08/08/2026 **0.6.0**: `findall`, `finditer`, `sub`/`subn`, `split`, and `match`/`search`/`fullmatch` are now up to **46x faster** than `stdlib.re` and **48x faster** than `regex` on `finditer`/`findall` workloads, **13x** on `split`, and **2–9x** on `sub`/`subn` backref workloads, with full `re` semantics. Free-threaded `findall` reaches **13.8x** vs `re` on 8 threads. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
 * 04/13/2026 [0.3.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.3.0): Lower-overhead public `Match` objects, faster hot-path `match()` / `search()` / `fullmatch()` / `findall()`, and tighter free-threaded execution. ⚡
@@ -64,7 +65,7 @@ PyPcre pairs Python's familiar `re`-compatible API with the real `PCRE2` engine.
 
 ### Benchmark Highlights 🏁
 
-Measured on a `Python 3.14.5` free-threaded build on x86_64 Linux with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. Only workloads where PyPcre is decisively faster than both `stdlib.re` and `regex` are shown.
+Measured on a `Python 3.14.6` free-threaded build on x86_64 Linux with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. Only workloads where PyPcre is decisively faster than both `stdlib.re` and `regex` are shown.
 
 A reproducible version of this benchmark lives in [`benchmarks/competitor_bench.py`](benchmarks/competitor_bench.py).
 
@@ -72,9 +73,9 @@ A reproducible version of this benchmark lives in [`benchmarks/competitor_bench.
 
 | Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
 | --- | ---: | ---: | ---: | --- |
-| Extract `WARN` / `ERROR` lines (multiline) | `0.60` | `29.35` | `30.85` | **49x** vs `re`, **52x** vs `regex` |
-| Per-line full-name extraction (multiline) | `1.02` | `29.50` | `15.95` | **29x** vs `re`, **16x** vs `regex` |
-| Lookbehind + negative-lookahead tokens | `3.78` | `11.81` | `10.42` | **3.1x** vs `re`, **2.8x** vs `regex` |
+| Extract `WARN` / `ERROR` lines (multiline) | `0.664` | `27.159` | `30.772` | **40.9x** vs `re`, **46.3x** vs `regex` |
+| Per-line full-name extraction (multiline) | `0.914` | `25.685` | `14.482` | **28.1x** vs `re`, **15.8x** vs `regex` |
+| Lookbehind + negative-lookahead tokens | `1.874` | `12.353` | `10.386` | **6.6x** vs `re`, **5.5x** vs `regex` |
 
 Patterns used:
 
@@ -89,19 +90,51 @@ Patterns used:
 
 #### `finditer` — same workloads
 
+Measured on a Python 3.10 x86_64 Linux build with compiled-pattern reuse and JIT enabled. A reproducible version lives in [`benchmarks/finditer_bench.py`](benchmarks/finditer_bench.py).
+
 | Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
 | --- | ---: | ---: | ---: | --- |
-| Extract `WARN` / `ERROR` lines | `0.60` | `29.33` | `31.23` | **49x** vs `re`, **52x** vs `regex` |
-| Per-line full-name extraction | `1.02` | `30.09` | `16.25` | **29x** vs `re`, **16x** vs `regex` |
+| Extract `WARN` / `ERROR` lines | `0.663` | `30.747` | `31.862` | **46.4x** vs `re`, **48.0x** vs `regex` |
+| Per-line full-name extraction | `0.919` | `29.127` | `14.103` | **31.7x** vs `re`, **15.3x** vs `regex` |
+| Lookbehind + negative lookahead | `3.755` | `15.828` | `11.896` | **4.2x** vs `re`, **3.2x** vs `regex` |
+
+#### `sub` / `subn` — high-volume replacement workloads
+
+Measured on a Python 3.10 x86_64 Linux build with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. The benchmark replaces 100,000 space-separated tokens.
+
+A reproducible version lives in [`benchmarks/sub_bench.py`](benchmarks/sub_bench.py).
+
+| Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
+| --- | ---: | ---: | ---: | --- |
+| Literal replacement (`\w+` → `[X]`) | `5.933` | `13.367` | `19.107` | **2.3x** vs `re`, **3.2x** vs `regex` |
+| Single numeric backref (`(w)\d+` → `[\1]`) | `7.221` | `64.715` | `25.482` | **9.0x** vs `re`, **3.5x** vs `regex` |
+| Two numeric backrefs (`(w)(\d+)` → `\2-\1`) | `17.600` | `76.222` | `32.048` | **4.3x** vs `re`, **1.8x** vs `regex` |
+| Named backref (`(?P<g>\w+)` → `<\g<g>>`) | `14.684` | `71.053` | `30.222` | **4.8x** vs `re`, **2.1x** vs `regex` |
+
+#### `split` — high-volume delimiter workloads
+
+Measured on a Python 3.10 x86_64 Linux build with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. The benchmark splits 100,000 space-separated tokens.
+
+A reproducible version lives in [`benchmarks/split_bench.py`](benchmarks/split_bench.py).
+
+| Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
+| --- | ---: | ---: | ---: | --- |
+| Delimiter no group (`\s+`) | `7.315` | `17.394` | `19.690` | **2.4x** vs `re`, **2.7x** vs `regex` |
+| Delimiter with group (`(\s+)`) | `12.360` | `21.099` | `25.145` | **1.7x** vs `re`, **2.0x** vs `regex` |
+| Single char (` `) | `4.583` | `3.990` | `14.577` | parity vs `re`, **3.2x** vs `regex` |
+| Single char with group (`( )`) | `8.913` | `11.091` | `18.595` | **1.2x** vs `re`, **2.1x** vs `regex` |
+| Empty pattern (`''`) | `5.228` | `45.552` | `69.913` | **8.7x** vs `re`, **13.4x** vs `regex` |
 
 ### Free-Threaded Benchmark Highlights 🧵
 
-Measured in the same environment with `8` threads fanning out over independent copies of each workload. Times are the best of several runs; lower is better.
+Measured on the same `Python 3.14.6` free-threaded build with `8` threads fanning out over split copies of each workload. Times are the best of several runs; lower is better.
+
+A reproducible version lives in [`benchmarks/free_threaded_bench.py`](benchmarks/free_threaded_bench.py).
 
 | Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
 | --- | ---: | ---: | ---: | --- |
-| Extract `WARN` / `ERROR` lines (`findall`) | `3.26` | `32.57` | `34.41` | **10.0x** vs `re`, **10.6x** vs `regex` |
-| Per-line full-name extraction (`findall`) | `3.18` | `31.84` | `17.31` | **10.0x** vs `re`, **5.4x** vs `regex` |
+| Extract `WARN` / `ERROR` lines (`findall`) | `0.672` | `9.063` | `9.297` | **13.5x** vs `re`, **13.8x** vs `regex` |
+| Per-line full-name extraction (`findall`) | `0.913` | `8.611` | `4.575` | **9.4x** vs `re`, **5.0x** vs `regex` |
 
 PyPcre is the stronger all-around choice when you want more than the baseline: full `PCRE2` features, more expressive syntax, JIT, explicit free-threaded support, and a stable `re`-compatible API surface. It keeps Python ergonomics while giving you a substantially more capable engine. 🚀
 

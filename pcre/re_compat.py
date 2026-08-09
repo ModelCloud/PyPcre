@@ -46,15 +46,19 @@ def normalise_count(value: Any) -> int | None:
         count = operator.index(value)
     except TypeError as exc:  # pragma: no cover - defensive
         raise exc
-    if count <= 0:
+    if count == 0:
         return None
+    if count < 0:
+        return 0
     return count
 
 
 def resolve_endpos(subject: Any, endpos: int | None) -> int:
     length = len(subject)
-    if endpos is None or endpos < 0:
+    if endpos is None:
         return length
+    if endpos < 0:
+        return 0
     return endpos
 
 

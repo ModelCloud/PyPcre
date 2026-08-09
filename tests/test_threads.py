@@ -104,11 +104,11 @@ def test_configure_thread_pool_shuts_down_existing_pool() -> None:
     original_workers = threads_mod._THREAD_POOL_WORKERS
     try:
         threads_mod.shutdown_thread_pool(wait=True)
-        threads_mod.configure_thread_pool(max_workers=2, preload=True)
+        threads_mod.configure_thread_pool(max_workers=1, preload=True)
         first_pool = threads_mod._THREAD_POOL
         assert first_pool is not None
 
-        threads_mod.configure_thread_pool(max_workers=3, preload=True)
+        threads_mod.configure_thread_pool(max_workers=2, preload=True)
         assert threads_mod._THREAD_POOL is not first_pool
     finally:
         threads_mod.shutdown_thread_pool(wait=True)
@@ -121,10 +121,10 @@ def test_ensure_thread_pool_resizes_existing_pool() -> None:
     original_workers = threads_mod._THREAD_POOL_WORKERS
     try:
         threads_mod.shutdown_thread_pool(wait=True)
-        first_pool = threads_mod.ensure_thread_pool(max_workers=2)
+        first_pool = threads_mod.ensure_thread_pool(max_workers=1)
         assert first_pool is not None
 
-        second_pool = threads_mod.ensure_thread_pool(max_workers=3)
+        second_pool = threads_mod.ensure_thread_pool(max_workers=2)
         assert second_pool is not first_pool
     finally:
         threads_mod.shutdown_thread_pool(wait=True)

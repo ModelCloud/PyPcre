@@ -207,6 +207,7 @@ def test_compile_disabled_default_with_non_thread_flags(monkeypatch: pytest.Monk
 
 def test_parallel_map_auto_mode_uses_threshold_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pcre_mod, "get_auto_threshold", lambda: 0)
+    monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: True)
     pattern = pcre.compile(r"\d+")
     results = pcre.parallel_map(pattern, ["1", "22", "333"])
     assert [m.group(0) for m in results] == ["1", "22", "333"]
@@ -214,6 +215,7 @@ def test_parallel_map_auto_mode_uses_threshold_zero(monkeypatch: pytest.MonkeyPa
 
 def test_parallel_map_auto_mode_with_memoryview_subject(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pcre_mod, "get_auto_threshold", lambda: 1_000_000)
+    monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: True)
     pattern = pcre.compile(br"\d+")
     results = pcre.parallel_map(pattern, [memoryview(b"1"), memoryview(b"22")])
     assert [m.group(0) for m in results] == [b"1", b"22"]
@@ -297,6 +299,9 @@ class _FakeCPattern:
             return self._finditer(subject, pos=pos, endpos=endpos, options=options)
         raise TypeError("finditer not implemented")
 
+    def split(self, subject: Any, maxsplit: int = 0) -> Any:
+        raise TypeError("split not implemented")
+
 
 def _fake_pattern(**kwargs: Any) -> pcre_mod.Pattern:
     return pcre_mod.Pattern(_FakeCPattern(**kwargs))
@@ -310,6 +315,40 @@ def test_finditer_uses_backend_iterator() -> None:
     pattern = _fake_pattern(finditer=lambda subject, **kw: iter(raw_matches))
     matches = list(pattern.finditer("ab"))
     assert [m.group(0) for m in matches] == ["a", "b"]
+
+
+def test_finditer_empty_backend_iterator() -> None:
+    pattern = _fake_pattern(finditer=lambda subject, **kw: iter(()))
+    assert list(pattern.finditer("ab")) == []
+
+
+def test_finditer_owner_stamped_backend_iterator(monkeypatch: pytest.MonkeyPatch) -> None:
+    pattern = _fake_pattern()
+    raw = _FakeRawMatch("a", (0, 1), ("a",))
+    raw.re = pattern
+    pattern._pattern._finditer = lambda subject, **kw: iter((raw,))
+    monkeypatch.setattr(pcre_mod, "_can_attach_match", lambda match: True)
+    assert list(pattern.finditer("a")) == [raw]
+
+
+def test_legacy_backend_match_no_match_paths() -> None:
+    pattern = _fake_pattern()
+    assert pattern.match("zz", pos=1) is None
+    assert pattern.search("a") is not None
+    assert pattern.search("", pos=1, endpos=0) is None
+    assert pattern.fullmatch("zz") is None
+    assert pattern.fullmatch("zz", endpos=1) is None
+
+
+def test_pcre2_replacement_conversion_tuple_format() -> None:
+    parsed_text = ([(1, 1)], ["$\\", None, "tail"])
+    parsed_bytes = ([(1, 1)], [b"$\\", None, b"tail"])
+    assert pcre_mod._pcre2_replacement_from_parsed(parsed_text, False) == (
+        "$$" + "\\" * 3 + "g<1>tail"
+    )
+    assert pcre_mod._pcre2_replacement_from_parsed(parsed_bytes, True) == (
+        b"$$" + b"\\" * 3 + b"g<1>tail"
+    )
 
 
 def test_findall_uses_backend_iterator() -> None:
@@ -332,6 +371,8 @@ def test_finditer_fallback_loop_handles_zero_width_at_endpos() -> None:
     pattern = _fake_pattern()
     matches = list(pattern.finditer("ab", pos=2, endpos=2))
     assert len(matches) == 1
+    assert list(pattern.finditer("ab", endpos=1))
+    assert list(pattern.finditer("ab", pos=3)) == []
 
 
 def test_findall_fallback_loop() -> None:

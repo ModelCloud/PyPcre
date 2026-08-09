@@ -23,6 +23,7 @@ typedef struct ThreadCacheState {
 } ThreadCacheState;
 
 static void thread_cache_state_clear(ThreadCacheState *state);
+static inline void thread_cache_state_free(ThreadCacheState *state);
 
 typedef enum CacheStrategy {
     CACHE_STRATEGY_THREAD_LOCAL = 0,
@@ -38,13 +39,13 @@ static ATOMIC_VAR(int) cache_tss_ready = ATOMIC_VAR_INIT(0);
 static ATOMIC_VAR(int) context_cache_enabled = ATOMIC_VAR_INIT(1);
 
 static ATOMIC_VAR(pcre2_match_data *) global_match_cached = ATOMIC_VAR_INIT(NULL);
-static ATOMIC_VAR(uint32_t) global_match_ovec_count = ATOMIC_VAR_INIT(0);
 static ATOMIC_VAR(uint32_t) global_match_capacity = ATOMIC_VAR_INIT(1);
 
 static ATOMIC_VAR(pcre2_jit_stack *) global_jit_cached = ATOMIC_VAR_INIT(NULL);
 static ATOMIC_VAR(uint32_t) global_jit_capacity = ATOMIC_VAR_INIT(1);
 static ATOMIC_VAR(size_t) global_jit_start_size = ATOMIC_VAR_INIT(32 * 1024);
 static ATOMIC_VAR(size_t) global_jit_max_size = ATOMIC_VAR_INIT(1024 * 1024);
+static PyThread_type_lock global_cache_lock = NULL;
 
 static ATOMIC_VAR(int) debug_thread_cache_count = ATOMIC_VAR_INIT(0);
 static int debug_thread_cache_enabled = 0;
@@ -54,10 +55,42 @@ static PyObject *thread_cache_cleanup_key = NULL;
 
 static void thread_cache_capsule_destructor(PyObject *capsule);
 
+static inline void
+global_cache_lock_acquire(void)
+{
+    if (global_cache_lock != NULL) {
+        PyThread_acquire_lock(global_cache_lock, WAIT_LOCK);
+    }
+}
+
+static inline void
+global_cache_lock_release(void)
+{
+    if (global_cache_lock != NULL) {
+        PyThread_release_lock(global_cache_lock);
+    }
+}
+
 static inline uint32_t
-clamp_cache_capacity(unsigned long value)
+clamp_cache_capacity(size_t value)
 {
     return value == 0 ? 0u : 1u;
+}
+
+static int
+parse_nonnegative_size(PyObject *value, size_t *result)
+{
+    PyObject *index = PyNumber_Index(value);
+    if (index == NULL) {
+        return -1;
+    }
+    size_t parsed = PyLong_AsSize_t(index);
+    Py_DECREF(index);
+    if (parsed == (size_t)-1 && PyErr_Occurred()) {
+        return -1;
+    }
+    *result = parsed;
+    return 0;
 }
 
 static inline uint32_t
@@ -114,27 +147,36 @@ thread_cache_state_get_or_create(void)
     }
 
     PyObject *dict = PyThreadState_GetDict();
-    if (dict != NULL) {
+    if (dict == NULL) {
+        PyThread_tss_set(&cache_tss, NULL);
+        thread_cache_state_free(state);
+        if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_RuntimeError, "thread state dictionary unavailable");
+        }
+        return NULL;
+    }
+    {
         PyObject *key = thread_cache_cleanup_key;
         if (key == NULL) {
-            key = PyUnicode_FromString("_pcre2_cache_state");
-            if (key == NULL) {
-                PyThread_tss_set(&cache_tss, NULL);
-                thread_cache_state_clear(state);
-                PyMem_Free(state);
-                return NULL;
-            }
-            thread_cache_cleanup_key = key;
+            PyThread_tss_set(&cache_tss, NULL);
+            thread_cache_state_free(state);
+            PyErr_SetString(PyExc_RuntimeError, "cache cleanup key unavailable");
+            return NULL;
         }
         PyObject *capsule = PyCapsule_New(state, THREAD_CACHE_CAPSULE_NAME, thread_cache_capsule_destructor);
-        if (capsule != NULL) {
-            if (PyDict_SetItem(dict, key, capsule) == 0) {
-                state->cleanup_token = capsule;
-            } else {
-                PyErr_Clear();
-            }
-            Py_DECREF(capsule);
+        if (capsule == NULL) {
+            PyThread_tss_set(&cache_tss, NULL);
+            thread_cache_state_free(state);
+            return NULL;
         }
+        if (PyDict_SetItem(dict, key, capsule) < 0) {
+            Py_DECREF(capsule);
+            PyThread_tss_set(&cache_tss, NULL);
+            thread_cache_state_free(state);
+            return NULL;
+        }
+        state->cleanup_token = capsule;
+        Py_DECREF(capsule);
     }
 
     return state;
@@ -244,17 +286,20 @@ thread_cache_teardown(void)
 static inline void
 global_match_cache_clear(void)
 {
+    global_cache_lock_acquire();
     pcre2_match_data *cached = atomic_exchange_explicit(&global_match_cached, NULL, memory_order_acq_rel);
+    global_cache_lock_release();
     if (cached != NULL) {
         pcre2_match_data_free(cached);
     }
-    atomic_store_explicit(&global_match_ovec_count, 0, memory_order_release);
 }
 
 static inline void
 global_jit_cache_clear(void)
 {
+    global_cache_lock_acquire();
     pcre2_jit_stack *cached = atomic_exchange_explicit(&global_jit_cached, NULL, memory_order_acq_rel);
+    global_cache_lock_release();
     if (cached != NULL) {
         pcre2_jit_stack_free(cached);
     }
@@ -363,18 +408,24 @@ global_match_data_cache_acquire(PatternObject *self)
 {
     uint32_t required_pairs = required_ovector_pairs(self);
 
+    global_cache_lock_acquire();
     if (atomic_load_explicit(&global_match_capacity, memory_order_acquire) != 0) {
         pcre2_match_data *cached = atomic_exchange_explicit(&global_match_cached, NULL, memory_order_acq_rel);
         if (cached != NULL) {
-            uint32_t cached_pairs = atomic_load_explicit(&global_match_ovec_count, memory_order_acquire);
+            global_cache_lock_release();
+            uint32_t cached_pairs = pcre2_get_ovector_count(cached);
             if (cached_pairs >= required_pairs) {
-                atomic_store_explicit(&global_match_ovec_count, 0, memory_order_release);
                 return cached;
             }
             pcre2_match_data_free(cached);
-            atomic_store_explicit(&global_match_ovec_count, 0, memory_order_release);
+            pcre2_match_data *replacement = pcre2_match_data_create(required_pairs, NULL);
+            if (replacement != NULL) {
+                return replacement;
+            }
+            return pcre2_match_data_create_from_pattern(self->code, NULL);
         }
     }
+    global_cache_lock_release();
 
     pcre2_match_data *match_data = pcre2_match_data_create(required_pairs, NULL);
     if (match_data != NULL) {
@@ -391,23 +442,14 @@ global_match_data_cache_release(pcre2_match_data *match_data)
         return;
     }
 
-    if (atomic_load_explicit(&global_match_capacity, memory_order_acquire) == 0) {
-        pcre2_match_data_free(match_data);
+    global_cache_lock_acquire();
+    if (atomic_load_explicit(&global_match_capacity, memory_order_acquire) != 0 &&
+        atomic_load_explicit(&global_match_cached, memory_order_acquire) == NULL) {
+        atomic_store_explicit(&global_match_cached, match_data, memory_order_release);
+        global_cache_lock_release();
         return;
     }
-
-    pcre2_match_data *expected = NULL;
-    if (atomic_compare_exchange_strong_explicit(
-            &global_match_cached,
-            &expected,
-            match_data,
-            memory_order_acq_rel,
-            memory_order_acquire)) {
-        uint32_t ovec_count = pcre2_get_ovector_count(match_data);
-        atomic_store_explicit(&global_match_ovec_count, ovec_count, memory_order_release);
-        return;
-    }
-
+    global_cache_lock_release();
     pcre2_match_data_free(match_data);
 }
 
@@ -447,15 +489,18 @@ thread_jit_stack_cache_release(pcre2_jit_stack *jit_stack)
 static pcre2_jit_stack *
 global_jit_stack_cache_acquire(void)
 {
+    global_cache_lock_acquire();
     if (atomic_load_explicit(&global_jit_capacity, memory_order_acquire) != 0) {
         pcre2_jit_stack *cached = atomic_exchange_explicit(&global_jit_cached, NULL, memory_order_acq_rel);
         if (cached != NULL) {
+            global_cache_lock_release();
             return cached;
         }
     }
 
     size_t start = atomic_load_explicit(&global_jit_start_size, memory_order_acquire);
     size_t max = atomic_load_explicit(&global_jit_max_size, memory_order_acquire);
+    global_cache_lock_release();
     return pcre2_jit_stack_create(start, max, NULL);
 }
 
@@ -466,27 +511,27 @@ global_jit_stack_cache_release(pcre2_jit_stack *jit_stack)
         return;
     }
 
-    if (atomic_load_explicit(&global_jit_capacity, memory_order_acquire) == 0) {
-        pcre2_jit_stack_free(jit_stack);
+    global_cache_lock_acquire();
+    if (atomic_load_explicit(&global_jit_capacity, memory_order_acquire) != 0 &&
+        atomic_load_explicit(&global_jit_cached, memory_order_acquire) == NULL) {
+        atomic_store_explicit(&global_jit_cached, jit_stack, memory_order_release);
+        global_cache_lock_release();
         return;
     }
-
-    pcre2_jit_stack *expected = NULL;
-    if (atomic_compare_exchange_strong_explicit(
-            &global_jit_cached,
-            &expected,
-            jit_stack,
-            memory_order_acq_rel,
-            memory_order_acquire)) {
-        return;
-    }
-
+    global_cache_lock_release();
     pcre2_jit_stack_free(jit_stack);
 }
 
 int
-cache_initialize(void)
+cache_initialize(int global_mode)
 {
+    if (global_cache_lock == NULL) {
+        global_cache_lock = PyThread_allocate_lock();
+        if (global_cache_lock == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
     if (!atomic_load_explicit(&cache_tss_ready, memory_order_acquire)) {
         if (PyThread_tss_create(&cache_tss) != 0) {
             PyErr_NoMemory();
@@ -507,7 +552,7 @@ cache_initialize(void)
         atomic_store_explicit(&debug_thread_cache_count, 0, memory_order_relaxed);
     }
 
-    cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
+    cache_strategy_set(global_mode ? CACHE_STRATEGY_GLOBAL : CACHE_STRATEGY_THREAD_LOCAL);
     cache_strategy_set_locked(0);
     atomic_store_explicit(&context_cache_enabled, 1, memory_order_release);
 
@@ -525,6 +570,10 @@ cache_teardown(void)
 {
     thread_cache_teardown();
     global_cache_teardown();
+    if (global_cache_lock != NULL) {
+        PyThread_free_lock(global_cache_lock);
+        global_cache_lock = NULL;
+    }
     cache_strategy_set_locked(0);
     cache_strategy_set(CACHE_STRATEGY_THREAD_LOCAL);
     Py_CLEAR(thread_cache_cleanup_key);
@@ -664,14 +713,21 @@ module_get_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSE
         return PyLong_FromUnsignedLong((unsigned long)state->match_capacity);
     }
 
-    return PyLong_FromUnsignedLong((unsigned long)atomic_load_explicit(&global_match_capacity, memory_order_acquire));
+    global_cache_lock_acquire();
+    uint32_t capacity = atomic_load_explicit(&global_match_capacity, memory_order_acquire);
+    global_cache_lock_release();
+    return PyLong_FromUnsignedLong((unsigned long)capacity);
 }
 
 PyObject *
 module_set_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
 {
-    unsigned long size = 0;
-    if (!PyArg_ParseTuple(args, "k", &size)) {
+    PyObject *size_obj = NULL;
+    if (!PyArg_ParseTuple(args, "O", &size_obj)) {
+        return NULL;
+    }
+    size_t size = 0;
+    if (parse_nonnegative_size(size_obj, &size) < 0) {
         return NULL;
     }
 
@@ -689,9 +745,15 @@ module_set_match_data_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
         Py_RETURN_NONE;
     }
 
+    pcre2_match_data *discard = NULL;
+    global_cache_lock_acquire();
     atomic_store_explicit(&global_match_capacity, capacity, memory_order_release);
     if (capacity == 0) {
-        global_match_cache_clear();
+        discard = atomic_exchange_explicit(&global_match_cached, NULL, memory_order_acq_rel);
+    }
+    global_cache_lock_release();
+    if (discard != NULL) {
+        pcre2_match_data_free(discard);
     }
 
     Py_RETURN_NONE;
@@ -727,7 +789,9 @@ module_get_match_data_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUS
         return PyLong_FromUnsignedLong(count);
     }
 
+    global_cache_lock_acquire();
     unsigned long count = atomic_load_explicit(&global_match_cached, memory_order_acquire) != NULL ? 1ul : 0ul;
+    global_cache_lock_release();
     return PyLong_FromUnsignedLong(count);
 }
 
@@ -743,14 +807,21 @@ module_get_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED
         return PyLong_FromUnsignedLong((unsigned long)state->jit_capacity);
     }
 
-    return PyLong_FromUnsignedLong((unsigned long)atomic_load_explicit(&global_jit_capacity, memory_order_acquire));
+    global_cache_lock_acquire();
+    uint32_t capacity = atomic_load_explicit(&global_jit_capacity, memory_order_acquire);
+    global_cache_lock_release();
+    return PyLong_FromUnsignedLong((unsigned long)capacity);
 }
 
 PyObject *
 module_set_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
 {
-    unsigned long size = 0;
-    if (!PyArg_ParseTuple(args, "k", &size)) {
+    PyObject *size_obj = NULL;
+    if (!PyArg_ParseTuple(args, "O", &size_obj)) {
+        return NULL;
+    }
+    size_t size = 0;
+    if (parse_nonnegative_size(size_obj, &size) < 0) {
         return NULL;
     }
 
@@ -768,9 +839,15 @@ module_set_jit_stack_cache_size(PyObject *Py_UNUSED(module), PyObject *args)
         Py_RETURN_NONE;
     }
 
+    pcre2_jit_stack *discard = NULL;
+    global_cache_lock_acquire();
     atomic_store_explicit(&global_jit_capacity, capacity, memory_order_release);
     if (capacity == 0) {
-        global_jit_cache_clear();
+        discard = atomic_exchange_explicit(&global_jit_cached, NULL, memory_order_acq_rel);
+    }
+    global_cache_lock_release();
+    if (discard != NULL) {
+        pcre2_jit_stack_free(discard);
     }
 
     Py_RETURN_NONE;
@@ -806,7 +883,9 @@ module_get_jit_stack_cache_count(PyObject *Py_UNUSED(module), PyObject *Py_UNUSE
         return PyLong_FromUnsignedLong(count);
     }
 
+    global_cache_lock_acquire();
     unsigned long count = atomic_load_explicit(&global_jit_cached, memory_order_acquire) != NULL ? 1ul : 0ul;
+    global_cache_lock_release();
     return PyLong_FromUnsignedLong(count);
 }
 
@@ -820,24 +899,31 @@ module_get_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(arg
             return NULL;
         }
         return Py_BuildValue(
-            "kk",
-            (unsigned long)state->jit_start_size,
-            (unsigned long)state->jit_max_size
+            "KK",
+            (unsigned long long)state->jit_start_size,
+            (unsigned long long)state->jit_max_size
         );
     }
 
-    unsigned long start = (unsigned long)atomic_load_explicit(&global_jit_start_size, memory_order_acquire);
-    unsigned long max = (unsigned long)atomic_load_explicit(&global_jit_max_size, memory_order_acquire);
-    return Py_BuildValue("kk", start, max);
+    global_cache_lock_acquire();
+    size_t start = atomic_load_explicit(&global_jit_start_size, memory_order_acquire);
+    size_t max = atomic_load_explicit(&global_jit_max_size, memory_order_acquire);
+    global_cache_lock_release();
+    return Py_BuildValue("KK", (unsigned long long)start, (unsigned long long)max);
 }
 
 PyObject *
 module_set_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *args)
 {
-    unsigned long start = 0;
-    unsigned long max = 0;
-
-    if (!PyArg_ParseTuple(args, "kk", &start, &max)) {
+    PyObject *start_obj = NULL;
+    PyObject *max_obj = NULL;
+    if (!PyArg_ParseTuple(args, "OO", &start_obj, &max_obj)) {
+        return NULL;
+    }
+    size_t start = 0;
+    size_t max = 0;
+    if (parse_nonnegative_size(start_obj, &start) < 0 ||
+        parse_nonnegative_size(max_obj, &max) < 0) {
         return NULL;
     }
 
@@ -863,9 +949,16 @@ module_set_jit_stack_limits(PyObject *Py_UNUSED(module), PyObject *args)
         Py_RETURN_NONE;
     }
 
-    atomic_store_explicit(&global_jit_start_size, (size_t)start, memory_order_release);
-    atomic_store_explicit(&global_jit_max_size, (size_t)max, memory_order_release);
-    global_jit_cache_clear();
+    global_cache_lock_acquire();
+    atomic_store_explicit(&global_jit_start_size, start, memory_order_release);
+    atomic_store_explicit(&global_jit_max_size, max, memory_order_release);
+    pcre2_jit_stack *discard = atomic_exchange_explicit(
+        &global_jit_cached, NULL, memory_order_acq_rel
+    );
+    global_cache_lock_release();
+    if (discard != NULL) {
+        pcre2_jit_stack_free(discard);
+    }
 
     Py_RETURN_NONE;
 }

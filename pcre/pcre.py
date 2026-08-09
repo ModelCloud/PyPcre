@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re as _std_re
-from collections.abc import Generator, Iterable
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
@@ -175,13 +175,60 @@ def _normalise_flags(flags: FlagInput) -> int:
     raise TypeError("flags must be an int, stdlib re flag, or an iterable of those")
 
 
+def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
+    """Convert a parsed Python replacement template to a PCRE2 replacement string."""
+
+    if (
+        isinstance(parsed, tuple)
+        and len(parsed) == 2
+        and isinstance(parsed[0], list)
+        and isinstance(parsed[1], list)
+    ):
+        group_slots, literals = parsed
+        slot_to_group = {slot: group for slot, group in group_slots}
+        if is_bytes:
+            parts = []
+            for i, lit in enumerate(literals):
+                if i in slot_to_group:
+                    parts.append(("\\g<" + str(slot_to_group[i]) + ">").encode("ascii"))
+                if lit is not None:
+                    parts.append(lit.replace(b"\\", b"\\\\").replace(b"$", b"$$"))
+            return b"".join(parts)
+
+        parts = []
+        for i, lit in enumerate(literals):
+            if i in slot_to_group:
+                parts.append("\\g<" + str(slot_to_group[i]) + ">")
+            if lit is not None:
+                parts.append(lit.replace("\\", "\\\\").replace("$", "$$"))
+        return "".join(parts)
+
+    if is_bytes:
+        parts = []
+        for item in parsed:
+            if isinstance(item, int):
+                parts.append(("\\g<" + str(item) + ">").encode("ascii"))
+            else:
+                parts.append(item.replace(b"\\", b"\\\\").replace(b"$", b"$$"))
+        return b"".join(parts)
+
+    parts = []
+    for item in parsed:
+        if isinstance(item, int):
+            parts.append("\\g<" + str(item) + ">")
+        else:
+            parts.append(item.replace("\\", "\\\\").replace("$", "$$"))
+    return "".join(parts)
+
+
 class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
-    __slots__ = ("_pattern", "_groups_hint", "_thread_mode")
+    __slots__ = ("_pattern", "_groups_hint", "_thread_mode", "_is_c_pattern")
 
     def __init__(self, pattern: _CPattern) -> None:
         self._pattern = pattern
+        self._is_c_pattern = isinstance(pattern, _CPattern)
         self._thread_mode = _THREAD_MODE_DISABLED
         try:
             self._groups_hint = pattern.capture_count
@@ -196,7 +243,7 @@ class Pattern:
         return self._pattern.pattern
 
     @property
-    def groupindex(self) -> dict[str, int]:
+    def groupindex(self) -> Mapping[str, int]:
         return self._pattern.groupindex
 
     @property
@@ -260,20 +307,17 @@ class Pattern:
     ) -> Match | None:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if self._is_c_pattern:
+            compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
+            return self._pattern.match(subject, pos, compiled_end, options, self)
         if endpos is None:
-            raw = self._pattern.match(subject, pos=pos, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
             resolved_end = len(subject)
+            raw = self._pattern.match(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
             raw = self._pattern.match(subject, pos=pos, endpos=resolved_end, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
+        if raw is None:
+            return None
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     prefixmatch = match
@@ -288,20 +332,17 @@ class Pattern:
     ) -> Match | None:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if self._is_c_pattern:
+            compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
+            return self._pattern.search(subject, pos, compiled_end, options, self)
         if endpos is None:
-            raw = self._pattern.search(subject, pos=pos, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
             resolved_end = len(subject)
+            raw = self._pattern.search(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
             raw = self._pattern.search(subject, pos=pos, endpos=resolved_end, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
+        if raw is None:
+            return None
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     def fullmatch(
@@ -314,20 +355,17 @@ class Pattern:
     ) -> Match | None:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if self._is_c_pattern:
+            compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
+            return self._pattern.fullmatch(subject, pos, compiled_end, options, self)
         if endpos is None:
-            raw = self._pattern.fullmatch(subject, pos=pos, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
             resolved_end = len(subject)
+            raw = self._pattern.fullmatch(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
             raw = self._pattern.fullmatch(subject, pos=pos, endpos=resolved_end, options=options)
-            if raw is None:
-                return None
-            if _can_attach_match(raw):
-                return _ATTACH_MATCH(raw, self)
+        if raw is None:
+            return None
         return self._wrap_match(raw, subject, pos, resolved_end)
 
     def finditer(
@@ -337,44 +375,71 @@ class Pattern:
         pos: int = 0,
         endpos: int | None = None,
         options: int = 0,
-    ) -> Generator[Match, None, None]:
+    ) -> Iterator[Match]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
-        origin_pos = pos
         resolved_end = resolve_endpos(subject, endpos)
         backend_iter = getattr(self._pattern, "finditer", None)
         if backend_iter is not None:
             compiled_end = resolved_end if endpos is not None else -1
+            if self._is_c_pattern:
+                # The C iterator stamps each Match with this public Pattern, so
+                # we can return it directly without per-match Python wrapping.
+                return backend_iter(subject, pos, compiled_end, options, self)
+            raw_iter = None
             try:
-                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options, owner=self)
             except TypeError:
-                raw_iter = None
+                # Older extensions and test doubles may not accept `owner`.
+                try:
+                    raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                except TypeError:
+                    raw_iter = None
             if raw_iter is not None:
-                for raw in raw_iter:
-                    yield self._wrap_match(raw, subject, origin_pos, resolved_end)
-                return
+                # Peek to detect whether the backend already stamped the public
+                # owner on its Match objects.  If it did, we can yield from the
+                # raw iterator; otherwise wrap the raw results as before.
+                try:
+                    peek = next(raw_iter)
+                except StopIteration:
+                    return iter([])
+                if _can_attach_match(peek) and peek.re is self:
+                    def _owned_iter():
+                        yield peek
+                        yield from raw_iter
+                    return _owned_iter()
+                def _wrapped_iter():
+                    yield self._wrap_match(peek, subject, pos, resolved_end)
+                    for raw in raw_iter:
+                        yield self._wrap_match(raw, subject, pos, resolved_end)
+                return _wrapped_iter()
 
         search_end = resolved_end if endpos is not None else -1
         current = pos
+        origin_pos = pos
         subject_length = len(subject)
 
-        while True:
-            raw = self._pattern.search(subject, pos=current, endpos=search_end, options=options)
-            if raw is None:
-                break
+        def _generator():
+            nonlocal current
+            while True:
+                raw = self._pattern.search(subject, pos=current, endpos=search_end, options=options)
+                if raw is None:
+                    break
 
-            match_obj = self._wrap_match(raw, subject, origin_pos, resolved_end)
-            yield match_obj
+                match_obj = self._wrap_match(raw, subject, origin_pos, resolved_end)
+                yield match_obj
 
-            start, end = match_obj.span()
-            next_pos = compute_next_pos(current, (start, end), endpos)
-            if next_pos <= current:
-                next_pos = current + 1
-            current = next_pos
-            if current > subject_length:
-                break
-            if endpos is not None and current >= resolved_end:
-                break
+                start, end = match_obj.span()
+                next_pos = compute_next_pos(current, (start, end), endpos)
+                if next_pos <= current:
+                    next_pos = current + 1
+                current = next_pos
+                if current > subject_length:
+                    break
+                if endpos is not None and current >= resolved_end:
+                    break
+
+        return _generator()
 
     def findall(
         self,
@@ -422,11 +487,31 @@ class Pattern:
 
     def split(self, subject: Any, maxsplit: Any = 0) -> List[Any]:
         subject = prepare_subject(subject)
+        limit = normalise_count(maxsplit)
+        if limit == 0:
+            subject_is_bytes = is_bytes_like(subject)
+            return [
+                coerce_subject_slice(
+                    subject, 0, len(subject), is_bytes=subject_is_bytes
+                )
+            ]
+
+        # Empty patterns split at every code point/byte; avoid per-match overhead.
+        if limit is None and self.pattern in ("", b""):
+            if is_bytes_like(subject):
+                return [b""] + [bytes(subject[i : i + 1]) for i in range(len(subject))] + [b""]
+            return [""] + list(subject) + [""]
+
+        backend_split = getattr(self._pattern, "split", None)
+        if backend_split is not None:
+            try:
+                return backend_split(subject, 0 if limit is None else limit)
+            except TypeError:
+                pass
+
         subject_is_bytes = is_bytes_like(subject)
         empty = b"" if subject_is_bytes else ""
         parts: List[Any] = []
-        limit = normalise_count(maxsplit)
-
         last_end = 0
         splits_done = 0
 
@@ -471,6 +556,25 @@ class Pattern:
                 if not isinstance(repl, str):
                     raise TypeError("replacement must be str when substituting on text")
                 template = repl
+
+            if limit is None:
+                backend_substitute = getattr(self._pattern, "substitute", None)
+                if backend_substitute is not None:
+                    try:
+                        parsed_template = _parser.parse_template(
+                            template,
+                            TemplatePatternStub(self.groups, self.groupindex),
+                        )
+                    except (ValueError, _std_re.error, IndexError) as exc:
+                        raise PcreError(str(exc)) from exc
+                    pcre2_repl = _pcre2_replacement_from_parsed(parsed_template, subject_is_bytes)
+                    try:
+                        backend_result = backend_substitute(subject, replacement=pcre2_repl, count=0)
+                    except Exception:
+                        backend_result = NotImplemented
+                    if backend_result is not NotImplemented and backend_result is not None:
+                        return backend_result
+                    parsed_template = None
 
             if self._groups_hint is not None:
                 try:

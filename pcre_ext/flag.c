@@ -8,10 +8,14 @@
 int
 pcre_flag_add_constants(PyObject *module)
 {
-#define ADD_FLAG(name)                          \
-    if (PyModule_AddIntConstant(module, #name, name) < 0) { \
-        return -1;                               \
-    }
+#define ADD_FLAG(name)                                                   \
+    do {                                                                 \
+        PyObject *value = PyLong_FromUnsignedLong((unsigned long)(name)); \
+        if (value == NULL || PyModule_AddObject(module, #name, value) < 0) { \
+            Py_XDECREF(value);                                           \
+            return -1;                                                   \
+        }                                                                \
+    } while (0)
 
     ADD_FLAG(PCRE2_ANCHORED);
     ADD_FLAG(PCRE2_CASELESS);
