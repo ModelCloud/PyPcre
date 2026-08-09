@@ -102,6 +102,23 @@ def test_utf_bytes_empty_matches_advance_by_codepoint() -> None:
     assert pattern.split(subject) == [b"", subject, b""]
 
 
+def test_vectorcall_iteration_and_split_entries_match_public_methods() -> None:
+    pattern = raw.compile(r"(x)", flags=TEXT_FLAGS, jit=False)
+    subject = "x x"
+
+    public_matches = [match.span() for match in pattern.finditer(subject)]
+    fast_matches = [
+        match.span() for match in pattern._finditer_fast(subject, 0, -1, 0, None)
+    ]
+    assert fast_matches == public_matches
+    assert pattern._split_fast(subject, 0) == pattern.split(subject, 0)
+
+    with pytest.raises(TypeError):
+        pattern._finditer_fast(subject)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        pattern._split_fast(subject)  # type: ignore[call-arg]
+
+
 def test_mutable_utf_buffer_is_snapshotted_before_iteration() -> None:
     subject = bytearray("é".encode())
     pattern = raw.compile(b"", flags=TEXT_FLAGS, jit=False)

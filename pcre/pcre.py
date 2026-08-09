@@ -49,6 +49,7 @@ from .threads import (
     ensure_thread_pool,
     get_auto_threshold,
     get_thread_default,
+    get_thread_pool_size,
     threading_supported,
 )
 
@@ -385,6 +386,9 @@ class Pattern:
             if self._is_c_pattern:
                 # The C iterator stamps each Match with this public Pattern, so
                 # we can return it directly without per-match Python wrapping.
+                fast_finditer = getattr(self._pattern, "_finditer_fast", None)
+                if fast_finditer is not None:
+                    return fast_finditer(subject, pos, compiled_end, options, self)
                 return backend_iter(subject, pos, compiled_end, options, self)
             raw_iter = None
             try:
@@ -516,6 +520,9 @@ class Pattern:
         backend_split = getattr(self._pattern, "split", None)
         if backend_split is not None:
             try:
+                fast_split = getattr(self._pattern, "_split_fast", None)
+                if fast_split is not None:
+                    return fast_split(subject, 0 if limit is None else limit)
                 return backend_split(subject, 0 if limit is None else limit)
             except TypeError:
                 pass
@@ -924,11 +931,31 @@ def parallel_map(
         ]
 
     executor = ensure_thread_pool(max_workers)
+
+    # Submit bounded batches instead of one Future per subject.  The latter
+    # makes small/medium maps dominated by Future allocation and queue-lock
+    # traffic (especially on the free-threaded build), while the actual PCRE2
+    # calls are already independent and release the interpreter lock for long
+    # subjects.  Batches preserve input order and retain the same exception
+    # propagation behavior as the one-Future implementation.
+    worker_count = max(1, get_thread_pool_size())
+    task_count = min(len(materials), worker_count * 2)
+    chunk_size = (len(materials) + task_count - 1) // task_count
+
+    def _run_chunk(start: int, stop: int) -> list[Any]:
+        return [
+            bound_method(materials[index], pos=pos, endpos=endpos, options=options)
+            for index in range(start, stop)
+        ]
+
     futures = [
-        executor.submit(bound_method, subject, pos=pos, endpos=endpos, options=options)
-        for subject in materials
+        executor.submit(_run_chunk, start, min(start + chunk_size, len(materials)))
+        for start in range(0, len(materials), chunk_size)
     ]
-    return [future.result() for future in futures]
+    results: List[Any] = []
+    for future in futures:
+        results.extend(future.result())
+    return results
 
 
 def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> bool:

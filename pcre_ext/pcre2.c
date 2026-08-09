@@ -3577,6 +3577,47 @@ Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t n
     return Pattern_substitute(self, args[0], args[1], 0);
 }
 
+static PyObject *
+Pattern_finditer_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 5) {
+        PyErr_Format(PyExc_TypeError,
+                     "_finditer_fast() takes exactly 5 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+
+    Py_ssize_t pos = PyLong_AsSsize_t(args[1]);
+    if (pos == (Py_ssize_t)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    Py_ssize_t endpos = PyLong_AsSsize_t(args[2]);
+    if (endpos == (Py_ssize_t)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    uint32_t options = 0;
+    if (coerce_uint32_argument(args[3], "options", &options) < 0) {
+        return NULL;
+    }
+    return Pattern_create_finditer(self, args[0], pos, endpos, options, args[4]);
+}
+
+static PyObject *
+Pattern_split_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_split_fast() takes exactly 2 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    Py_ssize_t maxsplit = PyLong_AsSsize_t(args[1]);
+    if (maxsplit == (Py_ssize_t)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    return Pattern_split(self, args[0], maxsplit);
+}
+
 static PyMethodDef Pattern_methods[] = {
     {"findall", (PyCFunction)Pattern_findall_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return a list of all non-overlapping matches.")},
     {"substitute", (PyCFunction)Pattern_substitute_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Fast substitution using pcre2_substitute.")},
@@ -3587,6 +3628,8 @@ static PyMethodDef Pattern_methods[] = {
     {"fullmatch", (PyCFunction)Pattern_fullmatch_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Require the pattern to match the entire subject." )},
     {"_findall_fast", (PyCFunction)(void(*)(void))Pattern_findall_fast, METH_FASTCALL, NULL},
     {"_substitute_fast", (PyCFunction)(void(*)(void))Pattern_substitute_fast, METH_FASTCALL, NULL},
+    {"_finditer_fast", (PyCFunction)(void(*)(void))Pattern_finditer_fast, METH_FASTCALL, NULL},
+    {"_split_fast", (PyCFunction)(void(*)(void))Pattern_split_fast, METH_FASTCALL, NULL},
     {NULL, NULL, 0, NULL},
 };
 
