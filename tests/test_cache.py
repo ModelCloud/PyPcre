@@ -626,7 +626,10 @@ def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
         global_stats = results[("global", thread_count)]
         # Allow a small tolerance for measurement noise but enforce thread-local is not slower for
         # thread counts within the practical coverage window (up to half the cores or 8 threads).
-        if thread_count <= min(max_threads, 8):
+        # Free-threaded interpreters can legitimately favor the shared global cache, so skip the
+        # performance ordering assertion there while still collecting the benchmark numbers.
+        gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)()
+        if gil_enabled and thread_count <= min(max_threads, 8):
             assert local_stats["elapsed"] <= global_stats["elapsed"] * 1.10
 
         rows: List[List[str]] = []
