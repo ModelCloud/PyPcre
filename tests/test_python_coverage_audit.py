@@ -186,6 +186,40 @@ def test_compile_legacy_default_fallback_and_subject_length(
     assert pcre_mod._subject_length(bytearray(b"x")) == 1
 
 
+def test_flagged_builtin_compile_cache_tracks_mode_and_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcre.clear_cache()
+    pcre_mod._DEFAULT_COMPILE_LOCAL.flagged_cache = None
+    monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: True)
+    flags = int(pcre.Flag.CASELESS)
+    first = pcre.compile("flag-cache", flags=flags)
+    assert pcre.compile("flag-cache", flags=flags) is first
+    assert first.thread_mode == pcre_mod._THREAD_MODE_AUTO
+
+    monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: False)
+    assert pcre.compile("flag-cache", flags=flags) is first
+    assert first.thread_mode == pcre_mod._THREAD_MODE_DISABLED
+
+    enabled = pcre.compile("flag-enabled", flags=int(pcre.Flag.THREADS))
+    assert enabled.thread_mode == pcre_mod._THREAD_MODE_ENABLED
+
+    original_limit = cache_mod.get_cache_limit()
+    try:
+        cache_mod.set_cache_limit(1)
+        pcre.clear_cache()
+        pcre.compile("flag-one", flags=flags)
+        pcre.compile("flag-two", flags=flags)
+
+        cache_mod.set_cache_limit(0)
+        pcre.clear_cache()
+        uncached = pcre.compile("flag-cache-disabled", flags=flags)
+        assert pcre.compile("flag-cache-disabled", flags=flags) is not uncached
+    finally:
+        cache_mod.set_cache_limit(original_limit)
+        pcre.clear_cache()
+
+
 def test_replacement_fallbacks_cover_subclasses_and_bounded_templates() -> None:
     class DerivedPattern(pcre_mod.Pattern):
         pass

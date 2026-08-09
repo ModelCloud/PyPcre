@@ -837,6 +837,47 @@ def _compile_default_builtin(pattern: str | bytes) -> Pattern:
     return compiled
 
 
+def _compile_flagged_builtin(
+    pattern: str | bytes,
+    native_source_flags: int,
+    jit: bool,
+    compat: bool,
+    thread_mode: str,
+) -> Pattern:
+    cache = getattr(_DEFAULT_COMPILE_LOCAL, "flagged_cache", None)
+    if cache is None:
+        cache = _DEFAULT_COMPILE_LOCAL.flagged_cache = {}
+
+    key = (pattern, native_source_flags, bool(jit), bool(compat))
+    limit = get_cache_limit()
+    compiled = None if limit == 0 else cache.get(key)
+    if compiled is None:
+        adjusted_pattern = _apply_regex_compat(pattern, compat)
+        effective_flags = _apply_default_unicode_flags(
+            adjusted_pattern, native_source_flags
+        )
+        compiled = cached_compile(
+            adjusted_pattern,
+            strip_py_only_flags(effective_flags),
+            Pattern,
+            jit=jit,
+        )
+        if limit != 0:
+            cache[key] = compiled
+            maxsize = 256 if limit is None else min(256, limit)
+            while len(cache) > maxsize:
+                cache.pop(next(iter(cache)))
+
+    if compiled.thread_mode != thread_mode:
+        if thread_mode == _THREAD_MODE_ENABLED:
+            compiled.enable_threads()
+        elif thread_mode == _THREAD_MODE_AUTO:
+            compiled.enable_auto_threads()
+        else:
+            compiled.disable_threads()
+    return compiled
+
+
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     # Fast path for the dominant shape: compile(pattern) with default flags.
     if flags == 0:
@@ -930,6 +971,16 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             else:
                 wrapper.disable_threads()
         return wrapper
+
+    if type(pattern) in (str, bytes) and type(flags) is int:
+        if cached_compile is _ORIGINAL_CACHED_COMPILE:
+            return _compile_flagged_builtin(
+                pattern,
+                resolved_flags_no_thread_markers,
+                resolved_jit,
+                compat_enabled,
+                thread_mode,
+            )
 
     adjusted_pattern = _apply_regex_compat(pattern, compat_enabled)
     effective_flags = _apply_default_unicode_flags(
@@ -1255,6 +1306,7 @@ def clear_cache() -> None:
 
     _clear_cache()
     _DEFAULT_COMPILE_LOCAL.cache = {}
+    _DEFAULT_COMPILE_LOCAL.flagged_cache = {}
     _cached_module_pattern.cache_clear()
     _cached_replacement_parts.cache_clear()
     _cached_expand_template.cache_clear()
