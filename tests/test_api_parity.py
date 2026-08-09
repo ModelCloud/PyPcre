@@ -202,8 +202,99 @@ def test_split_respects_maxsplit():
     assert pcre.split(r"-", "a-b-c", maxsplit=1) == re.split(r"-", "a-b-c", maxsplit=1)
 
 
+def test_negative_split_and_sub_counts_match_stdlib():
+    pattern = pcre.compile(r"-")
+    control = re.compile(r"-")
+    assert pattern.split("a-b-c", -1) == control.split("a-b-c", -1)
+
+    pattern = pcre.compile(r"a")
+    control = re.compile(r"a")
+    assert pattern.subn("x", "aaa", -1) == control.subn("x", "aaa", -1)
+
+
 def test_zero_length_pattern_substitution():
     assert pcre.sub(r"", "-", "ab") == re.sub(r"", "-", "ab")
+
+
+@pytest.mark.parametrize("flags", [Flag.NO_JIT, Flag.JIT], ids=["no_jit", "jit"])
+@pytest.mark.parametrize(
+    ("pattern_text", "subject"),
+    [
+        (r".*?", "ab"),
+        (r"a*?", "aéa"),
+        (r"(?:(?=a)|a)", "ba"),
+        (br".*?", b"ab"),
+    ],
+)
+def test_empty_match_iteration_matches_stdlib(pattern_text, subject, flags):
+    control = re.compile(pattern_text)
+    pattern = pcre.compile(pattern_text, flags=flags)
+
+    expected_matches = [(match.group(0), match.span()) for match in control.finditer(subject)]
+    actual_matches = [(match.group(0), match.span()) for match in pattern.finditer(subject)]
+    assert actual_matches == expected_matches
+    assert pattern.findall(subject) == control.findall(subject)
+    assert pattern.split(subject) == control.split(subject)
+
+
+@pytest.mark.parametrize("flags", [Flag.NO_JIT, Flag.JIT], ids=["no_jit", "jit"])
+def test_empty_match_at_endpos_matches_stdlib(flags):
+    control = re.compile(r"")
+    pattern = pcre.compile(r"", flags=flags)
+
+    for pos, endpos in [(0, 0), (0, 1), (1, 1), (1, 2)]:
+        expected = [(match.group(0), match.span()) for match in control.finditer("ab", pos, endpos)]
+        actual = [
+            (match.group(0), match.span())
+            for match in pattern.finditer("ab", pos=pos, endpos=endpos)
+        ]
+        assert actual == expected
+        assert pattern.findall("ab", pos=pos, endpos=endpos) == control.findall(
+            "ab", pos, endpos
+        )
+
+
+@pytest.mark.parametrize("method", ["match", "search", "fullmatch"])
+def test_negative_pos_and_endpos_match_stdlib(method):
+    control = re.compile(r"a")
+    pattern = pcre.compile(r"a")
+
+    expected = getattr(control, method)("ba", -1)
+    actual = getattr(pattern, method)("ba", pos=-1)
+    assert (actual.span() if actual else None) == (expected.span() if expected else None)
+
+    expected = getattr(control, method)("ba", 0, -1)
+    actual = getattr(pattern, method)("ba", pos=0, endpos=-1)
+    assert (actual.span() if actual else None) == (expected.span() if expected else None)
+
+
+def test_reversed_find_range_matches_stdlib():
+    control = re.compile(r"")
+    pattern = pcre.compile(r"")
+
+    assert list(pattern.finditer("ab", pos=2, endpos=1)) == list(
+        control.finditer("ab", 2, 1)
+    )
+    assert pattern.findall("ab", pos=2, endpos=1) == control.findall("ab", 2, 1)
+
+
+@pytest.mark.parametrize(
+    ("pattern_text", "subject"),
+    [
+        (r"(a)?", "ba"),
+        (r"(a)|(b)", "ab"),
+        (br"(a)?", b"ba"),
+        (br"(a)|(b)", b"ab"),
+    ],
+)
+def test_findall_unmatched_groups_match_stdlib(pattern_text, subject):
+    assert pcre.compile(pattern_text).findall(subject) == re.compile(pattern_text).findall(subject)
+
+
+@pytest.mark.parametrize("replacement", ["é", "😀", "λ-$-\\\\"])
+def test_sub_non_ascii_replacement_on_ascii_subject(replacement):
+    pattern = pcre.compile(r"a")
+    assert pattern.sub(replacement, "a a") == re.compile(r"a").sub(replacement, "a a")
 
 
 def test_invalid_group_reference_raises():

@@ -29,14 +29,14 @@ def test_is_bytes_like() -> None:
 def test_normalise_count() -> None:
     assert rc.normalise_count(3) == 3
     assert rc.normalise_count(0) is None
-    assert rc.normalise_count(-1) is None
+    assert rc.normalise_count(-1) == 0
     assert rc.normalise_count(None) is None
     assert rc.normalise_count(True) == 1
 
 
 def test_resolve_endpos() -> None:
     assert rc.resolve_endpos("hello", None) == 5
-    assert rc.resolve_endpos("hello", -1) == 5
+    assert rc.resolve_endpos("hello", -1) == 0
     assert rc.resolve_endpos("hello", 3) == 3
 
 
@@ -217,5 +217,4 @@ def test_expand_match_template_type_errors() -> None:
         rc.expand_match_template(text_match, b"[\1]")
     with pytest.raises(TypeError):
         rc.expand_match_template(bytes_match, "[\\1]")
-
 

@@ -319,6 +319,52 @@ extract_value_from_offsets(PyObject *subject_obj,
     return PyUnicode_DecodeUTF8(utf8_data + start, length, "strict");
 }
 
+static inline PyObject *
+extract_findall_group_from_offsets(const char *utf8_data,
+                                   int subject_is_bytes,
+                                   int subject_is_ascii,
+                                   Py_ssize_t start,
+                                   Py_ssize_t end)
+{
+    /* ``re.findall`` represents unmatched captures as empty strings. */
+    if (start < 0 || end < 0 || end < start) {
+        if (subject_is_bytes) {
+            return PyBytes_FromStringAndSize("", 0);
+        }
+        return PyUnicode_New(0, 127);
+    }
+    return extract_value_from_offsets(NULL, utf8_data, subject_is_bytes,
+                                      subject_is_ascii, start, end);
+}
+
+static inline Py_ssize_t
+advance_one_character(const char *utf8_data,
+                      Py_ssize_t subject_length_bytes,
+                      Py_ssize_t byte_offset,
+                      int single_byte_subject)
+{
+    if (byte_offset >= subject_length_bytes) {
+        return subject_length_bytes;
+    }
+    if (single_byte_subject) {
+        return byte_offset + 1;
+    }
+
+    unsigned char lead = (unsigned char)utf8_data[byte_offset];
+    Py_ssize_t char_bytes = 1;
+    if ((lead & 0xE0) == 0xC0) {
+        char_bytes = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+        char_bytes = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+        char_bytes = 4;
+    }
+    if (char_bytes > subject_length_bytes - byte_offset) {
+        char_bytes = subject_length_bytes - byte_offset;
+    }
+    return byte_offset + char_bytes;
+}
+
 static PyObject *
 match_get_group_value(MatchObject *self, Py_ssize_t index)
 {
@@ -705,6 +751,10 @@ typedef struct {
     Py_ssize_t index_to_byte_cached_byte;
     int utf8_is_ascii;
     PyObject *public_pattern;
+    int retry_nonempty;
+#if defined(Py_GIL_DISABLED)
+    PyThread_type_lock lock;
+#endif
 } FindIterObject;
 
 /*
@@ -933,6 +983,12 @@ FindIter_dealloc(FindIterObject *self)
         jit_stack_cache_release(self->jit_stack);
         self->jit_stack = NULL;
     }
+#if defined(Py_GIL_DISABLED)
+    if (self->lock != NULL) {
+        PyThread_free_lock(self->lock);
+        self->lock = NULL;
+    }
+#endif
     Py_XDECREF(self->public_pattern);
     Py_XDECREF(self->pattern);
     Py_XDECREF(self->subject);
@@ -948,8 +1004,9 @@ FindIter_iter(PyObject *self)
 }
 
 static PyObject *
-FindIter_iternext(FindIterObject *self)
+FindIter_iternext_unlocked(FindIterObject *self)
 {
+retry:
     if (self->exhausted) {
         return NULL;
     }
@@ -959,7 +1016,7 @@ FindIter_iternext(FindIterObject *self)
         return NULL;
     }
 
-    if (self->has_endpos && self->current_pos >= self->resolved_end) {
+    if (self->has_endpos && self->current_pos > self->resolved_end) {
         self->exhausted = 1;
         return NULL;
     }
@@ -971,6 +1028,9 @@ FindIter_iternext(FindIterObject *self)
 
     const char *buffer = self->utf8_data;
     uint32_t options = self->base_options;
+    if (self->retry_nonempty) {
+        options |= PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;
+    }
     int rc = 0;
     PCRE2_SIZE exec_length = (PCRE2_SIZE)self->subject_length_bytes;
     uint32_t available_pairs = 0;
@@ -984,7 +1044,8 @@ FindIter_iternext(FindIterObject *self)
         }
     }
 
-    if (pattern_jit_get(self->pattern)) {
+    int use_jit = pattern_jit_get(self->pattern) && !self->retry_nonempty;
+    if (use_jit) {
         if (self->match_context == NULL) {
             self->match_context = pcre2_match_context_create(NULL);
             if (self->match_context == NULL) {
@@ -1011,6 +1072,7 @@ FindIter_iternext(FindIterObject *self)
 
         if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
             pattern_jit_set(self->pattern, 0);
+            use_jit = 0;
             if (self->jit_stack != NULL) {
                 if (self->match_context != NULL) {
                     pcre2_jit_stack_assign(self->match_context, NULL, NULL);
@@ -1019,8 +1081,7 @@ FindIter_iternext(FindIterObject *self)
                 self->jit_stack = NULL;
             }
         } else if (rc == PCRE2_ERROR_NOMATCH) {
-            self->exhausted = 1;
-            return NULL;
+            goto no_match;
         } else if (rc < 0) {
             PCRE2_SIZE error_offset = pcre2_get_startchar(self->match_data);
             raise_pcre_error("jit_match", rc, error_offset);
@@ -1030,7 +1091,7 @@ FindIter_iternext(FindIterObject *self)
         }
     }
 
-    if (!pattern_jit_get(self->pattern)) {
+    if (!use_jit) {
         PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->pattern->code,
                                                  (PCRE2_SPTR)buffer,
                                                  exec_length,
@@ -1041,8 +1102,7 @@ FindIter_iternext(FindIterObject *self)
                                                exec_length);
 
         if (rc == PCRE2_ERROR_NOMATCH) {
-            self->exhausted = 1;
-            return NULL;
+            goto no_match;
         }
 
         if (rc < 0) {
@@ -1092,48 +1152,54 @@ matched:
         }
     }
 
-    Py_ssize_t next_pos = end_index;
-    if (self->has_endpos && end_index >= self->resolved_end) {
-        next_pos = end_index;
-    } else if (end_index == start_index) {
-        next_pos = end_index + 1;
-    }
+    self->current_pos = end_index;
+    self->current_byte = end_byte;
+    self->retry_nonempty = (end_index == start_index);
 
-    if (next_pos <= self->current_pos) {
-        next_pos = self->current_pos + 1;
-    }
+    self->byte_to_index_cached_index = self->current_pos;
+    self->byte_to_index_cached_byte = self->current_byte;
+    self->index_to_byte_cached_index = self->current_pos;
+    self->index_to_byte_cached_byte = self->current_byte;
 
-    self->current_pos = next_pos;
+    return (PyObject *)match;
 
-    if (self->subject_is_bytes) {
-        if (self->current_pos <= self->logical_length) {
-            if (self->current_pos < 0) {
-                self->current_pos = 0;
-            }
-            self->current_byte = self->current_pos;
+no_match:
+    if (self->retry_nonempty) {
+        self->retry_nonempty = 0;
+        if (self->current_pos >= self->logical_length ||
+            (self->has_endpos && self->current_pos >= self->resolved_end)) {
+            self->exhausted = 1;
+            return NULL;
+        }
+
+        self->current_pos += 1;
+        if (self->subject_is_bytes || self->utf8_is_ascii) {
+            self->current_byte += 1;
         } else {
-            self->current_byte = self->subject_length_bytes;
+            self->current_byte = finditer_index_to_byte(self, self->current_pos);
         }
         self->byte_to_index_cached_index = self->current_pos;
         self->byte_to_index_cached_byte = self->current_byte;
         self->index_to_byte_cached_index = self->current_pos;
         self->index_to_byte_cached_byte = self->current_byte;
-    } else {
-        if (self->current_pos <= self->logical_length) {
-            Py_ssize_t next_byte = finditer_index_to_byte(self, self->current_pos);
-            self->current_byte = next_byte;
-            self->byte_to_index_cached_index = self->current_pos;
-            self->byte_to_index_cached_byte = self->current_byte;
-        } else {
-            self->current_byte = self->subject_length_bytes;
-            self->byte_to_index_cached_index = self->logical_length;
-            self->byte_to_index_cached_byte = self->subject_length_bytes;
-            self->index_to_byte_cached_index = self->logical_length;
-            self->index_to_byte_cached_byte = self->subject_length_bytes;
-        }
+        goto retry;
     }
 
-    return (PyObject *)match;
+    self->exhausted = 1;
+    return NULL;
+}
+
+static PyObject *
+FindIter_iternext(FindIterObject *self)
+{
+#if defined(Py_GIL_DISABLED)
+    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+    PyObject *result = FindIter_iternext_unlocked(self);
+    PyThread_release_lock(self->lock);
+    return result;
+#else
+    return FindIter_iternext_unlocked(self);
+#endif
 }
 
 static PyTypeObject FindIterType = {
@@ -1171,11 +1237,13 @@ create_match_object(PatternObject *pattern,
     if (ovec_count == 0) {
         ovec_count = 1;
     }
-    if (ovec_count > (SIZE_MAX / sizeof(Py_ssize_t) / 2)) {
+#if SIZE_MAX < UINT64_MAX
+    if ((uint64_t)ovec_count > (uint64_t)(SIZE_MAX / sizeof(Py_ssize_t) / 2)) {
         PyErr_NoMemory();
         PyObject_Del(match);
         return NULL;
     }
+#endif
     size_t alloc_pairs = (size_t)ovec_count * 2;
     match->ovector = pcre_malloc(alloc_pairs * sizeof(Py_ssize_t));
     if (match->ovector == NULL) {
@@ -1256,6 +1324,14 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->index_to_byte_cached_byte = 0;
     iter->utf8_is_ascii = 0;
     iter->public_pattern = NULL;
+    iter->retry_nonempty = 0;
+#if defined(Py_GIL_DISABLED)
+    iter->lock = PyThread_allocate_lock();
+    if (iter->lock == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+#endif
 
     if (public_pattern != NULL && public_pattern != Py_None) {
         Py_INCREF(public_pattern);
@@ -1331,10 +1407,7 @@ Pattern_create_finditer(PatternObject *pattern,
     Py_ssize_t logical_length = iter->logical_length;
 
     if (pos < 0) {
-        pos += logical_length;
-        if (pos < 0) {
-            pos = 0;
-        }
+        pos = 0;
     }
     if (pos > logical_length) {
         pos = logical_length;
@@ -1344,14 +1417,14 @@ Pattern_create_finditer(PatternObject *pattern,
     Py_ssize_t resolved_end_byte = iter->subject_length_bytes;
     int has_endpos = 0;
 
+    int impossible_range = 0;
     if (endpos >= 0) {
         has_endpos = 1;
         if (endpos > logical_length) {
             endpos = logical_length;
         }
         if (endpos < pos) {
-            PyErr_SetString(PyExc_ValueError, "endpos must be >= pos");
-            goto error;
+            impossible_range = 1;
         }
         resolved_end = endpos;
     }
@@ -1372,7 +1445,8 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->resolved_end = resolved_end;
     iter->resolved_end_byte = resolved_end_byte;
     iter->has_endpos = has_endpos;
-    iter->exhausted = (has_endpos && pos >= resolved_end);
+    iter->exhausted = impossible_range;
+    iter->retry_nonempty = 0;
 
     iter->byte_to_index_cached_index = pos;
     iter->byte_to_index_cached_byte = current_byte;
@@ -1459,6 +1533,12 @@ error:
     Py_XDECREF(iter->utf8_owner);
     Py_XDECREF(iter->subject);
     Py_XDECREF(iter->pattern);
+#if defined(Py_GIL_DISABLED)
+    if (iter->lock != NULL) {
+        PyThread_free_lock(iter->lock);
+        iter->lock = NULL;
+    }
+#endif
     PyObject_Del(iter);
     return NULL;
 }
@@ -1656,10 +1736,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     }
 
     if (pos < 0) {
-        pos += logical_length;
-        if (pos < 0) {
-            pos = 0;
-        }
+        pos = 0;
     }
     if (pos > logical_length) {
         Py_DECREF(utf8_owner);
@@ -1673,8 +1750,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         }
         if (adjusted_endpos < pos) {
             Py_DECREF(utf8_owner);
-            PyErr_SetString(PyExc_ValueError, "endpos must be >= pos");
-            return NULL;
+            Py_RETURN_NONE;
         }
     }
 
@@ -2069,8 +2145,8 @@ findall_build_value_from_ovector(PyObject *subject_obj,
     if (ovec_count == 2) {
         Py_ssize_t start = (Py_ssize_t)ovector[2];
         Py_ssize_t end = (Py_ssize_t)ovector[3];
-        return extract_value_from_offsets(subject_obj, utf8_data, subject_is_bytes,
-                                            subject_is_ascii, start, end);
+        return extract_findall_group_from_offsets(utf8_data, subject_is_bytes,
+                                                   subject_is_ascii, start, end);
     }
 
     PyObject *tuple = PyTuple_New((Py_ssize_t)ovec_count - 1);
@@ -2080,8 +2156,8 @@ findall_build_value_from_ovector(PyObject *subject_obj,
     for (uint32_t i = 1; i < ovec_count; ++i) {
         Py_ssize_t start = (Py_ssize_t)ovector[(size_t)i * 2];
         Py_ssize_t end = (Py_ssize_t)ovector[(size_t)i * 2 + 1];
-        PyObject *value = extract_value_from_offsets(subject_obj, utf8_data, subject_is_bytes,
-                                                      subject_is_ascii, start, end);
+        PyObject *value = extract_findall_group_from_offsets(utf8_data, subject_is_bytes,
+                                                              subject_is_ascii, start, end);
         if (value == NULL) {
             Py_DECREF(tuple);
             return NULL;
@@ -2168,10 +2244,7 @@ Pattern_findall(PatternObject *self,
     }
 
     if (pos < 0) {
-        pos += logical_length;
-        if (pos < 0) {
-            pos = 0;
-        }
+        pos = 0;
     }
     if (pos > logical_length) {
         pos = logical_length;
@@ -2186,8 +2259,8 @@ Pattern_findall(PatternObject *self,
             adjusted_endpos = logical_length;
         }
         if (adjusted_endpos < pos) {
-            PyErr_SetString(PyExc_ValueError, "endpos must be >= pos");
-            goto error;
+            result = PyList_New(0);
+            goto cleanup;
         }
     }
 
@@ -2307,30 +2380,35 @@ Pattern_findall(PatternObject *self,
 
     Py_ssize_t current_byte = byte_start;
     Py_ssize_t current_pos = pos;
+    int retry_nonempty = 0;
 
     while (1) {
         if (current_byte > subject_length_bytes) {
             break;
         }
-        if (has_endpos && current_pos >= adjusted_endpos) {
+        if (has_endpos && current_pos > adjusted_endpos) {
             break;
         }
         if (!has_endpos && current_pos > logical_length) {
             break;
         }
-        if (has_endpos && current_byte >= byte_end) {
+        if (has_endpos && current_byte > byte_end) {
             break;
         }
 
         int rc = 0;
-        int use_jit = attempt_jit;
+        uint32_t current_options = match_options;
+        if (retry_nonempty) {
+            current_options |= PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;
+        }
+        int use_jit = attempt_jit && !retry_nonempty;
 
         if (use_jit) {
             rc = pcre2_jit_match(self->code,
                                  (PCRE2_SPTR)utf8_data,
                                  exec_length,
                                  (PCRE2_SIZE)current_byte,
-                                 match_options,
+                                 current_options,
                                  match_data,
                                  match_context);
 
@@ -2346,7 +2424,7 @@ Pattern_findall(PatternObject *self,
                 }
                 use_jit = 0;
             } else if (rc == PCRE2_ERROR_NOMATCH) {
-                break;
+                goto findall_no_match;
             } else if (rc < 0) {
                 PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
                 raise_pcre_error("jit_match", rc, error_offset);
@@ -2359,12 +2437,12 @@ Pattern_findall(PatternObject *self,
                              (PCRE2_SPTR)utf8_data,
                              exec_length,
                              (PCRE2_SIZE)current_byte,
-                             match_options,
+                             current_options,
                              match_data,
                              match_context);
 
             if (rc == PCRE2_ERROR_NOMATCH) {
-                break;
+                goto findall_no_match;
             }
             if (rc < 0) {
                 PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
@@ -2403,55 +2481,25 @@ Pattern_findall(PatternObject *self,
             end_index = current_pos + utf8_offset_to_index(utf8_data + current_byte, matched_len);
         }
 
-        Py_ssize_t next_pos = end_index;
-        if (has_endpos && next_pos >= adjusted_endpos) {
-            next_pos = end_index;
-        } else if (start_byte == end_byte) {
-            next_pos = end_index + 1;
-        }
+        current_pos = end_index;
+        current_byte = end_byte;
+        retry_nonempty = (start_byte == end_byte);
+        continue;
 
-        if (next_pos <= current_pos) {
-            next_pos = current_pos + 1;
+findall_no_match:
+        if (!retry_nonempty) {
+            break;
         }
-
-        Py_ssize_t next_byte = current_byte;
-        if (treat_as_bytes) {
-            next_byte = next_pos;
-            if (next_byte > subject_length_bytes) {
-                next_byte = subject_length_bytes;
-            }
-            if (next_byte < 0) {
-                next_byte = 0;
-            }
-        } else {
-            if (next_pos >= logical_length) {
-                next_byte = subject_length_bytes;
-            } else if (next_pos <= 0) {
-                next_byte = 0;
-            } else if (start_byte != end_byte) {
-                next_byte = end_byte;
-            } else {
-                next_byte = end_byte;
-                if (next_byte < subject_length_bytes) {
-                    unsigned char lead = (unsigned char)utf8_data[next_byte];
-                    Py_ssize_t char_bytes = 1;
-                    if ((lead & 0xE0) == 0xC0) {
-                        char_bytes = 2;
-                    } else if ((lead & 0xF0) == 0xE0) {
-                        char_bytes = 3;
-                    } else if ((lead & 0xF8) == 0xF0) {
-                        char_bytes = 4;
-                    }
-                    if (next_byte + char_bytes > subject_length_bytes) {
-                        char_bytes = subject_length_bytes - next_byte;
-                    }
-                    next_byte += char_bytes;
-                }
-            }
+        retry_nonempty = 0;
+        if (current_pos >= logical_length ||
+            (has_endpos && current_pos >= adjusted_endpos)) {
+            break;
         }
-
-        current_pos = next_pos;
-        current_byte = next_byte;
+        current_pos += 1;
+        current_byte = advance_one_character(utf8_data,
+                                             subject_length_bytes,
+                                             current_byte,
+                                             treat_as_bytes);
     }
 
     goto cleanup;
@@ -2506,7 +2554,6 @@ Pattern_substitute(PatternObject *self,
     const char *subject_data = NULL;
     Py_ssize_t subject_length = 0;
     int subject_is_bytes = 0;
-    int subject_is_ascii = 0;
 
     const char *repl_data = NULL;
     Py_ssize_t repl_length = 0;
@@ -2580,7 +2627,6 @@ Pattern_substitute(PatternObject *self,
         Py_INCREF(subject_obj);
         utf8_owner = subject_obj;
         if (PyUnicode_IS_ASCII(subject_obj)) {
-            subject_is_ascii = 1;
             subject_data = (const char *)PyUnicode_1BYTE_DATA(subject_obj);
             subject_length = PyUnicode_GET_LENGTH(subject_obj);
         } else {
@@ -2629,11 +2675,13 @@ Pattern_substitute(PatternObject *self,
         sub_options |= PCRE2_NO_UTF_CHECK;
     }
 
-    PCRE2_SIZE outlen = (PCRE2_SIZE)(subject_length + repl_length + 16);
-    if (outlen < (PCRE2_SIZE)subject_length) {
+    if (repl_length > PY_SSIZE_T_MAX - 16 ||
+        subject_length > PY_SSIZE_T_MAX - repl_length - 16) {
         PyErr_NoMemory();
         goto error;
     }
+    PCRE2_SIZE initial_outlen = (PCRE2_SIZE)(subject_length + repl_length + 16);
+    PCRE2_SIZE outlen = initial_outlen;
     PCRE2_UCHAR *out = (PCRE2_UCHAR *)PyMem_Malloc(outlen);
     if (out == NULL) {
         PyErr_NoMemory();
@@ -2655,10 +2703,20 @@ Pattern_substitute(PatternObject *self,
         if (rc == PCRE2_ERROR_NOMEMORY) {
             PCRE2_SIZE required = outlen;
             if (required == (PCRE2_SIZE)-1) {
-                required = (PCRE2_SIZE)(subject_length + repl_length + 16) + (PCRE2_SIZE)subject_length;
+                if ((PCRE2_SIZE)subject_length > (PCRE2_SIZE)PY_SSIZE_T_MAX - initial_outlen) {
+                    PyMem_Free(out);
+                    PyErr_NoMemory();
+                    goto error;
+                }
+                required = initial_outlen + (PCRE2_SIZE)subject_length;
             }
-            if (required < (PCRE2_SIZE)(subject_length + repl_length + 16)) {
-                required = (PCRE2_SIZE)(subject_length + repl_length + 16);
+            if (required < initial_outlen) {
+                required = initial_outlen;
+            }
+            if (required > (PCRE2_SIZE)PY_SSIZE_T_MAX) {
+                PyMem_Free(out);
+                PyErr_NoMemory();
+                goto error;
             }
             void *new_out = PyMem_Realloc(out, required);
             if (new_out == NULL) {
@@ -2680,7 +2738,8 @@ Pattern_substitute(PatternObject *self,
         PyObject *out_obj = NULL;
         if (subject_is_bytes) {
             out_obj = PyBytes_FromStringAndSize((const char *)out, (Py_ssize_t)outlen);
-        } else if (subject_is_ascii) {
+        } else if (ascii_prefix_length((const char *)out, (Py_ssize_t)outlen) ==
+                   (Py_ssize_t)outlen) {
             out_obj = PyUnicode_New((Py_ssize_t)outlen, 127);
             if (out_obj != NULL) {
                 memcpy(PyUnicode_1BYTE_DATA(out_obj), out, (size_t)outlen);
@@ -2871,6 +2930,7 @@ Pattern_split(PatternObject *self,
     Py_ssize_t last_end = 0;
     Py_ssize_t current_byte = 0;
     Py_ssize_t splits_done = 0;
+    int retry_nonempty = 0;
 
     while (1) {
         if (maxsplit > 0 && splits_done >= maxsplit) {
@@ -2881,13 +2941,17 @@ Pattern_split(PatternObject *self,
         }
 
         int rc = 0;
-        int use_jit = attempt_jit;
+        uint32_t current_options = options;
+        if (retry_nonempty) {
+            current_options |= PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED;
+        }
+        int use_jit = attempt_jit && !retry_nonempty;
         if (use_jit) {
             rc = pcre2_jit_match(self->code,
                                  (PCRE2_SPTR)utf8_data,
                                  (PCRE2_SIZE)subject_length_bytes,
                                  (PCRE2_SIZE)current_byte,
-                                 options,
+                                 current_options,
                                  match_data,
                                  match_context);
             if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
@@ -2902,7 +2966,7 @@ Pattern_split(PatternObject *self,
                 }
                 use_jit = 0;
             } else if (rc == PCRE2_ERROR_NOMATCH) {
-                break;
+                goto split_no_match;
             } else if (rc < 0) {
                 PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
                 raise_pcre_error("jit_match", rc, error_offset);
@@ -2915,11 +2979,11 @@ Pattern_split(PatternObject *self,
                              (PCRE2_SPTR)utf8_data,
                              (PCRE2_SIZE)subject_length_bytes,
                              (PCRE2_SIZE)current_byte,
-                             options,
+                             current_options,
                              match_data,
                              match_context);
             if (rc == PCRE2_ERROR_NOMATCH) {
-                break;
+                goto split_no_match;
             }
             if (rc < 0) {
                 PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
@@ -2967,31 +3031,22 @@ Pattern_split(PatternObject *self,
 
         last_end = end_byte;
         splits_done += 1;
+        current_byte = end_byte;
+        retry_nonempty = (start_byte == end_byte);
+        continue;
 
-        if (start_byte == end_byte) {
-            if (end_byte >= subject_length_bytes) {
-                current_byte = subject_length_bytes + 1;
-            } else if (subject_is_bytes || subject_is_ascii) {
-                current_byte = end_byte + 1;
-            } else {
-                current_byte = end_byte;
-                unsigned char lead = (unsigned char)utf8_data[current_byte];
-                Py_ssize_t char_bytes = 1;
-                if ((lead & 0xE0) == 0xC0) {
-                    char_bytes = 2;
-                } else if ((lead & 0xF0) == 0xE0) {
-                    char_bytes = 3;
-                } else if ((lead & 0xF8) == 0xF0) {
-                    char_bytes = 4;
-                }
-                if (current_byte + char_bytes > subject_length_bytes) {
-                    char_bytes = subject_length_bytes - current_byte;
-                }
-                current_byte += char_bytes;
-            }
-        } else {
-            current_byte = end_byte;
+split_no_match:
+        if (!retry_nonempty) {
+            break;
         }
+        retry_nonempty = 0;
+        if (current_byte >= subject_length_bytes) {
+            break;
+        }
+        current_byte = advance_one_character(utf8_data,
+                                             subject_length_bytes,
+                                             current_byte,
+                                             subject_is_bytes || subject_is_ascii);
     }
 
     PyObject *tail = extract_value_from_offsets(subject_obj, utf8_data, subject_is_bytes,

@@ -99,3 +99,30 @@ def test_gil_zero_compile_and_match_in_threads(_skip_without_gil_zero) -> None:
 
     _spawn_threads(worker, count=8)
     assert not errors
+
+
+def test_gil_zero_shared_finditer_is_serialized(_skip_without_gil_zero) -> None:
+    subject = " ".join(f"word{i}" for i in range(1000))
+    pattern = pcre.compile(r"\w+", flags=Flag.THREADS)
+    iterator = pattern.finditer(subject)
+    spans: list[tuple[int, int]] = []
+    errors: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            while True:
+                try:
+                    match = next(iterator)
+                except StopIteration:
+                    return
+                with lock:
+                    spans.append(match.span())
+        except Exception as exc:
+            with lock:
+                errors.append(str(exc))
+
+    _spawn_threads(worker, count=8)
+    expected = [match.span() for match in pattern.finditer(subject)]
+    assert not errors
+    assert sorted(spans) == expected
