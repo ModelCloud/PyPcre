@@ -252,6 +252,7 @@ Match_dealloc(MatchObject *self)
     Py_XDECREF(self->public_pattern);
     Py_XDECREF(self->subject);
     Py_XDECREF(self->utf8_owner);
+    Py_XDECREF(self->regs_cache);
     pcre_free(self->ovector);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -327,6 +328,30 @@ resolve_group_key(MatchObject *self, PyObject *key, Py_ssize_t *index)
         const char *key_text = PyUnicode_AsUTF8AndSize(key, &key_length);
         if (key_text == NULL) {
             return -1;
+        }
+
+        /* The immutable groupindex mapping handles the overwhelmingly common
+           unique-name case in O(1).  If the selected entry did not
+           participate, retain the PCRE2 name-table walk below so DUPNAMES
+           still selects the participating capture exactly like ``re``. */
+        if (PyUnicode_CheckExact(key)) {
+            PyObject *mapped = PyDict_GetItemWithError(self->pattern->groupindex, key);
+            if (mapped != NULL) {
+                Py_ssize_t candidate = PyLong_AsSsize_t(mapped);
+                if (candidate == -1 && PyErr_Occurred()) {
+                    return -1;
+                }
+                if (candidate >= 0 && (size_t)candidate < self->ovec_count) {
+                    Py_ssize_t start = self->ovector[(size_t)candidate * 2];
+                    Py_ssize_t end = self->ovector[(size_t)candidate * 2 + 1];
+                    if (start >= 0 && end >= 0) {
+                        *index = candidate;
+                        return 0;
+                    }
+                }
+            } else if (PyErr_Occurred()) {
+                return -1;
+            }
         }
 
         uint32_t name_count = 0;
@@ -494,14 +519,13 @@ match_get_group_value(MatchObject *self, Py_ssize_t index)
 }
 
 static PyObject *
-Match_group(MatchObject *self, PyObject *args)
+Match_group_fast(MatchObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
     if (nargs == 0) {
         return match_get_group_value(self, 0);
     }
     if (nargs == 1) {
-        PyObject *key = PyTuple_GET_ITEM(args, 0);
+        PyObject *key = args[0];
         Py_ssize_t index = 0;
         if (resolve_group_key(self, key, &index) < 0) {
             return NULL;
@@ -513,7 +537,7 @@ Match_group(MatchObject *self, PyObject *args)
         return NULL;
     }
     for (Py_ssize_t i = 0; i < nargs; ++i) {
-        PyObject *key = PyTuple_GET_ITEM(args, i);
+        PyObject *key = args[i];
         Py_ssize_t index = 0;
         if (resolve_group_key(self, key, &index) < 0) {
             Py_DECREF(result);
@@ -527,6 +551,78 @@ Match_group(MatchObject *self, PyObject *args)
         PyTuple_SET_ITEM(result, i, value);
     }
     return result;
+}
+
+static PyObject *
+Match_span_fast(MatchObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError, "span expected at most 1 argument, got %zd", nargs);
+        return NULL;
+    }
+    PyObject *key = nargs == 0 ? NULL : args[0];
+    Py_ssize_t index = 0;
+    if (resolve_group_key(self, key, &index) < 0) {
+        return NULL;
+    }
+    Py_ssize_t start = 0;
+    Py_ssize_t end = 0;
+    int rc = match_resolve_span(self, index, &start, &end, 1);
+    if (rc < 0) {
+        return NULL;
+    }
+    if (rc > 0) {
+        Py_RETURN_NONE;
+    }
+    return Py_BuildValue("(nn)", start, end);
+}
+
+static PyObject *
+Match_start_fast(MatchObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError, "start expected at most 1 argument, got %zd", nargs);
+        return NULL;
+    }
+    PyObject *key = nargs == 0 ? NULL : args[0];
+    Py_ssize_t index = 0;
+    if (resolve_group_key(self, key, &index) < 0) {
+        return NULL;
+    }
+    Py_ssize_t start = 0;
+    Py_ssize_t end = 0;
+    int rc = match_resolve_span(self, index, &start, &end, 1);
+    if (rc < 0) {
+        return NULL;
+    }
+    if (rc > 0) {
+        Py_RETURN_NONE;
+    }
+    return PyLong_FromSsize_t(start);
+}
+
+static PyObject *
+Match_end_fast(MatchObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError, "end expected at most 1 argument, got %zd", nargs);
+        return NULL;
+    }
+    PyObject *key = nargs == 0 ? NULL : args[0];
+    Py_ssize_t index = 0;
+    if (resolve_group_key(self, key, &index) < 0) {
+        return NULL;
+    }
+    Py_ssize_t start = 0;
+    Py_ssize_t end = 0;
+    int rc = match_resolve_span(self, index, &start, &end, 1);
+    if (rc < 0) {
+        return NULL;
+    }
+    if (rc > 0) {
+        Py_RETURN_NONE;
+    }
+    return PyLong_FromSsize_t(end);
 }
 
 static PyObject *
@@ -558,55 +654,6 @@ Match_groups(MatchObject *self, PyObject *args, PyObject *kwargs)
     }
 
     return result;
-}
-
-static PyObject *
-Match_span(MatchObject *self, PyObject *args)
-{
-    PyObject *key = NULL;
-    if (!PyArg_ParseTuple(args, "|O", &key)) {
-        return NULL;
-    }
-    Py_ssize_t index = 0;
-    if (resolve_group_key(self, key, &index) < 0) {
-        return NULL;
-    }
-    Py_ssize_t start = 0;
-    Py_ssize_t end = 0;
-    int rc = match_resolve_span(self, index, &start, &end, 1);
-    if (rc < 0) {
-        return NULL;
-    }
-    if (rc > 0) {
-        Py_RETURN_NONE;
-    }
-    return Py_BuildValue("(nn)", start, end);
-}
-
-static PyObject *
-Match_start(MatchObject *self, PyObject *args)
-{
-    PyObject *span = Match_span(self, args);
-    if (span == NULL || span == Py_None) {
-        return span;
-    }
-    PyObject *value = PyTuple_GET_ITEM(span, 0);
-    Py_INCREF(value);
-    Py_DECREF(span);
-    return value;
-}
-
-static PyObject *
-Match_end(MatchObject *self, PyObject *args)
-{
-    PyObject *span = Match_span(self, args);
-    if (span == NULL || span == Py_None) {
-        return span;
-    }
-    PyObject *value = PyTuple_GET_ITEM(span, 1);
-    Py_INCREF(value);
-    Py_DECREF(span);
-    return value;
 }
 
 static PyObject *
@@ -958,6 +1005,17 @@ Match_get_lastgroup(MatchObject *self, void *closure)
 static PyObject *
 Match_get_regs(MatchObject *self, void *closure)
 {
+    PyObject *cached = NULL;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (self->regs_cache != NULL) {
+        cached = self->regs_cache;
+        Py_INCREF(cached);
+    }
+    Py_END_CRITICAL_SECTION();
+    if (cached != NULL) {
+        return cached;
+    }
+
     PyObject *result = PyTuple_New(self->ovec_count);
     if (result == NULL) {
         return NULL;
@@ -978,7 +1036,19 @@ Match_get_regs(MatchObject *self, void *closure)
         PyTuple_SET_ITEM(result, index, span);
     }
 
-    return result;
+    /* Match snapshots are immutable. Keep one tuple so repeated ``regs``
+       reads avoid rebuilding every span; the critical section makes the
+       first publication safe on free-threaded CPython. */
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (self->regs_cache == NULL) {
+        self->regs_cache = result;
+        Py_INCREF(result);
+    }
+    cached = self->regs_cache;
+    Py_INCREF(cached);
+    Py_END_CRITICAL_SECTION();
+    Py_DECREF(result);
+    return cached;
 }
 
 static PyObject *
@@ -1045,12 +1115,12 @@ match_set_public_pattern(MatchObject *self, PyObject *public_pattern)
 }
 
 static PyMethodDef Match_methods[] = {
-    {"group", (PyCFunction)Match_group, METH_VARARGS, PyDoc_STR("Return one or more capture groups.")},
+    {"group", (PyCFunction)(void(*)(void))Match_group_fast, METH_FASTCALL, PyDoc_STR("Return one or more capture groups.")},
     {"groups", (PyCFunction)Match_groups, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return all capture groups as a tuple." )},
     {"groupdict", (PyCFunction)Match_groupdict, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return a dict for named capture groups." )},
-    {"span", (PyCFunction)Match_span, METH_VARARGS, PyDoc_STR("Return the (start, end) span for a group." )},
-    {"start", (PyCFunction)Match_start, METH_VARARGS, PyDoc_STR("Return the start index for a group." )},
-    {"end", (PyCFunction)Match_end, METH_VARARGS, PyDoc_STR("Return the end index for a group." )},
+    {"span", (PyCFunction)(void(*)(void))Match_span_fast, METH_FASTCALL, PyDoc_STR("Return the (start, end) span for a group." )},
+    {"start", (PyCFunction)(void(*)(void))Match_start_fast, METH_FASTCALL, PyDoc_STR("Return the start index for a group." )},
+    {"end", (PyCFunction)(void(*)(void))Match_end_fast, METH_FASTCALL, PyDoc_STR("Return the end index for a group." )},
     {"expand", (PyCFunction)Match_expand, METH_O, PyDoc_STR("Apply a replacement template to the match." )},
     {"__copy__", (PyCFunction)Match_copy, METH_NOARGS, NULL},
     {"__deepcopy__", (PyCFunction)Match_deepcopy, METH_O, NULL},
@@ -1651,6 +1721,7 @@ create_match_object(PatternObject *pattern,
     match->public_endpos = endpos;
     match->replay_options = replay_options;
     match->lastindex_cache = -2;
+    match->regs_cache = NULL;
     /* Anything that isn't str (bytes, or a buffer-protocol object such as
        mmap.mmap) is treated as raw byte data: offsets are byte offsets and
        group values are returned as bytes. */
@@ -3577,6 +3648,46 @@ Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t n
     return Pattern_substitute(self, args[0], args[1], 0);
 }
 
+/*
+ * These lookup helpers are intentionally private.  They are used only by the
+ * high-level parallel fan-out when every optional argument has its default
+ * value, avoiding a Python wrapper call and its keyword dictionary per item.
+ * The owner is still supplied so Match.re retains the public Pattern wrapper.
+ */
+static PyObject *
+Pattern_lookup_fast(PatternObject *self,
+                   PyObject *const *args,
+                   Py_ssize_t nargs,
+                   int mode,
+                   const char *name)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "%s() takes exactly 2 positional arguments (%zd given)",
+                     name, nargs);
+        return NULL;
+    }
+    return Pattern_execute(self, args[0], 0, -1, 0, mode, args[1]);
+}
+
+static PyObject *
+Pattern_match_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    return Pattern_lookup_fast(self, args, nargs, EXEC_MODE_MATCH, "_match_fast");
+}
+
+static PyObject *
+Pattern_search_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    return Pattern_lookup_fast(self, args, nargs, EXEC_MODE_SEARCH, "_search_fast");
+}
+
+static PyObject *
+Pattern_fullmatch_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    return Pattern_lookup_fast(self, args, nargs, EXEC_MODE_FULLMATCH, "_fullmatch_fast");
+}
+
 static PyObject *
 Pattern_finditer_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
@@ -3628,6 +3739,9 @@ static PyMethodDef Pattern_methods[] = {
     {"fullmatch", (PyCFunction)Pattern_fullmatch_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Require the pattern to match the entire subject." )},
     {"_findall_fast", (PyCFunction)(void(*)(void))Pattern_findall_fast, METH_FASTCALL, NULL},
     {"_substitute_fast", (PyCFunction)(void(*)(void))Pattern_substitute_fast, METH_FASTCALL, NULL},
+    {"_match_fast", (PyCFunction)(void(*)(void))Pattern_match_fast, METH_FASTCALL, NULL},
+    {"_search_fast", (PyCFunction)(void(*)(void))Pattern_search_fast, METH_FASTCALL, NULL},
+    {"_fullmatch_fast", (PyCFunction)(void(*)(void))Pattern_fullmatch_fast, METH_FASTCALL, NULL},
     {"_finditer_fast", (PyCFunction)(void(*)(void))Pattern_finditer_fast, METH_FASTCALL, NULL},
     {"_split_fast", (PyCFunction)(void(*)(void))Pattern_split_fast, METH_FASTCALL, NULL},
     {NULL, NULL, 0, NULL},

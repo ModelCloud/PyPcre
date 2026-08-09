@@ -699,6 +699,13 @@ class Pattern:
         )
 
 
+# Keep stable references so optional C dispatch does not bypass runtime
+# instrumentation or tests that replace a public wrapper method.
+_PATTERN_METHODS_FOR_FAST = {
+    name: getattr(Pattern, name) for name in ("match", "search", "fullmatch", "findall")
+}
+
+
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     # Fast path for the dominant shape: compile(pattern) with default flags.
     if flags == 0:
@@ -932,6 +939,30 @@ def parallel_map(
 
     executor = ensure_thread_pool(max_workers)
 
+    # For the common default lookup shape, the C backend can execute directly
+    # without rebuilding the Python wrapper's keyword arguments for every
+    # subject.  Restrict this to exact text/bytes values: the wrapper's normal
+    # path preserves buffer and subclass coercion semantics that the private
+    # vectorcall entry point intentionally does not duplicate.
+    fast_method = None
+    fast_method_takes_owner = False
+    if (
+        pattern_obj._is_c_pattern
+        and method_name in {"match", "search", "fullmatch", "findall"}
+        # Preserve instrumentation/subclass overrides of the public wrapper.
+        # The private C entry points are valid only when dispatch is canonical.
+        and getattr(type(pattern_obj), method_name, None)
+        is _PATTERN_METHODS_FOR_FAST.get(method_name)
+        and type(pos) is int
+        and pos == 0
+        and endpos is None
+        and type(options) is int
+        and options == 0
+        and all(type(subject) in (str, bytes) for subject in materials)
+    ):
+        fast_method = getattr(pattern_obj._pattern, f"_{method_name}_fast", None)
+        fast_method_takes_owner = method_name != "findall"
+
     # Submit bounded batches instead of one Future per subject.  The latter
     # makes small/medium maps dominated by Future allocation and queue-lock
     # traffic (especially on the free-threaded build), while the actual PCRE2
@@ -943,6 +974,13 @@ def parallel_map(
     chunk_size = (len(materials) + task_count - 1) // task_count
 
     def _run_chunk(start: int, stop: int) -> list[Any]:
+        if fast_method is not None:
+            if fast_method_takes_owner:
+                return [
+                    fast_method(materials[index], pattern_obj)
+                    for index in range(start, stop)
+                ]
+            return [fast_method(materials[index]) for index in range(start, stop)]
         return [
             bound_method(materials[index], pos=pos, endpos=endpos, options=options)
             for index in range(start, stop)

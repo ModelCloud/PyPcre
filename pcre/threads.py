@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,7 @@ _THREAD_POOL_LOCK = threading.RLock()
 _THREAD_POOL: ThreadPoolExecutor | None = None
 _THREAD_POOL_WORKERS: int | None = None
 _THREAD_AUTO_THRESHOLD: int = 60_000
+_PERFORMANCE_CPU_TOTAL: int | None = None
 
 
 def _cpu_total() -> int:
@@ -33,6 +35,27 @@ def threading_supported() -> bool:
     return _cpu_total() >= _MIN_CORES_FOR_THREADS
 
 
+def _performance_cpu_total() -> int:
+    """Return macOS performance-tier logical CPUs when the kernel exposes it."""
+
+    global _PERFORMANCE_CPU_TOTAL
+    if _PERFORMANCE_CPU_TOTAL is not None:
+        return _PERFORMANCE_CPU_TOTAL
+    if sys.platform != "darwin":
+        _PERFORMANCE_CPU_TOTAL = 0
+        return 0
+    try:
+        value = subprocess.check_output(
+            ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        _PERFORMANCE_CPU_TOTAL = max(0, int(value.strip()))
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        _PERFORMANCE_CPU_TOTAL = 0
+    return _PERFORMANCE_CPU_TOTAL
+
+
 _THREADS_DEFAULT: bool = threading_supported() and not (
     hasattr(sys, "_is_gil_enabled") and sys._is_gil_enabled()
 )
@@ -42,6 +65,9 @@ def _max_threads() -> int:
     if not threading_supported():
         return 0
     cpu_total = _cpu_total()
+    performance_total = _performance_cpu_total()
+    if performance_total > 0:
+        return performance_total
     return max(1, cpu_total // 4)
 
 
@@ -92,7 +118,9 @@ def ensure_thread_pool(max_workers: int | None = None) -> ThreadPoolExecutor:
         return _THREAD_POOL
 
 
-def configure_thread_pool(*, max_workers: int | None = None, preload: bool = False) -> int:
+def configure_thread_pool(
+    *, max_workers: int | None = None, preload: bool = False
+) -> int:
     """Set the shared executor size used by :func:`parallel_map`.
 
     Returns the effective worker count after applying the update.
@@ -137,7 +165,9 @@ def get_thread_pool_size() -> int:
     return _THREAD_POOL_WORKERS
 
 
-def configure_threads(*, enabled: bool | None = None, threshold: int | None = None) -> bool:
+def configure_threads(
+    *, enabled: bool | None = None, threshold: int | None = None
+) -> bool:
     """Adjust the global threading defaults and/or auto threshold."""
 
     global _THREADS_DEFAULT

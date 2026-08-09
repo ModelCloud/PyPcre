@@ -152,6 +152,24 @@ def test_duplicate_name_selects_participating_capture(
     assert match.groupdict() == {"x": expected}
 
 
+def test_group_name_subclass_does_not_require_hashing() -> None:
+    class Name(str):
+        def __hash__(self) -> int:
+            raise AssertionError("group lookup should use the PCRE name table")
+
+    match = pcre.compile(r"(?P<name>a)").fullmatch("a")
+    assert match is not None
+    assert match.group(Name("name")) == "a"
+
+
+def test_regs_is_cached_as_an_immutable_match_snapshot() -> None:
+    match = pcre.compile(r"(?P<left>a)(?P<right>b)").fullmatch("ab")
+    assert match is not None
+    first = match.regs
+    assert first == ((0, 2), (0, 1), (1, 2))
+    assert match.regs is first
+
+
 def test_global_inline_options_are_exposed() -> None:
     assert pcre.compile(r"(?i)a").flags & int(pcre.Flag.CASELESS)
     assert not (pcre.compile(r"(?i:a)").flags & int(pcre.Flag.CASELESS))

@@ -11,7 +11,9 @@ import pcre.threads as threads_mod
 import pytest
 
 
-def test_threading_supported_false_on_low_core_count(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_threading_supported_false_on_low_core_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(threads_mod, "_cpu_total", lambda: 4)
     assert threads_mod.threading_supported() is False
 
@@ -27,10 +29,15 @@ def test_configure_threads_toggles_default(monkeypatch: pytest.MonkeyPatch) -> N
         threads_mod.configure_threads(enabled=original)
 
 
-def test_configure_threads_threshold_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_configure_threads_threshold_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original = threads_mod.get_auto_threshold()
     try:
-        assert threads_mod.configure_threads(threshold=1234) == threads_mod.get_thread_default()
+        assert (
+            threads_mod.configure_threads(threshold=1234)
+            == threads_mod.get_thread_default()
+        )
         assert threads_mod.get_auto_threshold() == 1234
 
         with pytest.raises(ValueError):
@@ -88,12 +95,62 @@ def test_shutdown_thread_pool_is_idempotent() -> None:
     threads_mod.shutdown_thread_pool(wait=False)
 
 
-def test_max_threads_zero_when_threading_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_max_threads_zero_when_threading_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(threads_mod, "_cpu_total", lambda: 4)
     assert threads_mod._max_threads() == 0
 
 
-def test_determine_worker_count_requires_supported_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_max_threads_prefers_performance_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(threads_mod, "_cpu_total", lambda: 16)
+    monkeypatch.setattr(threads_mod, "_performance_cpu_total", lambda: 3)
+    assert threads_mod._max_threads() == 3
+
+
+def test_max_threads_falls_back_to_fraction_without_cluster_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(threads_mod, "_cpu_total", lambda: 16)
+    monkeypatch.setattr(threads_mod, "_performance_cpu_total", lambda: 0)
+    assert threads_mod._max_threads() == 4
+
+
+def test_performance_cpu_count_falls_back_when_sysctl_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = threads_mod._PERFORMANCE_CPU_TOTAL
+    try:
+        threads_mod._PERFORMANCE_CPU_TOTAL = None
+        monkeypatch.setattr(threads_mod.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            threads_mod.subprocess,
+            "check_output",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("sysctl")),
+        )
+        assert threads_mod._performance_cpu_total() == 0
+        assert threads_mod._performance_cpu_total() == 0
+    finally:
+        threads_mod._PERFORMANCE_CPU_TOTAL = original
+
+
+def test_performance_cpu_count_is_zero_outside_macos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = threads_mod._PERFORMANCE_CPU_TOTAL
+    try:
+        threads_mod._PERFORMANCE_CPU_TOTAL = None
+        monkeypatch.setattr(threads_mod.sys, "platform", "linux")
+        assert threads_mod._performance_cpu_total() == 0
+    finally:
+        threads_mod._PERFORMANCE_CPU_TOTAL = original
+
+
+def test_determine_worker_count_requires_supported_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(threads_mod, "_max_threads", lambda: 0)
     with pytest.raises(RuntimeError, match="at least 8 CPU cores"):
         threads_mod._determine_worker_count(None)
