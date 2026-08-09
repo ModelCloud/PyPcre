@@ -3547,6 +3547,36 @@ Pattern_split_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     return Pattern_split(self, subject, maxsplit);
 }
 
+/*
+ * Private vectorcall entry points used by the Python wrapper's default-shape
+ * dispatch.  The public methods retain their keyword-compatible ABI; these
+ * helpers only remove temporary tuple/keyword objects from the allocation-heavy
+ * findall/substitute paths.  Replacement and match ownership remain unchanged.
+ */
+static PyObject *
+Pattern_findall_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 1) {
+        PyErr_Format(PyExc_TypeError,
+                     "_findall_fast() takes exactly 1 positional argument (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    return Pattern_findall(self, args[0], 0, -1, 0);
+}
+
+static PyObject *
+Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_substitute_fast() takes exactly 2 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    return Pattern_substitute(self, args[0], args[1], 0);
+}
+
 static PyMethodDef Pattern_methods[] = {
     {"findall", (PyCFunction)Pattern_findall_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return a list of all non-overlapping matches.")},
     {"substitute", (PyCFunction)Pattern_substitute_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Fast substitution using pcre2_substitute.")},
@@ -3555,6 +3585,8 @@ static PyMethodDef Pattern_methods[] = {
     {"match", (PyCFunction)Pattern_match_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match the pattern at the start of the subject.")},
     {"search", (PyCFunction)Pattern_search_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search the subject for the pattern." )},
     {"fullmatch", (PyCFunction)Pattern_fullmatch_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Require the pattern to match the entire subject." )},
+    {"_findall_fast", (PyCFunction)(void(*)(void))Pattern_findall_fast, METH_FASTCALL, NULL},
+    {"_substitute_fast", (PyCFunction)(void(*)(void))Pattern_substitute_fast, METH_FASTCALL, NULL},
     {NULL, NULL, 0, NULL},
 };
 

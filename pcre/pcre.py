@@ -454,6 +454,17 @@ class Pattern:
         backend_findall = getattr(self._pattern, "findall", None)
         if backend_findall is not None:
             compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
+            if (
+                self._is_c_pattern
+                and type(pos) is int
+                and pos == 0
+                and endpos is None
+                and type(options) is int
+                and options == 0
+            ):
+                fast = getattr(self._pattern, "_findall_fast", None)
+                if fast is not None:
+                    return fast(subject)
             try:
                 return backend_findall(subject, pos=pos, endpos=compiled_end, options=options)
             except TypeError:
@@ -546,6 +557,7 @@ class Pattern:
         callable_repl = callable(repl)
         template = None
         parsed_template: List[Any] | None = None
+        has_extended_syntax = False
 
         if not callable_repl:
             if subject_is_bytes:
@@ -557,9 +569,30 @@ class Pattern:
                     raise TypeError("replacement must be str when substituting on text")
                 template = repl
 
+            has_extended_syntax = (
+                b"\\" in template or b"$" in template
+                if subject_is_bytes
+                else str.__contains__(template, "\\")
+                or str.__contains__(template, "$")
+            )
+
             if limit is None:
                 backend_substitute = getattr(self._pattern, "substitute", None)
                 if backend_substitute is not None:
+                    # PCRE2's extended replacement syntax only treats ``\\``
+                    # and ``$`` specially.  A replacement without either is
+                    # already a literal Python template, so skip the costly
+                    # ``sre_parse.parse_template`` round-trip.  This path is
+                    # immutable and per-call, so it remains safe when the same
+                    # Pattern is used concurrently by GIL-free threads.
+                    if not has_extended_syntax:
+                        try:
+                            fast_substitute = getattr(self._pattern, "_substitute_fast", None)
+                            if fast_substitute is not None:
+                                return fast_substitute(subject, template)
+                            return backend_substitute(subject, replacement=template, count=0)
+                        except TypeError:
+                            pass
                     try:
                         parsed_template = _parser.parse_template(
                             template,
@@ -569,6 +602,9 @@ class Pattern:
                         raise PcreError(str(exc)) from exc
                     pcre2_repl = _pcre2_replacement_from_parsed(parsed_template, subject_is_bytes)
                     try:
+                        fast_substitute = getattr(self._pattern, "_substitute_fast", None)
+                        if fast_substitute is not None:
+                            return fast_substitute(subject, pcre2_repl)
                         backend_result = backend_substitute(subject, replacement=pcre2_repl, count=0)
                     except Exception:
                         backend_result = NotImplemented
@@ -576,7 +612,11 @@ class Pattern:
                         return backend_result
                     parsed_template = None
 
-            if self._groups_hint is not None:
+            if not has_extended_syntax:
+                # A flat one-item parsed template is equivalent to a literal
+                # replacement and avoids reparsing for bounded substitutions.
+                parsed_template = [template]
+            elif self._groups_hint is not None:
                 try:
                     parsed_template = _parser.parse_template(
                         template,

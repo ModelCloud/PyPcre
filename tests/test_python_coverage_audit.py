@@ -27,9 +27,65 @@ error_mod = importlib.import_module("pcre.error")
 
 
 def test_stdlib_parser_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delattr(re, "_parser")
+    # Python 3.10 does not expose ``re._parser`` at module scope, while newer
+    # releases do.  Either state should exercise our fallback loader.
+    monkeypatch.delattr(re, "_parser", raising=False)
     parser = stdlib_re._load_parser()
     assert callable(parser.parse)
+
+
+def test_stdlib_parser_exported_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    exported = object()
+    monkeypatch.setattr(stdlib_re._std_re, "_parser", exported, raising=False)
+    assert stdlib_re._load_parser() is exported
+
+
+def test_flat_replacement_conversion_paths() -> None:
+    assert pcre_mod._pcre2_replacement_from_parsed([1, b"$"], True) == b"\\g<1>$$"
+    assert pcre_mod._pcre2_replacement_from_parsed([1, "$"], False) == r"\g<1>$$"
+
+
+class _LegacyFastDispatchPattern:
+    pattern = "x"
+    groupindex: ClassVar[dict[str, int]] = {"g": 1}
+    flags = 0
+    capture_count = 1
+    jit = False
+
+    def match(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    search = match
+    fullmatch = match
+
+    def finditer(self, *args: Any, **kwargs: Any) -> Any:
+        return iter(())
+
+    def findall(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    def substitute(self, *args: Any, **kwargs: Any) -> tuple[str, int]:
+        return ("", 0)
+
+
+def test_legacy_c_dispatch_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pcre_mod, "_CPattern", _LegacyFastDispatchPattern)
+    pattern = pcre_mod.Pattern(_LegacyFastDispatchPattern())
+    assert pattern.match("x") is None
+    assert pattern.search("x") is None
+    assert pattern.fullmatch("x") is None
+    assert list(pattern.finditer("x")) == []
+    assert pattern.findall("x") == []
+    assert pattern.subn("literal", "x") == ("", 0)
+    assert pattern.subn(r"\g<g>", "x") == ("", 0)
+
+    type_error_backend = _LegacyFastDispatchPattern()
+
+    def reject_keyword_call(*args: Any, **kwargs: Any) -> None:
+        raise TypeError("legacy substitute signature")
+
+    type_error_backend.substitute = reject_keyword_call  # type: ignore[method-assign]
+    assert pcre_mod.Pattern(type_error_backend).subn("literal", "x") == ("x", 0)
 
 
 def test_package_import_without_optional_simd_export() -> None:
