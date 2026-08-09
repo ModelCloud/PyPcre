@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import operator
 import re as _std_re
+from functools import lru_cache
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
@@ -77,6 +78,24 @@ class TemplatePatternStub:
     def __init__(self, groups: int, groupindex: dict[str, int]):
         self.groups = groups
         self.groupindex = groupindex
+
+
+@lru_cache(maxsize=256)
+def _cached_expand_template(
+    template: str | bytes,
+    groups: int,
+    groupindex_items: tuple[tuple[str, int], ...],
+) -> Any:
+    """Cache immutable ``Match.expand`` parsing for repeated templates.
+
+    The rendered result is still produced per call because it depends on the
+    individual match.  The key snapshots the current name table, so a caller
+    mutating the exposed ``groupindex`` mapping cannot reuse a stale parse.
+    """
+    return _parser.parse_template(
+        template,
+        TemplatePatternStub(groups, dict(groupindex_items)),
+    )
 
 
 def coerce_group_value(value: Any, *, is_bytes: bool, empty: Any) -> Any:
@@ -159,7 +178,9 @@ def render_template(parsed: Any, match: "Match", *, is_bytes: bool, empty: Any) 
     for item in parsed:
         if isinstance(item, int):
             group_value = match.group(item)
-            pieces.append(coerce_group_value(group_value, is_bytes=is_bytes, empty=empty))
+            pieces.append(
+                coerce_group_value(group_value, is_bytes=is_bytes, empty=empty)
+            )
         else:
             pieces.append(item)
     return join_parts(pieces, is_bytes=is_bytes)
@@ -176,10 +197,17 @@ def expand_match_template(match: Any, template: Any) -> Any:
         if not isinstance(template, str):
             raise TypeError("template must be str for text matches")
 
-    parsed = _parser.parse_template(
-        template,
-        TemplatePatternStub(match.re.groups, match.re.groupindex),
-    )
+    groups = int(match.re.groups)
+    groupindex = match.re.groupindex
+    try:
+        parsed = _cached_expand_template(template, groups, tuple(groupindex.items()))
+    except (AttributeError, TypeError):
+        # Preserve compatibility with legacy mapping-like pattern doubles and
+        # unhashable custom templates.
+        parsed = _parser.parse_template(
+            template,
+            TemplatePatternStub(groups, groupindex),
+        )
     return render_template(parsed, match, is_bytes=is_bytes, empty=empty)
 
 
@@ -243,7 +271,9 @@ def is_capturing_group_start(source: str, index: int) -> bool:
     if source.startswith("(?P<", index) or source.startswith("(?P'", index):
         return True
     if source.startswith("(?<", index):
-        return not (source.startswith("(?<=", index) or source.startswith("(?<!", index))
+        return not (
+            source.startswith("(?<=", index) or source.startswith("(?<!", index)
+        )
     if source.startswith("(?'", index):
         return True
     if source.startswith("(?|", index):
@@ -270,7 +300,9 @@ def is_capturing_group_start(source: str, index: int) -> bool:
 class Match:
     __slots__ = ("_match", "_pattern", "_string", "_pos", "_endpos")
 
-    def __init__(self, pattern: Any, match: _CRawMatch, subject: Any, pos: int, endpos: int) -> None:
+    def __init__(
+        self, pattern: Any, match: _CRawMatch, subject: Any, pos: int, endpos: int
+    ) -> None:
         self._match = match
         self._pattern = pattern
         self._string = subject

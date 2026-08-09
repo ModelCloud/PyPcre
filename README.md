@@ -24,7 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
-* 08/09/2026 **API hot-path update**: large `parallel_map(findall)` workloads now reach **11.5x** speedup on Python 3.10 and **11.25x** on free-threaded Python 3.14t/GIL=0 with 12 performance-tier workers. Ordered `parallel_map(search)` reaches **8.57x** and **7.85x**, respectively; canonical module-level `match`/`search`/`fullmatch`/`findall`/`finditer`/`split`/literal-`sub` dispatch is now about **2.5–3.1x** faster than the prior PR hot path, and repeated default `Match.groups()` is served from an immutable per-match tuple cache. 🧵⚡
+* 08/09/2026 **API hot-path update**: large `parallel_map(findall)` workloads now reach **11.5x** speedup on Python 3.10 and **11.25x** on free-threaded Python 3.14t/GIL=0 with 12 performance-tier workers. Ordered `parallel_map(search)` reaches **8.57x** and **7.85x**, respectively; canonical module-level `match`/`search`/`fullmatch`/`findall`/`finditer`/`split`/literal-`sub` dispatch is now about **2.5–3.1x** faster than the prior PR hot path, repeated default `Match.groups()` is served from an immutable per-match tuple cache, and repeated backreference `Match.expand()` avoids reparsing. 🧵⚡
 * 08/08/2026 **0.6.0**: `findall`, `finditer`, `sub`/`subn`, `split`, and `match`/`search`/`fullmatch` are now up to **46x faster** than `stdlib.re` and **48x faster** than `regex` on `finditer`/`findall` workloads, **13x** on `split`, and **2–9x** on `sub`/`subn` backref workloads, with full `re` semantics. Free-threaded `findall` reaches **13.8x** vs `re` on 8 threads. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
@@ -80,6 +80,7 @@ hard CPU affinity.
 | `parallel_map(findall)`, 48 × 1 MiB subjects, 12 workers | **11.51x** | **11.25x** |
 | Bound backreference `sub` hot path | **1.38 μs** | **1.14 μs** |
 | Repeated `Match.groups()` with the default argument | **0.026 μs** | **0.030 μs** |
+| Repeated `Match.expand(r"[\\1]")` | **1.01 μs** | **0.75 μs** |
 
 The parallel figures are serial-to-parallel speedups and preserve input order and
 exception behavior. Large `findall` scans release the GIL only around the PCRE2

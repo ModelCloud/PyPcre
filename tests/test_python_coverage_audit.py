@@ -68,6 +68,48 @@ def test_replacement_template_cache_reuses_and_clears(
     assert calls == 2
 
 
+def test_expand_template_cache_reuses_and_clears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    match = pcre.compile(r"(?P<x>x)").fullmatch("x")
+    assert match is not None
+    compat._cached_expand_template.cache_clear()
+    original = compat._parser.parse_template
+    calls = 0
+
+    def counted_parse(template: Any, state: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original(template, state)
+
+    monkeypatch.setattr(compat._parser, "parse_template", counted_parse)
+    assert match.expand(r"[\g<x>]") == "[x]"
+    assert match.expand(r"[\g<x>]") == "[x]"
+    assert calls == 1
+
+    pcre.clear_cache()
+    assert match.expand(r"[\g<x>]") == "[x]"
+    assert calls == 2
+
+
+def test_expand_template_legacy_groupindex_falls_back() -> None:
+    class LegacyGroupIndex(dict[str, int]):
+        def items(self) -> Any:
+            raise AttributeError("legacy mapping has no items snapshot")
+
+    pattern = type(
+        "LegacyPattern", (), {"groups": 1, "groupindex": LegacyGroupIndex()}
+    )()
+    match = compat.Match(
+        pattern,
+        type("RawMatch", (), {"group": lambda self, index: "x"})(),
+        "x",
+        0,
+        1,
+    )
+    assert match.expand(r"[\1]") == "[x]"
+
+
 def test_replacement_fallbacks_cover_subclasses_and_bounded_templates() -> None:
     class DerivedPattern(pcre_mod.Pattern):
         pass

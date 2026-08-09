@@ -31,6 +31,7 @@ NO_UCP: int = int(Flag.NO_UCP)
 from .re_compat import (
     Match as _CompatMatch,
 )
+from .re_compat import _cached_expand_template
 from .re_compat import (
     TemplatePatternStub,
     coerce_group_value,
@@ -1209,3 +1210,4 @@ def clear_cache() -> None:
     _clear_cache()
     _cached_module_pattern.cache_clear()
     _cached_replacement_parts.cache_clear()
+    _cached_expand_template.cache_clear()
