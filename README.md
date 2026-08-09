@@ -24,9 +24,9 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
-* 08/08/2026 **0.9.0**: C-level `match` / `search` / `fullmatch` owner-stamping and positional backend calls, returning public `Match` objects directly from the C extension and cutting Python wrapper overhead. `finditer` now returns the C iterator directly when the real C backend is used. Up to **47x faster** than `stdlib.re` and **51x** vs `regex` on high-volume `finditer` workloads, with full `re` semantics. ⚡🚀
-* 08/08/2026 **0.8.0**: C-level `finditer` owner-stamping so the backend iterator returns public `Match` objects directly, eliminating per-match Python wrapper overhead. Up to **46x faster** than `stdlib.re` and **48x** vs `regex` on high-volume workloads, with full `re` semantics. ⚡🚀
-* 08/08/2026 **0.7.0**: C-level `split` fast path with direct UTF-8 byte slicing and group extraction. Up to **3x faster** than `stdlib.re` and `regex` on high-volume delimiter workloads, with full `re` semantics for empty matches, capturing groups, bytes, and Unicode. ⚡
+* 08/08/2026 **0.9.0**: `match` / `search` / `fullmatch` and `finditer` high-volume workloads measured up to **47x faster** than `stdlib.re` and **51x faster** than `regex`, with full `re` semantics. ⚡🚀
+* 08/08/2026 **0.8.0**: `finditer` high-volume workloads measured up to **46x faster** than `stdlib.re` and **48x faster** than `regex`, with full `re` semantics. ⚡🚀
+* 08/08/2026 **0.7.0**: `split` high-volume delimiter workloads measured up to **3x faster** than `stdlib.re` and `regex`, with full `re` semantics for empty matches, capturing groups, bytes, and Unicode. ⚡
 * 08/08/2026 **0.6.0**: C-level `sub`/`subn` fast path using `pcre2_substitute` for string/bytes replacements. Measured 2–9x faster than `stdlib.re` and 2–4x faster than `regex` on high-volume backref workloads, while remaining fully `re`-compatible. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
