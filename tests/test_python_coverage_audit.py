@@ -144,6 +144,48 @@ def test_expand_render_single_capture_fast_shapes() -> None:
     )
 
 
+def test_default_compile_cache_is_thread_local_and_tracks_thread_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcre.clear_cache()
+    monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: False)
+    first = pcre.compile("compile-cache")
+    assert pcre.compile("compile-cache") is first
+    assert first.thread_mode == pcre_mod._THREAD_MODE_DISABLED
+
+    monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: True)
+    assert pcre.compile("compile-cache") is first
+    assert first.thread_mode == pcre_mod._THREAD_MODE_AUTO
+
+    pcre.clear_cache()
+    assert pcre.compile("compile-cache") is not first
+
+    original_limit = cache_mod.get_cache_limit()
+    try:
+        cache_mod.set_cache_limit(0)
+        pcre.clear_cache()
+        uncached = pcre.compile("compile-cache-disabled")
+        assert pcre.compile("compile-cache-disabled") is not uncached
+    finally:
+        cache_mod.set_cache_limit(original_limit)
+        pcre.clear_cache()
+
+
+def test_compile_legacy_default_fallback_and_subject_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = pcre_mod._pcre2.compile("x", jit=False)
+
+    def fake_cached(*args: Any, **kwargs: Any) -> pcre_mod.Pattern:
+        return pcre_mod.Pattern(backend)
+
+    monkeypatch.setattr(pcre_mod, "cached_compile", fake_cached)
+    monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: False)
+    compiled = pcre_mod.compile(bytearray(b"x"))
+    assert compiled.thread_mode == pcre_mod._THREAD_MODE_DISABLED
+    assert pcre_mod._subject_length(bytearray(b"x")) == 1
+
+
 def test_replacement_fallbacks_cover_subclasses_and_bounded_templates() -> None:
     class DerivedPattern(pcre_mod.Pattern):
         pass

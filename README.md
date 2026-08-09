@@ -81,6 +81,7 @@ hard CPU affinity.
 | Bound backreference `sub` hot path | **1.38 μs** | **1.14 μs** |
 | Repeated `Match.groups()` with the default argument | **0.026 μs** | **0.030 μs** |
 | Repeated `Match.expand(r"[\\1]")` | **0.94 μs** | **0.70 μs** |
+| Repeated default `compile("(x)")` | **0.34 μs** | **0.25 μs** |
 
 The parallel figures are serial-to-parallel speedups and preserve input order and
 exception behavior. Large `findall` scans release the GIL only around the PCRE2

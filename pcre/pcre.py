@@ -10,6 +10,7 @@ from __future__ import annotations
 import re as _std_re
 from collections.abc import Iterable, Iterator, Mapping
 from functools import lru_cache
+from threading import local
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
@@ -17,6 +18,7 @@ import pcre_ext_c as _pcre2
 from ._stdlib_re import RE_TEMPLATE, RE_TEMPLATE_FLAG, RE_UNICODE_FLAG, _parser
 from .cache import cached_compile
 from .cache import clear_cache as _clear_cache
+from .cache import get_cache_limit
 from .flags import Flag, strip_py_only_flags
 
 # Cache frequently used flag values as plain integers to avoid the overhead of
@@ -55,6 +57,7 @@ from .threads import (
 )
 
 _CPattern = _pcre2.Pattern
+_ORIGINAL_CACHED_COMPILE = cached_compile
 PcreError = _pcre2.PcreError
 Match = getattr(_pcre2, "Match", _CompatMatch)
 _ATTACH_MATCH = getattr(_pcre2, "_attach_match", None)
@@ -64,6 +67,7 @@ FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 
 _DEFAULT_JIT = True
 _DEFAULT_COMPAT_REGEX = False
+_DEFAULT_COMPILE_LOCAL = local()
 
 
 _THREAD_MODE_DISABLED = "disabled"
@@ -794,6 +798,45 @@ def _cached_replacement_parts(
     return parsed, _pcre2_replacement_from_parsed(parsed, is_bytes)
 
 
+def _compile_default_builtin(pattern: str | bytes) -> Pattern:
+    """Compile an exact built-in pattern through a per-thread direct cache."""
+    cache = getattr(_DEFAULT_COMPILE_LOCAL, "cache", None)
+    if cache is None:
+        cache = _DEFAULT_COMPILE_LOCAL.cache = {}
+
+    jit = bool(_DEFAULT_JIT)
+    compat = bool(_DEFAULT_COMPAT_REGEX)
+    thread_default = get_thread_default()
+    limit = get_cache_limit()
+    cached = None if limit == 0 else cache.get(pattern)
+    if cached is not None and cached[0] == jit and cached[1] == compat:
+        compiled = cached[2]
+        if cached[3] != thread_default:
+            compiled.enable_auto_threads() if thread_default else compiled.disable_threads()
+            cache[pattern] = (jit, compat, compiled, thread_default)
+    else:
+        adjusted_pattern = _apply_regex_compat(pattern, compat)
+        native_flags = (
+            _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP
+            if isinstance(adjusted_pattern, str)
+            else 0
+        )
+        compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=jit)
+        cache[pattern] = (jit, compat, compiled, thread_default)
+        if limit == 0:
+            cache.pop(pattern, None)
+        else:
+            maxsize = 256 if limit is None else min(256, limit)
+            while len(cache) > maxsize:
+                cache.pop(next(iter(cache)))
+
+        if thread_default:
+            compiled.enable_auto_threads()
+        else:
+            compiled.disable_threads()
+    return compiled
+
+
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     # Fast path for the dominant shape: compile(pattern) with default flags.
     if flags == 0:
@@ -807,6 +850,9 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             else:
                 wrapper.disable_threads()
             return wrapper
+
+        if type(pattern) in (str, bytes) and cached_compile is _ORIGINAL_CACHED_COMPILE:
+            return _compile_default_builtin(pattern)
 
         adjusted_pattern = _apply_regex_compat(pattern, bool(_DEFAULT_COMPAT_REGEX))
         if isinstance(adjusted_pattern, str):
@@ -1208,6 +1254,7 @@ def clear_cache() -> None:
     """Clear the compiled pattern cache and release cached match-data/JIT buffers."""
 
     _clear_cache()
+    _DEFAULT_COMPILE_LOCAL.cache = {}
     _cached_module_pattern.cache_clear()
     _cached_replacement_parts.cache_clear()
     _cached_expand_template.cache_clear()
