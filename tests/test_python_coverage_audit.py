@@ -557,6 +557,7 @@ def test_split_legacy_backend_fallback_and_limit() -> None:
 
     no_split = pcre_mod.Pattern(_LegacyNoSplitPattern())  # type: ignore[arg-type]
     assert no_split.split("a,b") == ["a", "b"]
+    assert no_split.split("a,b", maxsplit=-1) == ["a,b"]
 
 
 @pytest.mark.parametrize(
@@ -617,6 +618,7 @@ def test_c_plain_literal_subn_uses_builtin_only_for_safe_shape() -> None:
     assert pattern.subn("bar", "foo foo", count=1) == ("bar foo", 1)
     assert pattern.subn("bar", "foo foo", count=-1) == ("foo foo", 0)
     assert pattern.subn("bar", "no match") == ("no match", 0)
+    assert pattern.subn("bar", "fxx") == ("fxx", 0)
 
     bytes_pattern = pcre.compile(b"foo")
     assert bytes_pattern.subn(b"bar", b"foo foo") == (b"bar bar", 2)
