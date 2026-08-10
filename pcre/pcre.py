@@ -1004,7 +1004,10 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
                 wrapper.disable_threads()
         return wrapper
 
-    if type(pattern) in (str, bytes) and type(flags) in (int, Flag):
+    # Keep the direct flagged cache restricted to plain integer callers.  The
+    # project IntFlag path retains the general cache, whose free-threaded
+    # lifetime/eviction semantics are already hardened for randomized inputs.
+    if type(pattern) in (str, bytes) and type(flags) is int:
         if cached_compile is _ORIGINAL_CACHED_COMPILE:
             return _compile_flagged_builtin(
                 pattern,
