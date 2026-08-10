@@ -202,12 +202,12 @@ def test_regs_is_cached_as_an_immutable_match_snapshot() -> None:
     assert match.regs is first
 
 
-def test_groups_default_tuple_is_cached_but_custom_defaults_are_fresh() -> None:
+def test_groups_results_are_fresh_and_do_not_persist_captured_values() -> None:
     match = pcre.compile(r"(?P<left>a)(?P<optional>b)?").fullmatch("a")
     assert match is not None
     first = match.groups()
     assert first == ("a", None)
-    assert match.groups() is first
+    assert match.groups() is not first
     assert match.groups("missing") == ("a", "missing")
     assert match.groups("missing") is not match.groups("missing")
 

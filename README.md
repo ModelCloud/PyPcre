@@ -25,7 +25,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 ## Latest News 🚀
 * 08/10/2026 **Literal split/substitution/findall fast paths**: exact plain-literal `Pattern.split` calls now use the immutable built-in splitter after construction-time validation, measuring **2.1x** faster than the prior C dispatch on Python 3.10 and **1.7x** faster on free-threaded Python 3.14t/GIL=0; delimiter-heavy multi-character literals reach roughly **4.8x**. Literal `Pattern.subn` and module-level `sub`/`subn` now use native replace/count primitives, reaching about **15x** on short repeated tokens and **3x** on delimiter-heavy text. Literal `findall` uses non-overlapping native count/list construction, reaching about **9x** on short repeated tokens and **8x** on delimiter-heavy text. Regex metacharacters, explicit flags, subclasses, and buffer subjects remain on the compatibility-safe PCRE2 path. ⚡
-* 08/09/2026 **API hot-path update**: large `parallel_map(findall)` workloads now reach **11.5x** speedup on Python 3.10 and **11.25x** on free-threaded Python 3.14t/GIL=0 with 12 performance-tier workers. Ordered `parallel_map(search)` reaches **8.57x** and **7.85x**, respectively; one-item and up to eight tiny explicit `parallel_map` subjects now avoid executor setup (the one-item case measures **13.3x** faster on Python 3.10 and **27.7x** on 3.14t), default bound `Pattern.split` is another **1.6x/1.5x** faster on 3.10/3.14t, and default bound literal `Pattern.subn` is about **1.5x** faster on 3.10. Canonical module-level `match`/`search`/`fullmatch`/`findall`/`finditer`/`split`/literal-`sub` dispatch is about **2.5–3.1x** faster than the prior PR hot path, repeated default `Match.groups()` is served from an immutable per-match tuple cache, and repeated backreference `Match.expand()` avoids reparsing. 🧵⚡
+* 08/09/2026 **API hot-path update**: large `parallel_map(findall)` workloads now reach **11.5x** speedup on Python 3.10 and **11.25x** on free-threaded Python 3.14t/GIL=0 with 12 performance-tier workers. Ordered `parallel_map(search)` reaches **8.57x** and **7.85x**, respectively; one-item and up to eight tiny explicit `parallel_map` subjects now avoid executor setup (the one-item case measures **13.3x** faster on Python 3.10 and **27.7x** on 3.14t), default bound `Pattern.split` is another **1.6x/1.5x** faster on 3.10/3.14t, and default bound literal `Pattern.subn` is about **1.5x** faster on Python 3.10. Canonical module helpers retain their optimized dispatch while their wrapper/template caches are thread-scoped, size-bounded, and invalidated across live workers. Repeated backreference `Match.expand()` avoids reparsing within the active cache context, while captured values returned by `Match.groups()` remain call-local so a long-lived Match does not retain an additional copy of large captures. 🧵⚡
 * 08/08/2026 **0.6.0**: `findall`, `finditer`, `sub`/`subn`, `split`, and `match`/`search`/`fullmatch` are now up to **46x faster** than `stdlib.re` and **48x faster** than `regex` on `finditer`/`findall` workloads, **13x** on `split`, and **2–9x** on `sub`/`subn` backref workloads, with full `re` semantics. Free-threaded `findall` reaches **13.8x** vs `re` on 8 threads. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
@@ -81,10 +81,10 @@ hard CPU affinity.
 | `parallel_map(findall)`, 48 × 1 MiB subjects, 12 workers | **11.51x** | **11.25x** |
 | Bound one-character literal `Pattern.split` | **2.1x** | **1.7x** |
 | Bound backreference `sub` hot path | **1.38 μs** | **1.14 μs** |
-| Repeated `Match.groups()` with the default argument | **0.026 μs** | **0.030 μs** |
-| Repeated `Match.expand(r"[\\1]")` | **0.94 μs** | **0.70 μs** |
-| Repeated default `compile("(x)")` | **0.34 μs** | **0.25 μs** |
-| Repeated integer-flagged `compile("x", CASELESS)` | **0.84 μs** | **0.58 μs** |
+| Repeated call-local `Match.groups()` | **~0.05 μs** | **~0.05 μs** |
+| Repeated `Match.expand(r"[\\1]")` | **5.23 μs** | **1.10 μs** |
+| Repeated default `compile("(x)")` | **0.49 μs** | **0.38 μs** |
+| Repeated integer-flagged `compile("x", CASELESS)` | **1.16 μs** | **0.81 μs** |
 
 The parallel figures are serial-to-parallel speedups and preserve input order and
 exception behavior. Large `findall` scans release the GIL only around the PCRE2
@@ -315,7 +315,13 @@ the conversion without repeating the flag.
 - `pcre.configure(jit=False)` disables JIT globally. `Flag.JIT` and
   `Flag.NO_JIT` let you override that per pattern.
 - `pcre.set_cache_limit()`, `pcre.get_cache_limit()`, and `pcre.clear_cache()`
-  control the high-level compile cache.
+  control every high-level compile/template helper cache in the active context.
+  A zero limit disables them, and `None` uses a 256-entry hard safety ceiling
+  rather than permitting unbounded growth. High-level cache entries never cross
+  thread scope in the default thread-local strategy; a clear invalidates live
+  workers' high-level helper caches on their next cache-backed call. Backend
+  scratch buffers remain thread-scoped and are released when that thread exits.
+  Oversized patterns and templates are not retained.
 - `pcre.configure_threads()`, `pcre.configure_thread_pool()`,
   `shutdown_thread_pool()`, `Flag.THREADS`, and `Flag.NO_THREADS` are available
   if you want to opt into or restrict threaded execution.

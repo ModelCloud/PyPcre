@@ -26,7 +26,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(autouse=True)
 def _reset_cache_state() -> None:
     if cache_mod.cache_strategy() != "thread-local":
-        pytest.skip("global pattern cache enabled via environment; thread-local tests skipped")
+        pytest.skip(
+            "global pattern cache enabled via environment; thread-local tests skipped"
+        )
     original_limit = cache_mod.get_cache_limit()
     cache_mod.clear_cache()
     try:
@@ -42,7 +44,9 @@ def _fresh_thread_cache() -> OrderedDict[Any, Any]:
     return store
 
 
-def _run_cache_script(source: str, env_overrides: Dict[str, str] | None = None) -> Dict[str, Any]:
+def _run_cache_script(
+    source: str, env_overrides: Dict[str, str] | None = None
+) -> Dict[str, Any]:
     env = os.environ.copy()
     pythonpath_entries = [str(PROJECT_ROOT)]
     existing_pythonpath = env.get("PYTHONPATH")
@@ -77,7 +81,9 @@ def _format_table(headers: List[str], rows: List[List[str]]) -> List[str]:
     return lines
 
 
-def _emit_table(pytestconfig: pytest.Config, title: str, headers: List[str], rows: List[List[str]]) -> None:
+def _emit_table(
+    pytestconfig: pytest.Config, title: str, headers: List[str], rows: List[List[str]]
+) -> None:
     lines = _format_table(headers, rows)
     reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
     if reporter is None:  # pragma: no cover - fallback for unusual runners
@@ -101,7 +107,9 @@ def _emit_table(pytestconfig: pytest.Config, title: str, headers: List[str], row
             writer.hasmarkup = original_hasmarkup
 
 
-def _benchmark_strategy(strategy: str, iterations: int = 20000, threads: int = 1) -> Dict[str, Any]:
+def _benchmark_strategy(
+    strategy: str, iterations: int = 20000, threads: int = 1
+) -> Dict[str, Any]:
     script = textwrap.dedent(
         f"""
         import json
@@ -199,7 +207,9 @@ def test_cached_compile_thread_local_isolation(monkeypatch: pytest.MonkeyPatch) 
     compile_calls: List[str] = []
 
     def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> str:
-        compile_calls.append(f"{threading.current_thread().name}:{pattern}:{flags}:{jit}")
+        compile_calls.append(
+            f"{threading.current_thread().name}:{pattern}:{flags}:{jit}"
+        )
         return f"compiled:{len(compile_calls)}"
 
     monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
@@ -250,11 +260,15 @@ def test_cached_compile_thread_local_isolation(monkeypatch: pytest.MonkeyPatch) 
     assert list(main_store.keys()) == [("expr", 0, False)]  # untouched by worker
 
 
-def test_clear_cache_only_resets_current_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clear_cache_invalidates_live_worker_on_next_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     compile_calls: List[str] = []
 
     def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> str:
-        compile_calls.append(f"{threading.current_thread().name}:{pattern}:{flags}:{jit}")
+        compile_calls.append(
+            f"{threading.current_thread().name}:{pattern}:{flags}:{jit}"
+        )
         return f"compiled:{len(compile_calls)}"
 
     monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
@@ -307,9 +321,11 @@ def test_clear_cache_only_resets_current_thread(monkeypatch: pytest.MonkeyPatch)
     assert not worker_errors
     assert worker_state["initial_len"] == 1
     assert worker_state["final_len"] == 1
-    assert worker_state["first_result"] == worker_state["second_result"] == "compiled:2"
+    assert worker_state["first_result"] == "compiled:2"
+    assert worker_state["second_result"] == "compiled:3"
     assert compile_calls == [
         "MainThread:expr:0:False",
+        "cache-worker:expr:0:False",
         "cache-worker:expr:0:False",
     ]
 
@@ -364,8 +380,12 @@ def test_cache_strategy_invalid_value() -> None:
         cache_mod.cache_strategy("totally-invalid")
 
 
-def test_cache_strategy_cannot_switch_after_use(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern)
+def test_cache_strategy_cannot_switch_after_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern
+    )
 
     def wrapper(raw: Any) -> Any:
         return raw
@@ -379,7 +399,9 @@ def test_cache_strategy_cannot_switch_after_use(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_set_cache_limit_zero_clears_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern)
+    monkeypatch.setattr(
+        cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern
+    )
 
     def wrapper(raw: Any) -> Any:
         return raw
@@ -398,7 +420,9 @@ def test_set_cache_limit_zero_clears_cache(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_set_cache_limit_shrink_evicts_oldest(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern)
+    monkeypatch.setattr(
+        cache_mod._pcre2, "compile", lambda pattern, *, flags=0, jit=False: pattern
+    )
 
     def wrapper(raw: Any) -> Any:
         return raw
@@ -414,7 +438,9 @@ def test_set_cache_limit_shrink_evicts_oldest(monkeypatch: pytest.MonkeyPatch) -
     assert list(store.keys()) == [("3", 0, False), ("4", 0, False)]
 
 
-def test_cached_compile_bypasses_cache_for_unhashable_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cached_compile_bypasses_cache_for_unhashable_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[Any] = []
 
     def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> Any:
@@ -478,8 +504,18 @@ def test_shared_pattern_concurrent_execution_produces_expected_results() -> None
 
     cases: List[tuple[str, int, int, tuple[str, str] | None]] = [
         (subject_one, 0, subject_one.index(" "), ("123", "alpha")),
-        (subject_two, subject_two.index("456"), subject_two.index(" suffix"), ("456", "beta")),
-        (subject_three, subject_three.index("789"), subject_three.index(" end"), ("789", "gamma")),
+        (
+            subject_two,
+            subject_two.index("456"),
+            subject_two.index(" suffix"),
+            ("456", "beta"),
+        ),
+        (
+            subject_three,
+            subject_three.index("789"),
+            subject_three.index(" end"),
+            ("789", "gamma"),
+        ),
         (subject_four, 0, len(subject_four), None),
     ]
 
@@ -499,7 +535,9 @@ def test_shared_pattern_concurrent_execution_produces_expected_results() -> None
                     match = pattern.search(subject, pos=pos, endpos=endpos)
                     if expected is None:
                         if match is not None:
-                            raise AssertionError(f"expected no match for {subject!r}, got {match.group(0)!r}")
+                            raise AssertionError(
+                                f"expected no match for {subject!r}, got {match.group(0)!r}"
+                            )
                         local.append(None)
                         continue
                     if match is None:
@@ -592,7 +630,9 @@ def test_cache_strategy_global_shares_cache_across_threads() -> None:
         """
     )
 
-    result = _run_cache_script(script, env_overrides={"PYPCRE_CACHE_PATTERN_GLOBAL": "1"})
+    result = _run_cache_script(
+        script, env_overrides={"PYPCRE_CACHE_PATTERN_GLOBAL": "1"}
+    )
     assert result["calls"] == 1
     assert result["main_result"] == result["worker_result"] == "compiled:1"
 
@@ -604,7 +644,9 @@ def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
     max_threads = max(1, cpu_count // 2)
     # Limit concurrency to half of the visible cores to avoid full-saturation regressions while still
     # covering progressively larger thread counts when possible.
-    thread_counts = [count for count in desired_thread_counts if count == 1 or count <= max_threads]
+    thread_counts = [
+        count for count in desired_thread_counts if count == 1 or count <= max_threads
+    ]
     scenarios = [
         (strategy, thread_count)
         for thread_count in thread_counts
@@ -613,14 +655,23 @@ def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
 
     results: Dict[tuple[str, int], Dict[str, Any]] = {}
     for strategy, thread_count in scenarios:
-        stats = _benchmark_strategy(strategy, iterations=iterations, threads=thread_count)
+        stats = _benchmark_strategy(
+            strategy, iterations=iterations, threads=thread_count
+        )
         key = (strategy, thread_count)
         results[key] = stats
         assert stats["strategy"] == strategy
         assert stats["threads"] == thread_count
         assert stats["elapsed"] >= 0.0
 
-    headers = ["strategy", "threads", "total calls", "total ms", "per call ns", "relative"]
+    headers = [
+        "strategy",
+        "threads",
+        "total calls",
+        "total ms",
+        "per call ns",
+        "relative",
+    ]
     for thread_count in thread_counts:
         local_stats = results[("thread-local", thread_count)]
         global_stats = results[("global", thread_count)]
@@ -636,8 +687,12 @@ def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
         baseline = local_stats["elapsed"] or 1.0
         for strategy in ("thread-local", "global"):
             stats = results[(strategy, thread_count)]
-            total_calls = stats.get("total_calls", stats["iterations"] * stats.get("threads", 1))
-            per_call_ns = (stats["elapsed"] / total_calls) * 1e9 if total_calls else float("nan")
+            total_calls = stats.get(
+                "total_calls", stats["iterations"] * stats.get("threads", 1)
+            )
+            per_call_ns = (
+                (stats["elapsed"] / total_calls) * 1e9 if total_calls else float("nan")
+            )
             relative = stats["elapsed"] / baseline if baseline else float("nan")
             rows.append(
                 [
@@ -650,5 +705,9 @@ def test_cache_strategy_benchmark(pytestconfig: pytest.Config) -> None:
                 ]
             )
 
-        title = "Cache strategy benchmark (single-thread)" if thread_count == 1 else f"Cache strategy benchmark (threads={thread_count})"
+        title = (
+            "Cache strategy benchmark (single-thread)"
+            if thread_count == 1
+            else f"Cache strategy benchmark (threads={thread_count})"
+        )
         _emit_table(pytestconfig, title, headers, rows)

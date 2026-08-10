@@ -16,9 +16,14 @@ from typing import Any, List
 import pcre_ext_c as _pcre2
 
 from ._stdlib_re import RE_TEMPLATE, RE_TEMPLATE_FLAG, RE_UNICODE_FLAG, _parser
-from .cache import cached_compile
+from .cache import (
+    cache_input_allowed,
+    cached_compile,
+    get_cache_epoch,
+    get_effective_cache_limit,
+    register_cache_control,
+)
 from .cache import clear_cache as _clear_cache
-from .cache import get_cache_limit
 from .flags import Flag, strip_py_only_flags
 
 # Cache frequently used flag values as plain integers to avoid the overhead of
@@ -33,9 +38,9 @@ NO_UCP: int = int(Flag.NO_UCP)
 from .re_compat import (
     Match as _CompatMatch,
 )
-from .re_compat import _cached_expand_template
 from .re_compat import (
     TemplatePatternStub,
+    _cached_expand_template,
     coerce_group_value,
     coerce_subject_slice,
     compute_next_pos,
@@ -68,11 +73,68 @@ FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 _DEFAULT_JIT = True
 _DEFAULT_COMPAT_REGEX = False
 _DEFAULT_COMPILE_LOCAL = local()
+_LOCAL_CACHE_NAMES = ("cache", "flagged_cache")
 
 
 _THREAD_MODE_DISABLED = "disabled"
 _THREAD_MODE_ENABLED = "enabled"
 _THREAD_MODE_AUTO = "auto"
+
+
+def _synchronize_local_caches() -> None:
+    epoch = get_cache_epoch()
+    if getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) == epoch:
+        return
+    for name in ("module_lru", "replacement_lru"):
+        cached = getattr(_DEFAULT_COMPILE_LOCAL, name, None)
+        if cached is not None:
+            cached.cache_clear()
+        setattr(_DEFAULT_COMPILE_LOCAL, name, None)
+    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
+    for name in _LOCAL_CACHE_NAMES:
+        setattr(_DEFAULT_COMPILE_LOCAL, name, {})
+    _DEFAULT_COMPILE_LOCAL.effective_limit = get_effective_cache_limit()
+    _DEFAULT_COMPILE_LOCAL.epoch = epoch
+
+
+def _local_cache(name: str) -> dict[Any, Any]:
+    _synchronize_local_caches()
+    cache = getattr(_DEFAULT_COMPILE_LOCAL, name, None)
+    if cache is None:
+        cache = {}
+        setattr(_DEFAULT_COMPILE_LOCAL, name, cache)
+    return cache
+
+
+def _trim_local_cache(cache: dict[Any, Any]) -> None:
+    limit = get_effective_cache_limit()
+    if limit == 0:
+        cache.clear()
+        return
+    while len(cache) > limit:
+        cache.pop(next(iter(cache)))
+
+
+def _cache_configuration_changed() -> None:
+    _synchronize_local_caches()
+    for name in _LOCAL_CACHE_NAMES:
+        _trim_local_cache(_local_cache(name))
+    for name in ("module_lru", "replacement_lru"):
+        cached = getattr(_DEFAULT_COMPILE_LOCAL, name, None)
+        if cached is not None:
+            cached.cache_clear()
+        setattr(_DEFAULT_COMPILE_LOCAL, name, None)
+    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.effective_limit = get_effective_cache_limit()
+
+
+register_cache_control(_cache_configuration_changed)
 
 
 def _can_attach_match(raw: Any) -> bool:
@@ -902,12 +964,9 @@ _PATTERN_METHODS_FOR_FAST = {
 }
 
 
-@lru_cache(maxsize=256)
-def _cached_replacement_parts(
+def _replacement_parts_uncached(
     pattern: Pattern, template: str | bytes, is_bytes: bool
 ) -> tuple[Any, Any]:
-    """Cache immutable replacement parsing/conversion for repeated substitutions."""
-
     parsed = _parser.parse_template(
         template,
         TemplatePatternStub(pattern.groups, pattern.groupindex),
@@ -915,42 +974,103 @@ def _cached_replacement_parts(
     return parsed, _pcre2_replacement_from_parsed(parsed, is_bytes)
 
 
+def _cached_replacement_parts(
+    pattern: Pattern, template: str | bytes, is_bytes: bool
+) -> tuple[Any, Any]:
+    """Cache immutable replacement parsing/conversion in the active thread."""
+
+    _synchronize_local_caches()
+    key = (pattern, template, is_bytes)
+    if getattr(_DEFAULT_COMPILE_LOCAL, "replacement_hot_key", None) == key:
+        return _DEFAULT_COMPILE_LOCAL.replacement_hot_value
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    if (
+        limit == 0
+        or not cache_input_allowed(template)
+        or not cache_input_allowed(pattern.pattern)
+    ):
+        return _replacement_parts_uncached(pattern, template, is_bytes)
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "replacement_lru", None)
+    if cached is None:
+        cached = lru_cache(maxsize=limit)(_replacement_parts_uncached)
+        _DEFAULT_COMPILE_LOCAL.replacement_lru = cached
+    result = cached(pattern, template, is_bytes)
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = key
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = result
+    return result
+
+
+def _clear_replacement_cache() -> None:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "replacement_lru", None)
+    if cached is not None:
+        cached.cache_clear()
+    _DEFAULT_COMPILE_LOCAL.replacement_lru = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
+
+
+def _replacement_cache_size() -> int:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "replacement_lru", None)
+    return 0 if cached is None else cached.cache_info().currsize
+
+
+_cached_replacement_parts.cache_clear = _clear_replacement_cache  # type: ignore[attr-defined]
+
+
+def _policy_wrapper(compiled: Pattern, thread_mode: str) -> Pattern:
+    """Create a policy-local wrapper around immutable cached PCRE2 code."""
+
+    result = Pattern(compiled._pattern)
+    if thread_mode == _THREAD_MODE_ENABLED:
+        result.enable_threads()
+    elif thread_mode == _THREAD_MODE_AUTO:
+        result.enable_auto_threads()
+    else:
+        result.disable_threads()
+    return result
+
+
 def _compile_default_builtin(pattern: str | bytes) -> Pattern:
     """Compile an exact built-in pattern through a per-thread direct cache."""
+    thread_mode = _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+    return _compile_default_snapshot(
+        pattern,
+        bool(_DEFAULT_JIT),
+        bool(_DEFAULT_COMPAT_REGEX),
+        thread_mode,
+    )
+
+
+def _compile_default_snapshot(
+    pattern: str | bytes,
+    jit: bool,
+    compat: bool,
+    thread_mode: str,
+) -> Pattern:
+    """Compile using one coherent configuration snapshot."""
+
+    if getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) != get_cache_epoch():
+        _synchronize_local_caches()
     cache = getattr(_DEFAULT_COMPILE_LOCAL, "cache", None)
     if cache is None:
         cache = _DEFAULT_COMPILE_LOCAL.cache = {}
 
-    jit = bool(_DEFAULT_JIT)
-    compat = bool(_DEFAULT_COMPAT_REGEX)
-    thread_default = get_thread_default()
-    limit = get_cache_limit()
-    cached = None if limit == 0 else cache.get(pattern)
-    if cached is not None and cached[0] == jit and cached[1] == compat:
-        compiled = cached[2]
-        if cached[3] != thread_default:
-            compiled.enable_auto_threads() if thread_default else compiled.disable_threads()
-            cache[pattern] = (jit, compat, compiled, thread_default)
-    else:
-        adjusted_pattern = _apply_regex_compat(pattern, compat)
-        native_flags = (
-            _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP
-            if isinstance(adjusted_pattern, str)
-            else 0
-        )
-        compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=jit)
-        cache[pattern] = (jit, compat, compiled, thread_default)
-        if limit == 0:
-            cache.pop(pattern, None)
-        else:
-            maxsize = 256 if limit is None else min(256, limit)
-            while len(cache) > maxsize:
-                cache.pop(next(iter(cache)))
+    key = (pattern, jit, compat, thread_mode)
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    compiled = cache.get(key) if limit else None
+    if compiled is not None:
+        return compiled
 
-        if thread_default:
-            compiled.enable_auto_threads()
-        else:
-            compiled.disable_threads()
+    adjusted_pattern = _apply_regex_compat(pattern, compat)
+    native_flags = (
+        _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP if isinstance(adjusted_pattern, str) else 0
+    )
+    cached = cached_compile(adjusted_pattern, native_flags, Pattern, jit=jit)
+    compiled = _policy_wrapper(cached, thread_mode)
+    if limit and cache_input_allowed(pattern):
+        cache[key] = compiled
+        while len(cache) > limit:
+            cache.pop(next(iter(cache)))
     return compiled
 
 
@@ -961,37 +1081,31 @@ def _compile_flagged_builtin(
     compat: bool,
     thread_mode: str,
 ) -> Pattern:
+    if getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) != get_cache_epoch():
+        _synchronize_local_caches()
     cache = getattr(_DEFAULT_COMPILE_LOCAL, "flagged_cache", None)
     if cache is None:
         cache = _DEFAULT_COMPILE_LOCAL.flagged_cache = {}
 
-    key = (pattern, native_source_flags, bool(jit), bool(compat))
-    limit = get_cache_limit()
-    compiled = None if limit == 0 else cache.get(key)
+    key = (pattern, native_source_flags, bool(jit), bool(compat), thread_mode)
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    compiled = cache.get(key) if limit else None
     if compiled is None:
         adjusted_pattern = _apply_regex_compat(pattern, compat)
         effective_flags = _apply_default_unicode_flags(
             adjusted_pattern, native_source_flags
         )
-        compiled = cached_compile(
+        cached = cached_compile(
             adjusted_pattern,
             strip_py_only_flags(effective_flags),
             Pattern,
             jit=jit,
         )
-        if limit != 0:
+        compiled = _policy_wrapper(cached, thread_mode)
+        if limit and cache_input_allowed(pattern):
             cache[key] = compiled
-            maxsize = 256 if limit is None else min(256, limit)
-            while len(cache) > maxsize:
+            while len(cache) > limit:
                 cache.pop(next(iter(cache)))
-
-    if compiled.thread_mode != thread_mode:
-        if thread_mode == _THREAD_MODE_ENABLED:
-            compiled.enable_threads()
-        elif thread_mode == _THREAD_MODE_AUTO:
-            compiled.enable_auto_threads()
-        else:
-            compiled.disable_threads()
     return compiled
 
 
@@ -1020,11 +1134,10 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
         compiled = cached_compile(
             adjusted_pattern, native_flags, Pattern, jit=_DEFAULT_JIT
         )
-        if get_thread_default():
-            compiled.enable_auto_threads()
-        else:
-            compiled.disable_threads()
-        return compiled
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
+        return _policy_wrapper(compiled, thread_mode)
 
     resolved_flags = _normalise_flags(flags)
     threads_requested = bool(resolved_flags & THREADS)
@@ -1092,7 +1205,7 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     # Keep the direct flagged cache restricted to plain integer callers.  The
     # project IntFlag path retains the general cache, whose free-threaded
     # lifetime/eviction semantics are already hardened for randomized inputs.
-    if type(pattern) in (str, bytes) and type(flags) is int:
+    if type(pattern) in (str, bytes) and type(flags) in (int, Flag):
         if cached_compile is _ORIGINAL_CACHED_COMPILE:
             return _compile_flagged_builtin(
                 pattern,
@@ -1109,23 +1222,23 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     native_flags = strip_py_only_flags(effective_flags)
 
     compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=resolved_jit)
-    if threads_requested:
-        compiled.enable_threads()
-    elif no_threads_requested:
-        compiled.disable_threads()
-    else:
-        if thread_mode == _THREAD_MODE_AUTO:
-            compiled.enable_auto_threads()
-        else:
-            compiled.disable_threads()
-    return compiled
+    return _policy_wrapper(compiled, thread_mode)
 
 
-@lru_cache(maxsize=256)
+def _module_pattern_uncached(
+    pattern: str | bytes,
+    jit: bool,
+    compat_regex: bool,
+    thread_mode: str,
+) -> Pattern:
+    return _compile_default_snapshot(pattern, jit, compat_regex, thread_mode)
+
+
 def _cached_module_pattern(
     pattern: str | bytes,
     jit: bool,
     compat_regex: bool,
+    thread_mode: str,
 ) -> Pattern:
     """Reuse canonical wrappers for exact default-flag module calls.
 
@@ -1134,12 +1247,55 @@ def _cached_module_pattern(
     cache-key construction and wrapper setup from module-level helpers while
     keeping configuration changes in the cache key.
     """
-    return compile(pattern, flags=0)
+    _synchronize_local_caches()
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    if limit == 0 or not cache_input_allowed(pattern):
+        return _module_pattern_uncached(pattern, jit, compat_regex, thread_mode)
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "module_lru", None)
+    if cached is None:
+        cached = lru_cache(maxsize=limit)(_module_pattern_uncached)
+        _DEFAULT_COMPILE_LOCAL.module_lru = cached
+    return cached(pattern, jit, compat_regex, thread_mode)
+
+
+def _clear_module_cache() -> None:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "module_lru", None)
+    if cached is not None:
+        cached.cache_clear()
+    _DEFAULT_COMPILE_LOCAL.module_lru = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+
+
+def _module_cache_size() -> int:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "module_lru", None)
+    return 0 if cached is None else cached.cache_info().currsize
+
+
+_cached_module_pattern.cache_clear = _clear_module_cache  # type: ignore[attr-defined]
 
 
 def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
     if type(pattern) in (str, bytes) and type(flags) in (int, Flag) and flags == 0:
-        return _cached_module_pattern(pattern, _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX)
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
+        key = (pattern, bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX), thread_mode)
+        if (
+            getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) == get_cache_epoch()
+            and getattr(_DEFAULT_COMPILE_LOCAL, "module_hot_key", None) == key
+        ):
+            return _DEFAULT_COMPILE_LOCAL.module_hot_value
+        compiled = _cached_module_pattern(
+            pattern,
+            _DEFAULT_JIT,
+            _DEFAULT_COMPAT_REGEX,
+            thread_mode,
+        )
+        if _DEFAULT_COMPILE_LOCAL.effective_limit > 0 and cache_input_allowed(pattern):
+            _DEFAULT_COMPILE_LOCAL.module_hot_key = key
+            _DEFAULT_COMPILE_LOCAL.module_hot_value = compiled
+        return compiled
     return compile(pattern, flags=flags)
 
 
@@ -1258,9 +1414,6 @@ def subn(
             or (type(repl) is bytes and b"\\" not in repl and b"$" not in repl)
         )
     ):
-        literal_split = getattr(compiled, "_literal_split", None)
-        if literal_split is not None and type(string) is type(literal_split):
-            return compiled.subn(repl, string, count=count)
         fast = getattr(compiled._pattern, "_substitute_fast", None)
         if fast is not None:
             return fast(string, repl)
@@ -1478,8 +1631,7 @@ def clear_cache() -> None:
     """Clear the compiled pattern cache and release cached match-data/JIT buffers."""
 
     _clear_cache()
-    _DEFAULT_COMPILE_LOCAL.cache = {}
-    _DEFAULT_COMPILE_LOCAL.flagged_cache = {}
+    _cache_configuration_changed()
     _cached_module_pattern.cache_clear()
     _cached_replacement_parts.cache_clear()
     _cached_expand_template.cache_clear()

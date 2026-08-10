@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
-import pcre.cache as cache_mod
 import pytest
+
+import pcre.cache as cache_mod
 
 
 def test_env_flag_is_true() -> None:
@@ -87,16 +89,31 @@ def test_global_cache_clear_and_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(fresh_state.pattern_cache) == 0
 
 
-def test_global_set_cache_limit_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_global_set_cache_limit_none_uses_hard_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fresh_state = cache_mod._GlobalCacheState()
     monkeypatch.setattr(cache_mod, "_GLOBAL_STATE", fresh_state)
     monkeypatch.setattr(cache_mod, "_CACHE_STRATEGY", cache_mod._CacheStrategy.GLOBAL)
+    monkeypatch.setattr(
+        cache_mod._pcre2,
+        "compile",
+        lambda pattern, *, flags=0, jit=False: pattern,
+    )
+
+    def wrapper(raw: Any) -> Any:
+        return raw
 
     cache_mod.set_cache_limit(None)
     assert cache_mod.get_cache_limit() is None
+    for index in range(cache_mod._HARD_CACHE_ENTRY_LIMIT + 16):
+        cache_mod.cached_compile(str(index), 0, wrapper, jit=False)
+    assert len(fresh_state.pattern_cache) == cache_mod._HARD_CACHE_ENTRY_LIMIT
 
 
-def test_global_set_cache_limit_shrinks_existing_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_global_set_cache_limit_shrinks_existing_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> Any:
         return pattern
 
@@ -117,7 +134,9 @@ def test_global_set_cache_limit_shrinks_existing_entries(monkeypatch: pytest.Mon
     assert len(fresh_state.pattern_cache) == 1
 
 
-def test_global_cached_compile_handles_unhashable_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_global_cached_compile_handles_unhashable_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[Any] = []
 
     def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> Any:
@@ -140,7 +159,9 @@ def test_global_cached_compile_handles_unhashable_key(monkeypatch: pytest.Monkey
     assert len(fresh_state.pattern_cache) == 0
 
 
-def test_global_cached_compile_respects_limit_set_to_zero_after_compile(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_global_cached_compile_respects_limit_set_to_zero_after_compile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[Any] = []
 
     def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> Any:
@@ -161,3 +182,35 @@ def test_global_cached_compile_respects_limit_set_to_zero_after_compile(monkeypa
 
     cache_mod.cached_compile("x", 0, wrapper, jit=False)
     assert len(fresh_state.pattern_cache) == 0
+
+
+def test_global_clear_does_not_allow_inflight_compile_to_repopulate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fresh_state = cache_mod._GlobalCacheState()
+    monkeypatch.setattr(cache_mod, "_GLOBAL_STATE", fresh_state)
+    monkeypatch.setattr(cache_mod, "_CACHE_STRATEGY", cache_mod._CacheStrategy.GLOBAL)
+    compile_started = threading.Event()
+    finish_compile = threading.Event()
+
+    def fake_compile(pattern: Any, *, flags: int = 0, jit: bool = False) -> Any:
+        compile_started.set()
+        assert finish_compile.wait(timeout=5)
+        return pattern
+
+    monkeypatch.setattr(cache_mod._pcre2, "compile", fake_compile)
+    result: list[Any] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            cache_mod.cached_compile("inflight", 0, lambda raw: raw, jit=False)
+        )
+    )
+    worker.start()
+    assert compile_started.wait(timeout=5)
+    cache_mod.clear_cache()
+    finish_compile.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert result == ["inflight"]
+    assert fresh_state.pattern_cache == {}

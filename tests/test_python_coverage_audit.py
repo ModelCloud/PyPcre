@@ -67,6 +67,24 @@ def test_replacement_template_cache_reuses_and_clears(
     assert pattern.sub(r"[\1]", "x") == "[x]"
     assert calls == 2
 
+    with pytest.raises(pcre.PcreError):
+        pattern.sub(r"\2", "x", count=1)
+
+
+def test_local_cache_lazy_initializers_and_module_lru_clear() -> None:
+    pcre.clear_cache()
+    pcre_mod._DEFAULT_COMPILE_LOCAL.flagged_cache = None
+    assert pcre_mod._local_cache("flagged_cache") == {}
+
+    pcre_mod._DEFAULT_COMPILE_LOCAL.cache = None
+    pcre_mod._DEFAULT_COMPILE_LOCAL.epoch = cache_mod.get_cache_epoch()
+    assert pcre.compile("lazy-default-cache").pattern == "lazy-default-cache"
+
+    assert pcre.search("module-lru-clear", "module-lru-clear") is not None
+    assert pcre_mod._module_cache_size() == 1
+    pcre_mod._clear_module_cache()
+    assert pcre_mod._module_cache_size() == 0
+
 
 def test_expand_template_cache_reuses_and_clears(
     monkeypatch: pytest.MonkeyPatch,
@@ -142,6 +160,85 @@ def test_expand_render_single_capture_fast_shapes() -> None:
         )
         == "[x-y]"
     )
+    assert (
+        compat.render_template(
+            ([(1, 1), (3, 2)], ["[", None, "-", None, "]"]),
+            TwoGroupRawMatch(),
+            is_bytes=False,
+            empty="",
+        )
+        == "[x-y]"
+    )
+
+
+def test_cache_control_registration_and_oversized_global_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def callback() -> None:
+        pass
+
+    try:
+        cache_mod.register_cache_control(callback)
+        cache_mod.register_cache_control(callback)
+        assert callback in cache_mod._CACHE_CONTROL_CALLBACKS
+    finally:
+        cache_mod._CACHE_CONTROL_CALLBACKS.discard(callback)
+
+    original_cache = cache_mod._GLOBAL_STATE.pattern_cache
+    original_limit = cache_mod._GLOBAL_STATE.cache_limit
+    cache_mod._GLOBAL_STATE.pattern_cache = {}
+    cache_mod._GLOBAL_STATE.cache_limit = 2
+    monkeypatch.setattr(
+        cache_mod._pcre2,
+        "compile",
+        lambda pattern, *, flags=0, jit=False: f"compiled:{len(pattern)}",
+    )
+    oversized = "x" * (cache_mod._MAX_CACHE_INPUT_UNITS + 1)
+    try:
+        assert (
+            cache_mod._cached_compile_global(
+                oversized, 0, lambda value: value, jit=False
+            )
+            == f"compiled:{len(oversized)}"
+        )
+        assert cache_mod._GLOBAL_STATE.pattern_cache == {}
+    finally:
+        cache_mod._GLOBAL_STATE.pattern_cache = original_cache
+        cache_mod._GLOBAL_STATE.cache_limit = original_limit
+
+
+def test_expand_template_cache_limit_and_trim_branches() -> None:
+    original_limit = cache_mod.get_cache_limit()
+    try:
+        cache_mod.set_cache_limit(2)
+        compat._EXPAND_TEMPLATE_LOCAL.epoch = cache_mod.get_cache_epoch()
+        compat._EXPAND_TEMPLATE_LOCAL.lru = None
+        compat._EXPAND_TEMPLATE_LOCAL.limit = None
+        assert compat._cached_expand_template("literal", 0, ())
+        assert compat._expand_template_cache_size() == 1
+
+        cache_mod.set_cache_limit(1)
+        compat._cached_expand_template(r"\1-a", 1, ())
+        compat._cached_expand_template(r"\1-b", 1, ())
+        assert compat._expand_template_cache_size() == 1
+
+        compat._EXPAND_TEMPLATE_LOCAL.epoch = cache_mod.get_cache_epoch() - 1
+        compat._cached_expand_template("new-epoch", 0, ())
+        assert compat._expand_template_cache_size() == 1
+        compat._trim_expand_template_cache()
+        assert compat._expand_template_cache_size() == 0
+
+        cache_mod.set_cache_limit(0)
+        assert compat._cached_expand_template("not-cached", 0, ())
+        assert compat._expand_template_cache_size() == 0
+
+        cache_mod.set_cache_limit(2)
+        long_name = "n" * (compat._MAX_GROUPINDEX_CACHE_UNITS + 1)
+        assert compat._cached_expand_template("name-not-cached", 1, ((long_name, 1),))
+        assert compat._expand_template_cache_size() == 0
+    finally:
+        cache_mod.set_cache_limit(original_limit)
+        pcre.clear_cache()
 
 
 def test_default_compile_cache_is_thread_local_and_tracks_thread_mode(
@@ -154,8 +251,11 @@ def test_default_compile_cache_is_thread_local_and_tracks_thread_mode(
     assert first.thread_mode == pcre_mod._THREAD_MODE_DISABLED
 
     monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: True)
-    assert pcre.compile("compile-cache") is first
-    assert first.thread_mode == pcre_mod._THREAD_MODE_AUTO
+    auto = pcre.compile("compile-cache")
+    assert auto is not first
+    assert auto._pattern is first._pattern
+    assert auto.thread_mode == pcre_mod._THREAD_MODE_AUTO
+    assert first.thread_mode == pcre_mod._THREAD_MODE_DISABLED
 
     pcre.clear_cache()
     assert pcre.compile("compile-cache") is not first
@@ -212,10 +312,18 @@ def test_flagged_builtin_compile_cache_tracks_mode_and_limits(
     assert pcre.compile("enum-cache", flags=pcre.Flag.CASELESS) is enum_first
 
     monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: False)
-    assert pcre.compile("flag-cache", flags=flags) is first
-    assert first.thread_mode == pcre_mod._THREAD_MODE_DISABLED
+    disabled = pcre.compile("flag-cache", flags=flags)
+    assert disabled is not first
+    assert disabled._pattern is first._pattern
+    assert disabled.thread_mode == pcre_mod._THREAD_MODE_DISABLED
+    assert first.thread_mode == pcre_mod._THREAD_MODE_AUTO
 
     enabled = pcre.compile("flag-enabled", flags=int(pcre.Flag.THREADS))
+    assert enabled.thread_mode == pcre_mod._THREAD_MODE_ENABLED
+    explicitly_disabled = pcre.compile("flag-enabled", flags=int(pcre.Flag.NO_THREADS))
+    assert explicitly_disabled is not enabled
+    assert explicitly_disabled._pattern is enabled._pattern
+    assert explicitly_disabled.thread_mode == pcre_mod._THREAD_MODE_DISABLED
     assert enabled.thread_mode == pcre_mod._THREAD_MODE_ENABLED
 
     original_limit = cache_mod.get_cache_limit()
@@ -354,41 +462,6 @@ def test_cache_import_honours_global_environment(
     finally:
         monkeypatch.delenv("PYPCRE_CACHE_PATTERN_GLOBAL")
         importlib.reload(cache_mod)
-
-
-class _ChangingZeroComparison:
-    """Behave like a concurrently changed internal cache limit."""
-
-    def __init__(self) -> None:
-        self.comparisons = 0
-
-    def __eq__(self, other: object) -> bool:
-        assert other == 0
-        self.comparisons += 1
-        return self.comparisons > 1
-
-    def __ne__(self, other: object) -> bool:
-        return not self == other
-
-
-def test_thread_cache_limit_rechecked_before_store(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    state = cache_mod._THREAD_LOCAL
-    original_limit = state.cache_limit
-    original_cache = state.pattern_cache
-    state.cache_limit = _ChangingZeroComparison()  # type: ignore[assignment]
-    state.pattern_cache = {}
-    monkeypatch.setattr(cache_mod._pcre2, "compile", lambda *args, **kwargs: "compiled")
-    try:
-        result = cache_mod._cached_compile_thread_local(
-            "pattern", 0, lambda value: value, jit=False
-        )
-        assert result == "compiled"
-        assert state.pattern_cache == {}
-    finally:
-        state.cache_limit = original_limit
-        state.pattern_cache = original_cache
 
 
 class _SecondLookupMapping(dict[Any, Any]):

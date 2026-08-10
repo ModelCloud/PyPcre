@@ -10,14 +10,22 @@ from __future__ import annotations
 import operator
 import re as _std_re
 from functools import lru_cache
+from threading import local
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
 
 from ._stdlib_re import _parser
-
+from .cache import (
+    cache_input_allowed,
+    get_cache_epoch,
+    get_effective_cache_limit,
+    register_cache_control,
+)
 
 _CRawMatch = _pcre2.Match
+_EXPAND_TEMPLATE_LOCAL = local()
+_MAX_GROUPINDEX_CACHE_UNITS = 64 * 1024
 
 
 def prepare_subject(subject: Any) -> Any:
@@ -80,22 +88,84 @@ class TemplatePatternStub:
         self.groupindex = groupindex
 
 
-@lru_cache(maxsize=256)
+def _expand_template_uncached(
+    template: str | bytes,
+    groups: int,
+    groupindex_items: tuple[tuple[str, int], ...],
+) -> Any:
+    return _parser.parse_template(
+        template,
+        TemplatePatternStub(groups, dict(groupindex_items)),
+    )
+
+
 def _cached_expand_template(
     template: str | bytes,
     groups: int,
     groupindex_items: tuple[tuple[str, int], ...],
 ) -> Any:
-    """Cache immutable ``Match.expand`` parsing for repeated templates.
+    """Cache immutable ``Match.expand`` parsing in the active thread.
 
     The rendered result is still produced per call because it depends on the
     individual match.  The key snapshots the current name table, so a caller
     mutating the exposed ``groupindex`` mapping cannot reuse a stale parse.
     """
-    return _parser.parse_template(
-        template,
-        TemplatePatternStub(groups, dict(groupindex_items)),
-    )
+    epoch = get_cache_epoch()
+    if getattr(_EXPAND_TEMPLATE_LOCAL, "epoch", -1) != epoch:
+        cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+        if cached is not None:
+            cached.cache_clear()
+        _EXPAND_TEMPLATE_LOCAL.lru = None
+        _EXPAND_TEMPLATE_LOCAL.limit = get_effective_cache_limit()
+        _EXPAND_TEMPLATE_LOCAL.hot_key = None
+        _EXPAND_TEMPLATE_LOCAL.hot_value = None
+        _EXPAND_TEMPLATE_LOCAL.epoch = epoch
+    key = (template, groups, groupindex_items)
+    if getattr(_EXPAND_TEMPLATE_LOCAL, "hot_key", None) == key:
+        return _EXPAND_TEMPLATE_LOCAL.hot_value
+    names_size = sum(len(name) for name, _ in groupindex_items)
+    limit = getattr(_EXPAND_TEMPLATE_LOCAL, "limit", None)
+    if limit is None:
+        limit = get_effective_cache_limit()
+        _EXPAND_TEMPLATE_LOCAL.limit = limit
+    if (
+        limit == 0
+        or not cache_input_allowed(template)
+        or names_size > _MAX_GROUPINDEX_CACHE_UNITS
+    ):
+        return _expand_template_uncached(template, groups, groupindex_items)
+    cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+    if cached is None:
+        cached = lru_cache(maxsize=limit)(_expand_template_uncached)
+        _EXPAND_TEMPLATE_LOCAL.lru = cached
+    result = cached(template, groups, groupindex_items)
+    _EXPAND_TEMPLATE_LOCAL.hot_key = key
+    _EXPAND_TEMPLATE_LOCAL.hot_value = result
+    return result
+
+
+def _clear_expand_template_cache() -> None:
+    cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+    if cached is not None:
+        cached.cache_clear()
+    _EXPAND_TEMPLATE_LOCAL.lru = None
+    _EXPAND_TEMPLATE_LOCAL.limit = get_effective_cache_limit()
+    _EXPAND_TEMPLATE_LOCAL.hot_key = None
+    _EXPAND_TEMPLATE_LOCAL.hot_value = None
+    _EXPAND_TEMPLATE_LOCAL.epoch = get_cache_epoch()
+
+
+def _trim_expand_template_cache() -> None:
+    _clear_expand_template_cache()
+
+
+def _expand_template_cache_size() -> int:
+    cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+    return 0 if cached is None else cached.cache_info().currsize
+
+
+_cached_expand_template.cache_clear = _clear_expand_template_cache  # type: ignore[attr-defined]
+register_cache_control(_trim_expand_template_cache)
 
 
 def coerce_group_value(value: Any, *, is_bytes: bool, empty: Any) -> Any:
