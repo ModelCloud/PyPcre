@@ -7,7 +7,8 @@ Run from the repository root with either interpreter, for example::
 
 The benchmark intentionally uses short subjects so Python dispatch, template
 parsing, and object-wrapper costs are visible instead of being hidden by a
-large PCRE2 scan.  Set ``PYPCRE_BENCH_RUNS`` to change the iteration count.
+large PCRE2 scan.  Set ``PYPCRE_BENCH_RUNS`` and ``PYPCRE_BENCH_REPEATS`` to
+change the sample size.
 When running on a free-threaded build, an additional shared-pattern workload
 checks the concurrent execution path.
 """
@@ -16,20 +17,25 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import statistics
 import sys
 import time
+import timeit
 from collections.abc import Callable
 
 import pcre
 
-RUNS = int(os.getenv("PYPCRE_BENCH_RUNS", "50000"))
+RUNS = int(os.getenv("PYPCRE_BENCH_RUNS", "10000"))
+REPEATS = int(os.getenv("PYPCRE_BENCH_REPEATS", "5"))
 
 
 def _time(fn: Callable[[], object]) -> float:
-    started = time.perf_counter()
-    for _ in range(RUNS):
-        fn()
-    return (time.perf_counter() - started) * 1_000_000.0 / RUNS
+    # A separate Timer gives every operation a monomorphic call site. Keep the
+    # default whole-suite duration short as well: on asymmetric macOS hosts a
+    # sustained microbenchmark can migrate to efficiency cores despite its
+    # performance-tier task policy, creating a visible step in later rows.
+    samples = timeit.Timer(fn).repeat(repeat=REPEATS, number=RUNS)
+    return statistics.median(samples) * 1_000_000.0 / RUNS
 
 
 def main() -> int:
@@ -83,7 +89,10 @@ def main() -> int:
     ]
 
     gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)()
-    print(f"runtime={sys.version.split()[0]} gil_enabled={gil_enabled} runs={RUNS}")
+    print(
+        f"runtime={sys.version.split()[0]} gil_enabled={gil_enabled} "
+        f"runs={RUNS} repeats={REPEATS}"
+    )
     for name, operation in operations:
         print(f"{name:22s} {_time(operation):8.3f} us")
 
