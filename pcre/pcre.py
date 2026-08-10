@@ -615,6 +615,23 @@ class Pattern:
         return result
 
     def subn(self, repl: Any, subject: Any, count: Any = 0) -> tuple[Any, int]:
+        # Exact immutable literal replacements can bypass normalization and
+        # template setup.  Keep escaped templates, callables, subclasses,
+        # buffers, and bounded counts on the compatibility path.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and count == 0
+            and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
+            and ("$" not in repl if type(repl) is str else b"$" not in repl)
+        ):
+            fast_substitute = getattr(self._pattern, "_substitute_fast", None)
+            if fast_substitute is not None:
+                return fast_substitute(subject, repl)
+
         subject = prepare_subject(subject)
         subject_is_bytes = is_bytes_like(subject)
         empty = b"" if subject_is_bytes else ""

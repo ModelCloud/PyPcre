@@ -584,6 +584,13 @@ def test_c_split_default_dispatch_preserves_results() -> None:
     assert bytes_pattern.split(b"a b  c") == [b"a", b"b", b"c"]
 
 
+def test_c_literal_subn_default_dispatch_preserves_results() -> None:
+    pattern = pcre.compile(r"\w+")
+    assert pattern.subn("X", "a b") == ("X X", 2)
+    bytes_pattern = pcre.compile(rb"\w+")
+    assert bytes_pattern.subn(b"X", b"a b") == (b"X X", 2)
+
+
 def test_compile_existing_pattern_slow_path_and_jit_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
