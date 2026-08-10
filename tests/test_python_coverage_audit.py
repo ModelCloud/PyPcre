@@ -611,6 +611,21 @@ def test_c_literal_subn_default_dispatch_preserves_results() -> None:
     assert bytes_pattern.subn(b"X", b"a b") == (b"X X", 2)
 
 
+def test_c_plain_literal_subn_uses_builtin_only_for_safe_shape() -> None:
+    pattern = pcre.compile("foo")
+    assert pattern.subn("bar", "foo foo") == ("bar bar", 2)
+    assert pattern.subn("bar", "foo foo", count=1) == ("bar foo", 1)
+    assert pattern.subn("bar", "foo foo", count=-1) == ("bar bar", 2)
+    assert pattern.subn("bar", "no match") == ("no match", 0)
+
+    bytes_pattern = pcre.compile(b"foo")
+    assert bytes_pattern.subn(b"bar", b"foo foo") == (b"bar bar", 2)
+
+    # Regex metacharacters and escaped replacement syntax stay on PCRE2.
+    assert pcre.compile(".").subn("X", "ab") == ("XX", 2)
+    assert pcre.compile("foo").subn(r"\\g<0>", "foo") == (r"\g<0>", 1)
+
+
 def test_compile_existing_pattern_slow_path_and_jit_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

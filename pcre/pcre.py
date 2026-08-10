@@ -656,6 +656,32 @@ class Pattern:
         return result
 
     def subn(self, repl: Any, subject: Any, count: Any = 0) -> tuple[Any, int]:
+        # Plain literal patterns with literal replacements can use the built-in
+        # immutable replace/count primitives.  This is safe only for canonical
+        # exact text/bytes values and preserves Python's unlimited-count mapping
+        # (Pattern.subn uses zero or negative counts for unlimited replacement).
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and self._literal_split is not None
+            and type(subject) is type(self._literal_split)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
+            and ("$" not in repl if type(repl) is str else b"$" not in repl)
+        ):
+            if subject.find(self._literal_split[:1]) < 0:
+                return subject, 0
+            matched = subject.count(self._literal_split)
+            if matched == 0:
+                return subject, 0
+            if count > 0 and matched > count:
+                matched = count
+            return (
+                subject.replace(self._literal_split, repl, -1 if count <= 0 else count),
+                matched,
+            )
+
         # Exact immutable literal replacements can bypass normalization and
         # template setup.  Keep escaped templates, callables, subclasses,
         # buffers, and bounded counts on the compatibility path.
