@@ -9,14 +9,23 @@ from __future__ import annotations
 
 import operator
 import re as _std_re
+from functools import lru_cache
+from threading import local
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
 
 from ._stdlib_re import _parser
-
+from .cache import (
+    cache_input_allowed,
+    get_cache_epoch,
+    get_effective_cache_limit,
+    register_cache_control,
+)
 
 _CRawMatch = _pcre2.Match
+_EXPAND_TEMPLATE_LOCAL = local()
+_MAX_GROUPINDEX_CACHE_UNITS = 64 * 1024
 
 
 def prepare_subject(subject: Any) -> Any:
@@ -77,6 +86,86 @@ class TemplatePatternStub:
     def __init__(self, groups: int, groupindex: dict[str, int]):
         self.groups = groups
         self.groupindex = groupindex
+
+
+def _expand_template_uncached(
+    template: str | bytes,
+    groups: int,
+    groupindex_items: tuple[tuple[str, int], ...],
+) -> Any:
+    return _parser.parse_template(
+        template,
+        TemplatePatternStub(groups, dict(groupindex_items)),
+    )
+
+
+def _cached_expand_template(
+    template: str | bytes,
+    groups: int,
+    groupindex_items: tuple[tuple[str, int], ...],
+) -> Any:
+    """Cache immutable ``Match.expand`` parsing in the active thread.
+
+    The rendered result is still produced per call because it depends on the
+    individual match.  The key snapshots the current name table, so a caller
+    mutating the exposed ``groupindex`` mapping cannot reuse a stale parse.
+    """
+    epoch = get_cache_epoch()
+    if getattr(_EXPAND_TEMPLATE_LOCAL, "epoch", -1) != epoch:
+        cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+        if cached is not None:
+            cached.cache_clear()
+        _EXPAND_TEMPLATE_LOCAL.lru = None
+        _EXPAND_TEMPLATE_LOCAL.limit = get_effective_cache_limit()
+        _EXPAND_TEMPLATE_LOCAL.hot_key = None
+        _EXPAND_TEMPLATE_LOCAL.hot_value = None
+        _EXPAND_TEMPLATE_LOCAL.epoch = epoch
+    key = (template, groups, groupindex_items)
+    if getattr(_EXPAND_TEMPLATE_LOCAL, "hot_key", None) == key:
+        return _EXPAND_TEMPLATE_LOCAL.hot_value
+    names_size = sum(len(name) for name, _ in groupindex_items)
+    limit = getattr(_EXPAND_TEMPLATE_LOCAL, "limit", None)
+    if limit is None:
+        limit = get_effective_cache_limit()
+        _EXPAND_TEMPLATE_LOCAL.limit = limit
+    if (
+        limit == 0
+        or not cache_input_allowed(template)
+        or names_size > _MAX_GROUPINDEX_CACHE_UNITS
+    ):
+        return _expand_template_uncached(template, groups, groupindex_items)
+    cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+    if cached is None:
+        cached = lru_cache(maxsize=limit)(_expand_template_uncached)
+        _EXPAND_TEMPLATE_LOCAL.lru = cached
+    result = cached(template, groups, groupindex_items)
+    _EXPAND_TEMPLATE_LOCAL.hot_key = key
+    _EXPAND_TEMPLATE_LOCAL.hot_value = result
+    return result
+
+
+def _clear_expand_template_cache() -> None:
+    cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+    if cached is not None:
+        cached.cache_clear()
+    _EXPAND_TEMPLATE_LOCAL.lru = None
+    _EXPAND_TEMPLATE_LOCAL.limit = get_effective_cache_limit()
+    _EXPAND_TEMPLATE_LOCAL.hot_key = None
+    _EXPAND_TEMPLATE_LOCAL.hot_value = None
+    _EXPAND_TEMPLATE_LOCAL.epoch = get_cache_epoch()
+
+
+def _trim_expand_template_cache() -> None:
+    _clear_expand_template_cache()
+
+
+def _expand_template_cache_size() -> int:
+    cached = getattr(_EXPAND_TEMPLATE_LOCAL, "lru", None)
+    return 0 if cached is None else cached.cache_info().currsize
+
+
+_cached_expand_template.cache_clear = _clear_expand_template_cache  # type: ignore[attr-defined]
+register_cache_control(_trim_expand_template_cache)
 
 
 def coerce_group_value(value: Any, *, is_bytes: bool, empty: Any) -> Any:
@@ -144,6 +233,31 @@ def render_template(parsed: Any, match: "Match", *, is_bytes: bool, empty: Any) 
         and isinstance(parsed[1], list)
     ):
         group_slots, literals = parsed
+        if (
+            len(group_slots) == 1
+            and len(literals) == 1
+            and group_slots[0][0] == 0
+            and group_slots[0][1] >= 0
+            and literals[0] is None
+        ):
+            return coerce_group_value(
+                match.group(group_slots[0][1]),
+                is_bytes=is_bytes,
+                empty=empty,
+            )
+        if (
+            len(group_slots) == 1
+            and len(literals) == 3
+            and group_slots[0][0] == 1
+            and group_slots[0][1] >= 0
+            and literals[1] is None
+        ):
+            group_value = coerce_group_value(
+                match.group(group_slots[0][1]),
+                is_bytes=is_bytes,
+                empty=empty,
+            )
+            return literals[0] + group_value + literals[2]
         # Copy literals so repeated substitutions reuse the cached template.
         pieces: List[Any] = [empty if part is None else part for part in literals]
         for slot_index, group_index in group_slots:
@@ -155,11 +269,32 @@ def render_template(parsed: Any, match: "Match", *, is_bytes: bool, empty: Any) 
             )
         return join_parts(pieces, is_bytes=is_bytes)
 
+    if len(parsed) == 1 and isinstance(parsed[0], int):
+        return coerce_group_value(
+            match.group(parsed[0]),
+            is_bytes=is_bytes,
+            empty=empty,
+        )
+    if (
+        len(parsed) == 3
+        and isinstance(parsed[1], int)
+        and not isinstance(parsed[0], int)
+        and not isinstance(parsed[2], int)
+    ):
+        group_value = coerce_group_value(
+            match.group(parsed[1]),
+            is_bytes=is_bytes,
+            empty=empty,
+        )
+        return parsed[0] + group_value + parsed[2]
+
     pieces: List[Any] = []
     for item in parsed:
         if isinstance(item, int):
             group_value = match.group(item)
-            pieces.append(coerce_group_value(group_value, is_bytes=is_bytes, empty=empty))
+            pieces.append(
+                coerce_group_value(group_value, is_bytes=is_bytes, empty=empty)
+            )
         else:
             pieces.append(item)
     return join_parts(pieces, is_bytes=is_bytes)
@@ -176,10 +311,17 @@ def expand_match_template(match: Any, template: Any) -> Any:
         if not isinstance(template, str):
             raise TypeError("template must be str for text matches")
 
-    parsed = _parser.parse_template(
-        template,
-        TemplatePatternStub(match.re.groups, match.re.groupindex),
-    )
+    groups = int(match.re.groups)
+    groupindex = match.re.groupindex
+    try:
+        parsed = _cached_expand_template(template, groups, tuple(groupindex.items()))
+    except (AttributeError, TypeError):
+        # Preserve compatibility with legacy mapping-like pattern doubles and
+        # unhashable custom templates.
+        parsed = _parser.parse_template(
+            template,
+            TemplatePatternStub(groups, groupindex),
+        )
     return render_template(parsed, match, is_bytes=is_bytes, empty=empty)
 
 
@@ -243,7 +385,9 @@ def is_capturing_group_start(source: str, index: int) -> bool:
     if source.startswith("(?P<", index) or source.startswith("(?P'", index):
         return True
     if source.startswith("(?<", index):
-        return not (source.startswith("(?<=", index) or source.startswith("(?<!", index))
+        return not (
+            source.startswith("(?<=", index) or source.startswith("(?<!", index)
+        )
     if source.startswith("(?'", index):
         return True
     if source.startswith("(?|", index):
@@ -270,7 +414,9 @@ def is_capturing_group_start(source: str, index: int) -> bool:
 class Match:
     __slots__ = ("_match", "_pattern", "_string", "_pos", "_endpos")
 
-    def __init__(self, pattern: Any, match: _CRawMatch, subject: Any, pos: int, endpos: int) -> None:
+    def __init__(
+        self, pattern: Any, match: _CRawMatch, subject: Any, pos: int, endpos: int
+    ) -> None:
         self._match = match
         self._pattern = pattern
         self._string = subject

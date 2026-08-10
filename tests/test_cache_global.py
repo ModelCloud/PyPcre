@@ -13,13 +13,12 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, Dict
-
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run_global_cache_script(source: str) -> Dict[str, Any]:
+def _run_global_cache_script(source: str) -> dict[str, Any]:
     env = os.environ.copy()
     pythonpath_entries = [str(PROJECT_ROOT)]
     existing_pythonpath = env.get("PYTHONPATH")
@@ -134,3 +133,33 @@ def test_global_cache_shrinks_to_new_limit() -> None:
     )
     result = _run_global_cache_script(script)
     assert result["size"] == 2
+
+
+def test_global_cache_shares_only_immutable_code_between_thread_policies() -> None:
+    script = textwrap.dedent(
+        """
+        import concurrent.futures
+        import json
+        import threading
+        import pcre
+
+        barrier = threading.Barrier(2)
+        def worker(flag):
+            barrier.wait(timeout=5)
+            pattern = pcre.compile("shared-policy", flags=int(flag))
+            return id(pattern), id(pattern._pattern), pattern.thread_mode
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            enabled_future = executor.submit(worker, pcre.Flag.THREADS)
+            disabled_future = executor.submit(worker, pcre.Flag.NO_THREADS)
+            enabled = enabled_future.result()
+            disabled = disabled_future.result()
+
+        print(json.dumps({"enabled": enabled, "disabled": disabled}))
+        """
+    )
+    result = _run_global_cache_script(script)
+    assert result["enabled"][0] != result["disabled"][0]
+    assert result["enabled"][1] == result["disabled"][1]
+    assert result["enabled"][2] == "enabled"
+    assert result["disabled"][2] == "disabled"

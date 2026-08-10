@@ -46,7 +46,9 @@ class TestThreadedBackend(unittest.TestCase):
         subjects = ["a" * 70_000, "b" * 70_000]
 
         with mock.patch("pcre.pcre.ensure_thread_pool") as ensure_mock:
-            ensure_mock.side_effect = lambda *args, **kwargs: thread_utils.ensure_thread_pool(*args, **kwargs)
+            ensure_mock.side_effect = lambda *args, **kwargs: (
+                thread_utils.ensure_thread_pool(*args, **kwargs)
+            )
             results = pcre.parallel_map(pattern, subjects)
 
         self.assertTrue(ensure_mock.called)
@@ -65,11 +67,29 @@ class TestThreadedBackend(unittest.TestCase):
         self.assertEqual([match.group(0) for match in results], subjects)
         self.assertTrue(pattern.use_threads)
 
+    def test_parallel_map_batches_work_without_changing_order(self):
+        pattern = pcre.compile(r"\w+", Flag.THREADS)
+        subjects = [word * 2_000 for word in ("alpha", "beta", "gamma", "delta", "epsilon")]
+        executor = thread_utils.ensure_thread_pool(2)
+        with (
+            mock.patch("pcre.pcre.ensure_thread_pool", return_value=executor),
+            mock.patch("pcre.pcre.get_thread_pool_size", return_value=2),
+            mock.patch.object(executor, "submit", wraps=executor.submit) as submit,
+        ):
+            results = pcre.parallel_map(pattern, subjects, method="search")
+
+        self.assertEqual([match.group(0) for match in results], subjects)
+        # Five inputs on two workers are split into three ordered batches.
+        self.assertEqual(submit.call_count, 3)
+
     def test_pattern_parallel_map(self):
         pattern = pcre.compile(r"\d+", Flag.THREADS)
-        subjects = ["1", "22", "nope"]
+        subjects = ["1", "22", "nope", "4444", "5", "66", "nope", "7777", "8"]
         results = pattern.parallel_map(subjects, method="findall")
-        self.assertEqual(results, [["1"], ["22"], []])
+        self.assertEqual(
+            results,
+            [["1"], ["22"], [], ["4444"], ["5"], ["66"], [], ["7777"], ["8"]],
+        )
 
     def test_compile_existing_pattern_toggle(self):
         pattern = pcre.compile(r"foo")
@@ -93,7 +113,9 @@ class TestThreadedBackend(unittest.TestCase):
         subjects = ["bench"] * 32
         sequential_pattern = pcre.compile(r"bench")
         start_seq = time.perf_counter()
-        sequential_results = [sequential_pattern.search(subject) for subject in subjects]
+        sequential_results = [
+            sequential_pattern.search(subject) for subject in subjects
+        ]
         seq_elapsed = time.perf_counter() - start_seq
 
         threaded_pattern = pcre.compile(r"bench", Flag.THREADS)

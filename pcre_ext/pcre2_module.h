@@ -91,6 +91,8 @@ typedef struct {
     int subject_is_bytes;
     uint32_t replay_options;
     int lastindex_cache;
+    /* Lazily materialized immutable regs tuple; protected for GIL=0 callers. */
+    PyObject *regs_cache;
 } MatchObject;
 
 extern PyTypeObject PatternType;

@@ -9,15 +9,22 @@ from __future__ import annotations
 
 import re as _std_re
 from collections.abc import Iterable, Iterator, Mapping
+from functools import lru_cache
+from threading import local
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
 
 from ._stdlib_re import RE_TEMPLATE, RE_TEMPLATE_FLAG, RE_UNICODE_FLAG, _parser
-from .cache import cached_compile
+from .cache import (
+    cache_input_allowed,
+    cached_compile,
+    get_cache_epoch,
+    get_effective_cache_limit,
+    register_cache_control,
+)
 from .cache import clear_cache as _clear_cache
 from .flags import Flag, strip_py_only_flags
-
 
 # Cache frequently used flag values as plain integers to avoid the overhead of
 # IntFlag arithmetic in hot paths such as module-level search helpers.
@@ -33,6 +40,7 @@ from .re_compat import (
 )
 from .re_compat import (
     TemplatePatternStub,
+    _cached_expand_template,
     coerce_group_value,
     coerce_subject_slice,
     compute_next_pos,
@@ -49,11 +57,12 @@ from .threads import (
     ensure_thread_pool,
     get_auto_threshold,
     get_thread_default,
+    get_thread_pool_size,
     threading_supported,
 )
 
-
 _CPattern = _pcre2.Pattern
+_ORIGINAL_CACHED_COMPILE = cached_compile
 PcreError = _pcre2.PcreError
 Match = getattr(_pcre2, "Match", _CompatMatch)
 _ATTACH_MATCH = getattr(_pcre2, "_attach_match", None)
@@ -63,11 +72,69 @@ FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 
 _DEFAULT_JIT = True
 _DEFAULT_COMPAT_REGEX = False
+_DEFAULT_COMPILE_LOCAL = local()
+_LOCAL_CACHE_NAMES = ("cache", "flagged_cache")
 
 
 _THREAD_MODE_DISABLED = "disabled"
 _THREAD_MODE_ENABLED = "enabled"
 _THREAD_MODE_AUTO = "auto"
+
+
+def _synchronize_local_caches() -> None:
+    epoch = get_cache_epoch()
+    if getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) == epoch:
+        return
+    for name in ("module_lru", "replacement_lru"):
+        cached = getattr(_DEFAULT_COMPILE_LOCAL, name, None)
+        if cached is not None:
+            cached.cache_clear()
+        setattr(_DEFAULT_COMPILE_LOCAL, name, None)
+    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
+    for name in _LOCAL_CACHE_NAMES:
+        setattr(_DEFAULT_COMPILE_LOCAL, name, {})
+    _DEFAULT_COMPILE_LOCAL.effective_limit = get_effective_cache_limit()
+    _DEFAULT_COMPILE_LOCAL.epoch = epoch
+
+
+def _local_cache(name: str) -> dict[Any, Any]:
+    _synchronize_local_caches()
+    cache = getattr(_DEFAULT_COMPILE_LOCAL, name, None)
+    if cache is None:
+        cache = {}
+        setattr(_DEFAULT_COMPILE_LOCAL, name, cache)
+    return cache
+
+
+def _trim_local_cache(cache: dict[Any, Any]) -> None:
+    limit = get_effective_cache_limit()
+    if limit == 0:
+        cache.clear()
+        return
+    while len(cache) > limit:
+        cache.pop(next(iter(cache)))
+
+
+def _cache_configuration_changed() -> None:
+    _synchronize_local_caches()
+    for name in _LOCAL_CACHE_NAMES:
+        _trim_local_cache(_local_cache(name))
+    for name in ("module_lru", "replacement_lru"):
+        cached = getattr(_DEFAULT_COMPILE_LOCAL, name, None)
+        if cached is not None:
+            cached.cache_clear()
+        setattr(_DEFAULT_COMPILE_LOCAL, name, None)
+    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.effective_limit = get_effective_cache_limit()
+
+
+register_cache_control(_cache_configuration_changed)
 
 
 def _can_attach_match(raw: Any) -> bool:
@@ -138,7 +205,9 @@ def _apply_default_unicode_flags(pattern: Any, flags: int) -> int:
 
 
 def _coerce_stdlib_regexflag(flag: _std_re.RegexFlag) -> int:
-    unsupported_bits = int(flag) & ~(_STD_RE_FLAG_MASK | RE_TEMPLATE_FLAG | RE_UNICODE_FLAG)
+    unsupported_bits = int(flag) & ~(
+        _STD_RE_FLAG_MASK | RE_TEMPLATE_FLAG | RE_UNICODE_FLAG
+    )
     if unsupported_bits:
         unsupported = _std_re.RegexFlag(unsupported_bits)
         raise ValueError(
@@ -224,7 +293,13 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
 class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
-    __slots__ = ("_pattern", "_groups_hint", "_thread_mode", "_is_c_pattern")
+    __slots__ = (
+        "_pattern",
+        "_groups_hint",
+        "_thread_mode",
+        "_is_c_pattern",
+        "_literal_split",
+    )
 
     def __init__(self, pattern: _CPattern) -> None:
         self._pattern = pattern
@@ -234,6 +309,27 @@ class Pattern:
             self._groups_hint = pattern.capture_count
         except AttributeError:  # pragma: no cover - older extension fallback
             self._groups_hint = maybe_infer_group_count(pattern.pattern)
+
+        literal_split: str | bytes | None = None
+        if self._is_c_pattern:
+            source = pattern.pattern
+            if type(source) in (str, bytes) and source:
+                metacharacters = (
+                    ".^$*+?{}[]\\|()" if type(source) is str else b".^$*+?{}[]\\|()"
+                )
+                expected_flags = (
+                    _pcre2.PCRE2_UTF
+                    | _pcre2.PCRE2_UCP
+                    | getattr(_pcre2, "PCRE2_NEVER_BACKSLASH_C", 0x00100000)
+                    if type(source) is str
+                    else 0
+                )
+                if (
+                    not any(char in metacharacters for char in source)
+                    and pattern.flags == expected_flags
+                ):
+                    literal_split = source
+        self._literal_split = literal_split
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -315,7 +411,9 @@ class Pattern:
             raw = self._pattern.match(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
-            raw = self._pattern.match(subject, pos=pos, endpos=resolved_end, options=options)
+            raw = self._pattern.match(
+                subject, pos=pos, endpos=resolved_end, options=options
+            )
         if raw is None:
             return None
         return self._wrap_match(raw, subject, pos, resolved_end)
@@ -340,7 +438,9 @@ class Pattern:
             raw = self._pattern.search(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
-            raw = self._pattern.search(subject, pos=pos, endpos=resolved_end, options=options)
+            raw = self._pattern.search(
+                subject, pos=pos, endpos=resolved_end, options=options
+            )
         if raw is None:
             return None
         return self._wrap_match(raw, subject, pos, resolved_end)
@@ -363,7 +463,9 @@ class Pattern:
             raw = self._pattern.fullmatch(subject, pos=pos, options=options)
         else:
             resolved_end = resolve_endpos(subject, endpos)
-            raw = self._pattern.fullmatch(subject, pos=pos, endpos=resolved_end, options=options)
+            raw = self._pattern.fullmatch(
+                subject, pos=pos, endpos=resolved_end, options=options
+            )
         if raw is None:
             return None
         return self._wrap_match(raw, subject, pos, resolved_end)
@@ -385,14 +487,21 @@ class Pattern:
             if self._is_c_pattern:
                 # The C iterator stamps each Match with this public Pattern, so
                 # we can return it directly without per-match Python wrapping.
+                fast_finditer = getattr(self._pattern, "_finditer_fast", None)
+                if fast_finditer is not None:
+                    return fast_finditer(subject, pos, compiled_end, options, self)
                 return backend_iter(subject, pos, compiled_end, options, self)
             raw_iter = None
             try:
-                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options, owner=self)
+                raw_iter = backend_iter(
+                    subject, pos=pos, endpos=compiled_end, options=options, owner=self
+                )
             except TypeError:
                 # Older extensions and test doubles may not accept `owner`.
                 try:
-                    raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                    raw_iter = backend_iter(
+                        subject, pos=pos, endpos=compiled_end, options=options
+                    )
                 except TypeError:
                     raw_iter = None
             if raw_iter is not None:
@@ -404,14 +513,18 @@ class Pattern:
                 except StopIteration:
                     return iter([])
                 if _can_attach_match(peek) and peek.re is self:
+
                     def _owned_iter():
                         yield peek
                         yield from raw_iter
+
                     return _owned_iter()
+
                 def _wrapped_iter():
                     yield self._wrap_match(peek, subject, pos, resolved_end)
                     for raw in raw_iter:
                         yield self._wrap_match(raw, subject, pos, resolved_end)
+
                 return _wrapped_iter()
 
         search_end = resolved_end if endpos is not None else -1
@@ -422,7 +535,9 @@ class Pattern:
         def _generator():
             nonlocal current
             while True:
-                raw = self._pattern.search(subject, pos=current, endpos=search_end, options=options)
+                raw = self._pattern.search(
+                    subject, pos=current, endpos=search_end, options=options
+                )
                 if raw is None:
                     break
 
@@ -451,11 +566,39 @@ class Pattern:
     ) -> List[Any]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        literal_source = getattr(self, "_literal_split", None)
+        if (
+            getattr(self, "_is_c_pattern", False)
+            and type(self) is Pattern
+            and literal_source is not None
+            and type(subject) is type(literal_source)
+            and type(pos) is int
+            and pos == 0
+            and endpos is None
+            and type(options) is int
+            and options == 0
+        ):
+            if subject.find(literal_source[:1]) < 0:
+                return []
+            return [literal_source] * subject.count(literal_source)
         backend_findall = getattr(self._pattern, "findall", None)
         if backend_findall is not None:
             compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
+            if (
+                self._is_c_pattern
+                and type(pos) is int
+                and pos == 0
+                and endpos is None
+                and type(options) is int
+                and options == 0
+            ):
+                fast = getattr(self._pattern, "_findall_fast", None)
+                if fast is not None:
+                    return fast(subject)
             try:
-                return backend_findall(subject, pos=pos, endpos=compiled_end, options=options)
+                return backend_findall(
+                    subject, pos=pos, endpos=compiled_end, options=options
+                )
             except TypeError:
                 pass
 
@@ -463,7 +606,9 @@ class Pattern:
         if backend_iter is not None:
             compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
             try:
-                raw_iter = backend_iter(subject, pos=pos, endpos=compiled_end, options=options)
+                raw_iter = backend_iter(
+                    subject, pos=pos, endpos=compiled_end, options=options
+                )
             except TypeError:
                 raw_iter = None
             if raw_iter is not None:
@@ -477,7 +622,9 @@ class Pattern:
                 return results
 
         results: List[Any] = []
-        for match_obj in self.finditer(subject, pos=pos, endpos=endpos, options=options):
+        for match_obj in self.finditer(
+            subject, pos=pos, endpos=endpos, options=options
+        ):
             groups = match_obj.groups()
             if groups:
                 results.append(groups[0] if len(groups) == 1 else groups)
@@ -486,6 +633,36 @@ class Pattern:
         return results
 
     def split(self, subject: Any, maxsplit: Any = 0) -> List[Any]:
+        # A plain literal has exactly the same split semantics as the built-in
+        # immutable string/bytes splitter.  The immutable construction check
+        # restricts this to canonical patterns with default options.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(maxsplit) is int
+            and type(subject) is type(self._literal_split)
+        ):
+            # Python's explicit ``maxsplit=0`` means unlimited splitting for
+            # ``Pattern.split`` (unlike ``str.split(sep, 0)``).
+            split_limit = -1 if maxsplit == 0 else (0 if maxsplit < 0 else maxsplit)
+            return subject.split(self._literal_split, split_limit)
+
+        # The common immutable/default shape can go straight to the C splitter.
+        # Keep subclasses, buffer exporters, and non-default limits on the
+        # compatibility path so their coercion and override semantics remain
+        # unchanged.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(maxsplit) is int
+            and maxsplit == 0
+        ):
+            fast_split = getattr(self._pattern, "_split_fast", None)
+            if fast_split is not None:
+                return fast_split(subject, 0)
+
         subject = prepare_subject(subject)
         limit = normalise_count(maxsplit)
         if limit == 0:
@@ -499,12 +676,19 @@ class Pattern:
         # Empty patterns split at every code point/byte; avoid per-match overhead.
         if limit is None and self.pattern in ("", b""):
             if is_bytes_like(subject):
-                return [b""] + [bytes(subject[i : i + 1]) for i in range(len(subject))] + [b""]
+                return (
+                    [b""]
+                    + [bytes(subject[i : i + 1]) for i in range(len(subject))]
+                    + [b""]
+                )
             return [""] + list(subject) + [""]
 
         backend_split = getattr(self._pattern, "split", None)
         if backend_split is not None:
             try:
+                fast_split = getattr(self._pattern, "_split_fast", None)
+                if fast_split is not None:
+                    return fast_split(subject, 0 if limit is None else limit)
                 return backend_split(subject, 0 if limit is None else limit)
             except TypeError:
                 pass
@@ -520,17 +704,29 @@ class Pattern:
                 break
 
             start, end = match_obj.span()
-            parts.append(coerce_subject_slice(subject, last_end, start, is_bytes=subject_is_bytes))
+            parts.append(
+                coerce_subject_slice(
+                    subject, last_end, start, is_bytes=subject_is_bytes
+                )
+            )
 
             groups = match_obj.groups()
             if groups:
                 for value in groups:
-                    parts.append(coerce_group_value(value, is_bytes=subject_is_bytes, empty=empty))
+                    parts.append(
+                        coerce_group_value(
+                            value, is_bytes=subject_is_bytes, empty=empty
+                        )
+                    )
 
             last_end = end
             splits_done += 1
 
-        parts.append(coerce_subject_slice(subject, last_end, len(subject), is_bytes=subject_is_bytes))
+        parts.append(
+            coerce_subject_slice(
+                subject, last_end, len(subject), is_bytes=subject_is_bytes
+            )
+        )
         return parts
 
     def sub(self, repl: Any, subject: Any, count: Any = 0) -> Any:
@@ -538,6 +734,51 @@ class Pattern:
         return result
 
     def subn(self, repl: Any, subject: Any, count: Any = 0) -> tuple[Any, int]:
+        # Plain literal patterns with literal replacements can use the built-in
+        # immutable replace/count primitives.  This is safe only for canonical
+        # exact text/bytes values and preserves Python's count mapping (zero
+        # means unlimited replacement while negative counts perform none).
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and self._literal_split is not None
+            and type(subject) is type(self._literal_split)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
+            and ("$" not in repl if type(repl) is str else b"$" not in repl)
+        ):
+            if subject.find(self._literal_split[:1]) < 0:
+                return subject, 0
+            if count < 0:
+                return subject, 0
+            matched = subject.count(self._literal_split)
+            if matched == 0:
+                return subject, 0
+            if count > 0 and matched > count:
+                matched = count
+            return (
+                subject.replace(self._literal_split, repl, -1 if count <= 0 else count),
+                matched,
+            )
+
+        # Exact immutable literal replacements can bypass normalization and
+        # template setup.  Keep escaped templates, callables, subclasses,
+        # buffers, and bounded counts on the compatibility path.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and count == 0
+            and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
+            and ("$" not in repl if type(repl) is str else b"$" not in repl)
+        ):
+            fast_substitute = getattr(self._pattern, "_substitute_fast", None)
+            if fast_substitute is not None:
+                return fast_substitute(subject, repl)
+
         subject = prepare_subject(subject)
         subject_is_bytes = is_bytes_like(subject)
         empty = b"" if subject_is_bytes else ""
@@ -546,42 +787,95 @@ class Pattern:
         callable_repl = callable(repl)
         template = None
         parsed_template: List[Any] | None = None
+        has_extended_syntax = False
 
         if not callable_repl:
             if subject_is_bytes:
                 if not is_bytes_like(repl):
-                    raise TypeError("replacement must be bytes-like when substituting on bytes")
+                    raise TypeError(
+                        "replacement must be bytes-like when substituting on bytes"
+                    )
                 template = bytes(repl)
             else:
                 if not isinstance(repl, str):
                     raise TypeError("replacement must be str when substituting on text")
                 template = repl
 
+            has_extended_syntax = (
+                b"\\" in template or b"$" in template
+                if subject_is_bytes
+                else str.__contains__(template, "\\") or str.__contains__(template, "$")
+            )
+
             if limit is None:
                 backend_substitute = getattr(self._pattern, "substitute", None)
                 if backend_substitute is not None:
+                    # PCRE2's extended replacement syntax only treats ``\\``
+                    # and ``$`` specially.  A replacement without either is
+                    # already a literal Python template, so skip the costly
+                    # ``sre_parse.parse_template`` round-trip.  This path is
+                    # immutable and per-call, so it remains safe when the same
+                    # Pattern is used concurrently by GIL-free threads.
+                    if not has_extended_syntax:
+                        try:
+                            fast_substitute = getattr(
+                                self._pattern, "_substitute_fast", None
+                            )
+                            if fast_substitute is not None:
+                                return fast_substitute(subject, template)
+                            return backend_substitute(
+                                subject, replacement=template, count=0
+                            )
+                        except TypeError:
+                            pass
                     try:
-                        parsed_template = _parser.parse_template(
-                            template,
-                            TemplatePatternStub(self.groups, self.groupindex),
-                        )
+                        if type(self) is Pattern and type(template) in (str, bytes):
+                            parsed_template, pcre2_repl = _cached_replacement_parts(
+                                self, template, subject_is_bytes
+                            )
+                        else:
+                            parsed_template = _parser.parse_template(
+                                template,
+                                TemplatePatternStub(self.groups, self.groupindex),
+                            )
+                            pcre2_repl = _pcre2_replacement_from_parsed(
+                                parsed_template, subject_is_bytes
+                            )
                     except (ValueError, _std_re.error, IndexError) as exc:
                         raise PcreError(str(exc)) from exc
-                    pcre2_repl = _pcre2_replacement_from_parsed(parsed_template, subject_is_bytes)
                     try:
-                        backend_result = backend_substitute(subject, replacement=pcre2_repl, count=0)
+                        fast_substitute = getattr(
+                            self._pattern, "_substitute_fast", None
+                        )
+                        if fast_substitute is not None:
+                            return fast_substitute(subject, pcre2_repl)
+                        backend_result = backend_substitute(
+                            subject, replacement=pcre2_repl, count=0
+                        )
                     except Exception:
                         backend_result = NotImplemented
-                    if backend_result is not NotImplemented and backend_result is not None:
+                    if (
+                        backend_result is not NotImplemented
+                        and backend_result is not None
+                    ):
                         return backend_result
                     parsed_template = None
 
-            if self._groups_hint is not None:
+            if not has_extended_syntax:
+                # A flat one-item parsed template is equivalent to a literal
+                # replacement and avoids reparsing for bounded substitutions.
+                parsed_template = [template]
+            elif self._groups_hint is not None:
                 try:
-                    parsed_template = _parser.parse_template(
-                        template,
-                        TemplatePatternStub(self._groups_hint, self.groupindex),
-                    )
+                    if type(self) is Pattern and type(template) in (str, bytes):
+                        parsed_template, _ = _cached_replacement_parts(
+                            self, template, subject_is_bytes
+                        )
+                    else:
+                        parsed_template = _parser.parse_template(
+                            template,
+                            TemplatePatternStub(self._groups_hint, self.groupindex),
+                        )
                 except (ValueError, _std_re.error, IndexError) as exc:
                     raise PcreError(str(exc)) from exc
 
@@ -594,14 +888,20 @@ class Pattern:
                 break
 
             start, end = match_obj.span()
-            parts.append(coerce_subject_slice(subject, last_end, start, is_bytes=subject_is_bytes))
+            parts.append(
+                coerce_subject_slice(
+                    subject, last_end, start, is_bytes=subject_is_bytes
+                )
+            )
 
             if not callable_repl:
                 if parsed_template is None:
                     try:
                         parsed_template = _parser.parse_template(
                             template,
-                            TemplatePatternStub(len(match_obj.groups()), self.groupindex),
+                            TemplatePatternStub(
+                                len(match_obj.groups()), self.groupindex
+                            ),
                         )
                     except (ValueError, _std_re.error, IndexError) as exc:
                         raise PcreError(str(exc)) from exc
@@ -614,17 +914,22 @@ class Pattern:
                     empty=empty,
                 )
             else:
-                replacement = normalise_replacement(repl(match_obj), is_bytes=subject_is_bytes)
+                replacement = normalise_replacement(
+                    repl(match_obj), is_bytes=subject_is_bytes
+                )
 
             parts.append(replacement)
 
             substitutions += 1
             last_end = end
 
-        parts.append(coerce_subject_slice(subject, last_end, len(subject), is_bytes=subject_is_bytes))
+        parts.append(
+            coerce_subject_slice(
+                subject, last_end, len(subject), is_bytes=subject_is_bytes
+            )
+        )
         result = join_parts(parts, is_bytes=subject_is_bytes)
         return result, substitutions
-
 
     def parallel_map(
         self,
@@ -652,6 +957,158 @@ class Pattern:
         )
 
 
+# Keep stable references so optional C dispatch does not bypass runtime
+# instrumentation or tests that replace a public wrapper method.
+_PATTERN_METHODS_FOR_FAST = {
+    name: getattr(Pattern, name) for name in ("match", "search", "fullmatch", "findall")
+}
+
+
+def _replacement_parts_uncached(
+    pattern: Pattern, template: str | bytes, is_bytes: bool
+) -> tuple[Any, Any]:
+    parsed = _parser.parse_template(
+        template,
+        TemplatePatternStub(pattern.groups, pattern.groupindex),
+    )
+    return parsed, _pcre2_replacement_from_parsed(parsed, is_bytes)
+
+
+def _cached_replacement_parts(
+    pattern: Pattern, template: str | bytes, is_bytes: bool
+) -> tuple[Any, Any]:
+    """Cache immutable replacement parsing/conversion in the active thread."""
+
+    _synchronize_local_caches()
+    key = (pattern, template, is_bytes)
+    if getattr(_DEFAULT_COMPILE_LOCAL, "replacement_hot_key", None) == key:
+        return _DEFAULT_COMPILE_LOCAL.replacement_hot_value
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    if (
+        limit == 0
+        or not cache_input_allowed(template)
+        or not cache_input_allowed(pattern.pattern)
+    ):
+        return _replacement_parts_uncached(pattern, template, is_bytes)
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "replacement_lru", None)
+    if cached is None:
+        cached = lru_cache(maxsize=limit)(_replacement_parts_uncached)
+        _DEFAULT_COMPILE_LOCAL.replacement_lru = cached
+    result = cached(pattern, template, is_bytes)
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = key
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = result
+    return result
+
+
+def _clear_replacement_cache() -> None:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "replacement_lru", None)
+    if cached is not None:
+        cached.cache_clear()
+    _DEFAULT_COMPILE_LOCAL.replacement_lru = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
+
+
+def _replacement_cache_size() -> int:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "replacement_lru", None)
+    return 0 if cached is None else cached.cache_info().currsize
+
+
+_cached_replacement_parts.cache_clear = _clear_replacement_cache  # type: ignore[attr-defined]
+
+
+def _policy_wrapper(compiled: Pattern, thread_mode: str) -> Pattern:
+    """Create a policy-local wrapper around immutable cached PCRE2 code."""
+
+    result = Pattern(compiled._pattern)
+    if thread_mode == _THREAD_MODE_ENABLED:
+        result.enable_threads()
+    elif thread_mode == _THREAD_MODE_AUTO:
+        result.enable_auto_threads()
+    else:
+        result.disable_threads()
+    return result
+
+
+def _compile_default_builtin(pattern: str | bytes) -> Pattern:
+    """Compile an exact built-in pattern through a per-thread direct cache."""
+    thread_mode = _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+    return _compile_default_snapshot(
+        pattern,
+        bool(_DEFAULT_JIT),
+        bool(_DEFAULT_COMPAT_REGEX),
+        thread_mode,
+    )
+
+
+def _compile_default_snapshot(
+    pattern: str | bytes,
+    jit: bool,
+    compat: bool,
+    thread_mode: str,
+) -> Pattern:
+    """Compile using one coherent configuration snapshot."""
+
+    if getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) != get_cache_epoch():
+        _synchronize_local_caches()
+    cache = getattr(_DEFAULT_COMPILE_LOCAL, "cache", None)
+    if cache is None:
+        cache = _DEFAULT_COMPILE_LOCAL.cache = {}
+
+    key = (pattern, jit, compat, thread_mode)
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    compiled = cache.get(key) if limit else None
+    if compiled is not None:
+        return compiled
+
+    adjusted_pattern = _apply_regex_compat(pattern, compat)
+    native_flags = (
+        _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP if isinstance(adjusted_pattern, str) else 0
+    )
+    cached = cached_compile(adjusted_pattern, native_flags, Pattern, jit=jit)
+    compiled = _policy_wrapper(cached, thread_mode)
+    if limit and cache_input_allowed(pattern):
+        cache[key] = compiled
+        while len(cache) > limit:
+            cache.pop(next(iter(cache)))
+    return compiled
+
+
+def _compile_flagged_builtin(
+    pattern: str | bytes,
+    native_source_flags: int,
+    jit: bool,
+    compat: bool,
+    thread_mode: str,
+) -> Pattern:
+    if getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) != get_cache_epoch():
+        _synchronize_local_caches()
+    cache = getattr(_DEFAULT_COMPILE_LOCAL, "flagged_cache", None)
+    if cache is None:
+        cache = _DEFAULT_COMPILE_LOCAL.flagged_cache = {}
+
+    key = (pattern, native_source_flags, bool(jit), bool(compat), thread_mode)
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    compiled = cache.get(key) if limit else None
+    if compiled is None:
+        adjusted_pattern = _apply_regex_compat(pattern, compat)
+        effective_flags = _apply_default_unicode_flags(
+            adjusted_pattern, native_source_flags
+        )
+        cached = cached_compile(
+            adjusted_pattern,
+            strip_py_only_flags(effective_flags),
+            Pattern,
+            jit=jit,
+        )
+        compiled = _policy_wrapper(cached, thread_mode)
+        if limit and cache_input_allowed(pattern):
+            cache[key] = compiled
+            while len(cache) > limit:
+                cache.pop(next(iter(cache)))
+    return compiled
+
+
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     # Fast path for the dominant shape: compile(pattern) with default flags.
     if flags == 0:
@@ -666,17 +1123,21 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
                 wrapper.disable_threads()
             return wrapper
 
+        if type(pattern) in (str, bytes) and cached_compile is _ORIGINAL_CACHED_COMPILE:
+            return _compile_default_builtin(pattern)
+
         adjusted_pattern = _apply_regex_compat(pattern, bool(_DEFAULT_COMPAT_REGEX))
         if isinstance(adjusted_pattern, str):
             native_flags = _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP
         else:
             native_flags = 0
-        compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=_DEFAULT_JIT)
-        if get_thread_default():
-            compiled.enable_auto_threads()
-        else:
-            compiled.disable_threads()
-        return compiled
+        compiled = cached_compile(
+            adjusted_pattern, native_flags, Pattern, jit=_DEFAULT_JIT
+        )
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
+        return _policy_wrapper(compiled, thread_mode)
 
     resolved_flags = _normalise_flags(flags)
     threads_requested = bool(resolved_flags & THREADS)
@@ -685,7 +1146,9 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     if threads_requested and no_threads_requested:
         raise ValueError("Flag.THREADS and Flag.NO_THREADS cannot be combined")
 
-    resolved_flags_no_thread_markers = resolved_flags & ~(THREADS | NO_THREADS | COMPAT_UNICODE_ESCAPE)
+    resolved_flags_no_thread_markers = resolved_flags & ~(
+        THREADS | NO_THREADS | COMPAT_UNICODE_ESCAPE
+    )
     jit_override = _extract_jit_override(resolved_flags_no_thread_markers)
     resolved_jit = _resolve_jit_setting(jit_override)
     compat_enabled = bool(_DEFAULT_COMPAT_REGEX or compat_requested)
@@ -695,7 +1158,9 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     elif no_threads_requested:
         thread_mode = _THREAD_MODE_DISABLED
     else:
-        thread_mode = _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
 
     if isinstance(pattern, Pattern):
         if resolved_flags_no_thread_markers:
@@ -714,9 +1179,13 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
 
     if isinstance(pattern, _CPattern):
         if resolved_flags_no_thread_markers:
-            raise ValueError("Cannot supply flags when using a compiled pattern instance.")
+            raise ValueError(
+                "Cannot supply flags when using a compiled pattern instance."
+            )
         if jit_override is not None:
-            raise ValueError("Cannot supply jit when using a compiled pattern instance.")
+            raise ValueError(
+                "Cannot supply jit when using a compiled pattern instance."
+            )
         if compat_requested:
             raise ValueError(
                 "Cannot supply Flag.COMPAT_UNICODE_ESCAPE when using a compiled pattern instance."
@@ -733,6 +1202,19 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
                 wrapper.disable_threads()
         return wrapper
 
+    # Keep the direct flagged cache restricted to plain integer callers.  The
+    # project IntFlag path retains the general cache, whose free-threaded
+    # lifetime/eviction semantics are already hardened for randomized inputs.
+    if type(pattern) in (str, bytes) and type(flags) in (int, Flag):
+        if cached_compile is _ORIGINAL_CACHED_COMPILE:
+            return _compile_flagged_builtin(
+                pattern,
+                resolved_flags_no_thread_markers,
+                resolved_jit,
+                compat_enabled,
+                thread_mode,
+            )
+
     adjusted_pattern = _apply_regex_compat(pattern, compat_enabled)
     effective_flags = _apply_default_unicode_flags(
         adjusted_pattern, resolved_flags_no_thread_markers
@@ -740,47 +1222,157 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     native_flags = strip_py_only_flags(effective_flags)
 
     compiled = cached_compile(adjusted_pattern, native_flags, Pattern, jit=resolved_jit)
-    if threads_requested:
-        compiled.enable_threads()
-    elif no_threads_requested:
-        compiled.disable_threads()
-    else:
-        if thread_mode == _THREAD_MODE_AUTO:
-            compiled.enable_auto_threads()
-        else:
-            compiled.disable_threads()
-    return compiled
+    return _policy_wrapper(compiled, thread_mode)
+
+
+def _module_pattern_uncached(
+    pattern: str | bytes,
+    jit: bool,
+    compat_regex: bool,
+    thread_mode: str,
+) -> Pattern:
+    return _compile_default_snapshot(pattern, jit, compat_regex, thread_mode)
+
+
+def _cached_module_pattern(
+    pattern: str | bytes,
+    jit: bool,
+    compat_regex: bool,
+    thread_mode: str,
+) -> Pattern:
+    """Reuse canonical wrappers for exact default-flag module calls.
+
+    The public ``compile`` cache remains authoritative, so match ``.re``
+    identity is unchanged.  This small bounded layer removes repeated Python
+    cache-key construction and wrapper setup from module-level helpers while
+    keeping configuration changes in the cache key.
+    """
+    _synchronize_local_caches()
+    limit = _DEFAULT_COMPILE_LOCAL.effective_limit
+    if limit == 0 or not cache_input_allowed(pattern):
+        return _module_pattern_uncached(pattern, jit, compat_regex, thread_mode)
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "module_lru", None)
+    if cached is None:
+        cached = lru_cache(maxsize=limit)(_module_pattern_uncached)
+        _DEFAULT_COMPILE_LOCAL.module_lru = cached
+    return cached(pattern, jit, compat_regex, thread_mode)
+
+
+def _clear_module_cache() -> None:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "module_lru", None)
+    if cached is not None:
+        cached.cache_clear()
+    _DEFAULT_COMPILE_LOCAL.module_lru = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+
+
+def _module_cache_size() -> int:
+    cached = getattr(_DEFAULT_COMPILE_LOCAL, "module_lru", None)
+    return 0 if cached is None else cached.cache_info().currsize
+
+
+_cached_module_pattern.cache_clear = _clear_module_cache  # type: ignore[attr-defined]
+
+
+def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
+    if type(pattern) in (str, bytes) and type(flags) in (int, Flag) and flags == 0:
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
+        key = (pattern, bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX), thread_mode)
+        if (
+            getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) == get_cache_epoch()
+            and getattr(_DEFAULT_COMPILE_LOCAL, "module_hot_key", None) == key
+        ):
+            return _DEFAULT_COMPILE_LOCAL.module_hot_value
+        compiled = _cached_module_pattern(
+            pattern,
+            _DEFAULT_JIT,
+            _DEFAULT_COMPAT_REGEX,
+            thread_mode,
+        )
+        if _DEFAULT_COMPILE_LOCAL.effective_limit > 0 and cache_input_allowed(pattern):
+            _DEFAULT_COMPILE_LOCAL.module_hot_key = key
+            _DEFAULT_COMPILE_LOCAL.module_hot_value = compiled
+        return compiled
+    return compile(pattern, flags=flags)
+
+
+def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: str) -> Any:
+    compiled = _module_compile(pattern, flags)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) in (int, Flag)
+        and flags == 0
+        and type(string) in (str, bytes)
+        and compiled._is_c_pattern
+    ):
+        if (
+            method == "findall"
+            and getattr(compiled, "_literal_split", None) is not None
+            and type(string) is type(compiled._literal_split)
+        ):
+            return compiled.findall(string)
+        fast = getattr(compiled._pattern, f"_{method}_fast", None)
+        if fast is not None:
+            if method == "findall":
+                return fast(string)
+            if method == "finditer":
+                return fast(string, 0, -1, 0, compiled)
+            return fast(string, compiled)
+    return getattr(compiled, method)(string)
 
 
 def prefixmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return compile(pattern, flags=flags).match(string)
+    return _module_lookup(pattern, string, flags, "match")
 
 
 match = prefixmatch
 
 
 def search(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return compile(pattern, flags=flags).search(string)
+    return _module_lookup(pattern, string, flags, "search")
 
 
 def fullmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return compile(pattern, flags=flags).fullmatch(string)
+    return _module_lookup(pattern, string, flags, "fullmatch")
 
 
 def finditer(pattern: Any, string: Any, flags: FlagInput = 0) -> Iterable[Match]:
-    return compile(pattern, flags=flags).finditer(string)
+    return _module_lookup(pattern, string, flags, "finditer")
 
 
 def findall(pattern: Any, string: Any, flags: FlagInput = 0) -> List[Any]:
-    return compile(pattern, flags=flags).findall(string)
+    return _module_lookup(pattern, string, flags, "findall")
 
 
-def split(pattern: Any, string: Any, maxsplit: Any = 0, flags: FlagInput = 0) -> List[Any]:
-    return compile(pattern, flags=flags).split(string, maxsplit=maxsplit)
+def split(
+    pattern: Any, string: Any, maxsplit: Any = 0, flags: FlagInput = 0
+) -> List[Any]:
+    compiled = _module_compile(pattern, flags)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) in (int, Flag)
+        and flags == 0
+        and type(string) in (str, bytes)
+        and type(maxsplit) is int
+        and compiled._is_c_pattern
+    ):
+        literal_split = getattr(compiled, "_literal_split", None)
+        if literal_split is not None and type(string) is type(literal_split):
+            return compiled.split(string, maxsplit)
+        fast = getattr(compiled._pattern, "_split_fast", None)
+        if fast is not None:
+            return fast(string, maxsplit)
+    return compiled.split(string, maxsplit=maxsplit)
 
 
-def sub(pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput = 0) -> Any:
-    return compile(pattern, flags=flags).sub(repl, string, count=count)
+def sub(
+    pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput = 0
+) -> Any:
+    result = subn(pattern, repl, string, count=count, flags=flags)
+    return result[0]
 
 
 def subn(
@@ -790,18 +1382,58 @@ def subn(
     count: Any = 0,
     flags: FlagInput = 0,
 ) -> tuple[Any, int]:
-    return compile(pattern, flags=flags).subn(repl, string, count=count)
+    compiled = _module_compile(pattern, flags)
+    literal_split = getattr(compiled, "_literal_split", None)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) in (int, Flag)
+        and flags == 0
+        and type(string) in (str, bytes)
+        and type(repl) is type(string)
+        and type(count) is int
+        and compiled._is_c_pattern
+        and literal_split is not None
+        and type(string) is type(literal_split)
+        and (
+            (type(repl) is str and "\\" not in repl and "$" not in repl)
+            or (type(repl) is bytes and b"\\" not in repl and b"$" not in repl)
+        )
+    ):
+        return compiled.subn(repl, string, count=count)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) in (int, Flag)
+        and flags == 0
+        and type(string) in (str, bytes)
+        and type(repl) is type(string)
+        and type(count) is int
+        and count == 0
+        and compiled._is_c_pattern
+        and (
+            (type(repl) is str and "\\" not in repl and "$" not in repl)
+            or (type(repl) is bytes and b"\\" not in repl and b"$" not in repl)
+        )
+    ):
+        fast = getattr(compiled._pattern, "_substitute_fast", None)
+        if fast is not None:
+            return fast(string, repl)
+    return compiled.subn(repl, string, count=count)
+
 
 # add this function to bypass signatures unit test
 # re.template() is deprecated and removed since python 3.12
 def template(pattern, flags=0):
     import warnings
-    warnings.warn("The re.template() function is deprecated "
-                  "as it is an undocumented function "
-                  "without an obvious purpose. "
-                  "Use re.compile() instead.",
-                  DeprecationWarning)
+
+    warnings.warn(
+        "The re.template() function is deprecated "
+        "as it is an undocumented function "
+        "without an obvious purpose. "
+        "Use re.compile() instead.",
+        DeprecationWarning,
+    )
     return compile(pattern, flags | RE_TEMPLATE)
+
 
 _PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})
 
@@ -852,7 +1484,9 @@ def parallel_map(
     method_name = str(method)
     if method_name not in _PARALLEL_EXEC_METHODS:
         allowed = ", ".join(sorted(_PARALLEL_EXEC_METHODS))
-        raise ValueError(f"parallel_map only supports {allowed} methods, got {method_name!r}")
+        raise ValueError(
+            f"parallel_map only supports {allowed} methods, got {method_name!r}"
+        )
 
     pattern_obj = compile(pattern, flags=flags)
     try:
@@ -871,6 +1505,30 @@ def parallel_map(
             "threading defaults."
         )
 
+    # A one-item map cannot benefit from worker fan-out.  Keep the documented
+    # list-shaped result but avoid executor creation, queueing, and a Future;
+    # this is also the safest path for explicit ``Flag.THREADS`` on tiny jobs.
+    if len(materials) == 1:
+        if mode == _THREAD_MODE_AUTO:
+            _should_use_auto_threads(materials)
+        return [bound_method(materials[0], pos=pos, endpos=endpos, options=options)]
+
+    # Explicit threading enables safe fan-out, but tiny canonical C jobs are
+    # dominated by queue/executor overhead. Keep auto-threshold semantics
+    # untouched and process at most eight short built-in subjects inline.
+    if (
+        mode == _THREAD_MODE_ENABLED
+        and pattern_obj._is_c_pattern
+        and type(pattern_obj) is Pattern
+        and 1 < len(materials) <= 8
+        and all(type(subject) in (str, bytes) for subject in materials)
+        and max(len(subject) for subject in materials) <= 4096
+    ):
+        return [
+            bound_method(subject, pos=pos, endpos=endpos, options=options)
+            for subject in materials
+        ]
+
     if mode == _THREAD_MODE_AUTO and not _should_use_auto_threads(materials):
         return [
             bound_method(subject, pos=pos, endpos=endpos, options=options)
@@ -884,11 +1542,62 @@ def parallel_map(
         ]
 
     executor = ensure_thread_pool(max_workers)
+
+    # For the common default lookup shape, the C backend can execute directly
+    # without rebuilding the Python wrapper's keyword arguments for every
+    # subject.  Restrict this to exact text/bytes values: the wrapper's normal
+    # path preserves buffer and subclass coercion semantics that the private
+    # vectorcall entry point intentionally does not duplicate.
+    fast_method = None
+    fast_method_takes_owner = False
+    if (
+        pattern_obj._is_c_pattern
+        and method_name in {"match", "search", "fullmatch", "findall"}
+        # Preserve instrumentation/subclass overrides of the public wrapper.
+        # The private C entry points are valid only when dispatch is canonical.
+        and getattr(type(pattern_obj), method_name, None)
+        is _PATTERN_METHODS_FOR_FAST.get(method_name)
+        and type(pos) is int
+        and pos == 0
+        and endpos is None
+        and type(options) is int
+        and options == 0
+        and all(type(subject) in (str, bytes) for subject in materials)
+    ):
+        fast_method = getattr(pattern_obj._pattern, f"_{method_name}_fast", None)
+        fast_method_takes_owner = method_name != "findall"
+
+    # Submit bounded batches instead of one Future per subject.  The latter
+    # makes small/medium maps dominated by Future allocation and queue-lock
+    # traffic (especially on the free-threaded build), while the actual PCRE2
+    # calls are already independent and release the interpreter lock for long
+    # subjects.  Batches preserve input order and retain the same exception
+    # propagation behavior as the one-Future implementation.
+    worker_count = max(1, get_thread_pool_size())
+    task_count = min(len(materials), worker_count * 2)
+    chunk_size = (len(materials) + task_count - 1) // task_count
+
+    def _run_chunk(start: int, stop: int) -> list[Any]:
+        if fast_method is not None:
+            if fast_method_takes_owner:
+                return [
+                    fast_method(materials[index], pattern_obj)
+                    for index in range(start, stop)
+                ]
+            return [fast_method(materials[index]) for index in range(start, stop)]
+        return [
+            bound_method(materials[index], pos=pos, endpos=endpos, options=options)
+            for index in range(start, stop)
+        ]
+
     futures = [
-        executor.submit(bound_method, subject, pos=pos, endpos=endpos, options=options)
-        for subject in materials
+        executor.submit(_run_chunk, start, min(start + chunk_size, len(materials)))
+        for start in range(0, len(materials), chunk_size)
     ]
-    return [future.result() for future in futures]
+    results: List[Any] = []
+    for future in futures:
+        results.extend(future.result())
+    return results
 
 
 def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> bool:
@@ -922,3 +1631,7 @@ def clear_cache() -> None:
     """Clear the compiled pattern cache and release cached match-data/JIT buffers."""
 
     _clear_cache()
+    _cache_configuration_changed()
+    _cached_module_pattern.cache_clear()
+    _cached_replacement_parts.cache_clear()
+    _cached_expand_template.cache_clear()

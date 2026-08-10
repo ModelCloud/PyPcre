@@ -40,6 +40,38 @@ def test_match_repr_uses_character_offsets() -> None:
     assert "span=(0, 1)" in repr(match)
 
 
+def test_ascii_match_accessors_preserve_offsets_without_prefix_rescans() -> None:
+    """Late ASCII matches must retain byte/code-point offset identity.
+
+    This also exercises the C fast path used by span/start/end/regs.  ASCII
+    subjects are common in logs and protocol tokens; their UTF-8 offsets are
+    already Python character indexes, so no prefix scan is necessary.
+    """
+    subject = "x" * 100_000 + "token"
+    match = pcre.search("token", subject)
+    assert match is not None
+    assert match.span() == (100_000, 100_005)
+    assert match.start() == 100_000
+    assert match.end() == 100_005
+    assert match.regs == ((100_000, 100_005),)
+
+
+def test_large_findall_scan_preserves_capture_results() -> None:
+    pattern = raw.compile(r"(\d+)", flags=TEXT_FLAGS, jit=False)
+    subject = "x" * 300_000 + "123 x45"
+    assert pattern.findall(subject) == ["123", "45"]
+
+
+def test_match_expand_literal_template_keeps_replacement_semantics() -> None:
+    match = pcre.compile(r"(?P<word>word)").fullmatch("word")
+    assert match is not None
+    assert match.expand("literal $1") == "literal $1"
+    assert match.expand(r"literal\g<word>") == "literalword"
+    bytes_match = pcre.compile(b"(?P<word>word)").fullmatch(b"word")
+    assert bytes_match is not None
+    assert bytes_match.expand(bytearray(b"literal $1")) == b"literal $1"
+
+
 def test_pattern_clamps_start_past_end_for_empty_match() -> None:
     pattern = raw.compile("", flags=TEXT_FLAGS, jit=False)
     for method_name in ("match", "search", "fullmatch"):
@@ -102,6 +134,23 @@ def test_utf_bytes_empty_matches_advance_by_codepoint() -> None:
     assert pattern.split(subject) == [b"", subject, b""]
 
 
+def test_vectorcall_iteration_and_split_entries_match_public_methods() -> None:
+    pattern = raw.compile(r"(x)", flags=TEXT_FLAGS, jit=False)
+    subject = "x x"
+
+    public_matches = [match.span() for match in pattern.finditer(subject)]
+    fast_matches = [
+        match.span() for match in pattern._finditer_fast(subject, 0, -1, 0, None)
+    ]
+    assert fast_matches == public_matches
+    assert pattern._split_fast(subject, 0) == pattern.split(subject, 0)
+
+    with pytest.raises(TypeError):
+        pattern._finditer_fast(subject)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        pattern._split_fast(subject)  # type: ignore[call-arg]
+
+
 def test_mutable_utf_buffer_is_snapshotted_before_iteration() -> None:
     subject = bytearray("é".encode())
     pattern = raw.compile(b"", flags=TEXT_FLAGS, jit=False)
@@ -133,6 +182,48 @@ def test_duplicate_name_selects_participating_capture(
     assert pattern.groupindex == {"x": 1}
     assert match.group("x") == expected
     assert match.groupdict() == {"x": expected}
+
+
+def test_group_name_subclass_does_not_require_hashing() -> None:
+    class Name(str):
+        def __hash__(self) -> int:
+            raise AssertionError("group lookup should use the PCRE name table")
+
+    match = pcre.compile(r"(?P<name>a)").fullmatch("a")
+    assert match is not None
+    assert match.group(Name("name")) == "a"
+
+
+def test_regs_is_cached_as_an_immutable_match_snapshot() -> None:
+    match = pcre.compile(r"(?P<left>a)(?P<right>b)").fullmatch("ab")
+    assert match is not None
+    first = match.regs
+    assert first == ((0, 2), (0, 1), (1, 2))
+    assert match.regs is first
+
+
+def test_groups_results_are_fresh_and_do_not_persist_captured_values() -> None:
+    match = pcre.compile(r"(?P<left>a)(?P<optional>b)?").fullmatch("a")
+    assert match is not None
+    first = match.groups()
+    assert first == ("a", None)
+    assert match.groups() is not first
+    assert match.groups("missing") == ("a", "missing")
+    assert match.groups("missing") is not match.groups("missing")
+
+
+def test_module_default_fast_dispatch_preserves_public_pattern_and_results() -> None:
+    compiled = pcre.compile(r"(x)")
+    match = pcre.match(r"(x)", "x")
+    assert match is not None
+    assert match.re is compiled
+    assert [item.span() for item in pcre.finditer(r"(x)", "xx")] == [
+        (0, 1),
+        (1, 2),
+    ]
+    assert pcre.findall(r"(x)", "xx") == ["x", "x"]
+    assert pcre.split(r"(x)", "xx") == ["", "x", "", "x", ""]
+    assert pcre.subn(r"(x)", "[X]", "xx") == ("[X][X]", 2)
 
 
 def test_global_inline_options_are_exposed() -> None:

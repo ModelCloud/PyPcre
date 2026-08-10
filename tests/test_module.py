@@ -34,14 +34,19 @@ def test_module_finditer_and_findall_helpers():
 
     groups = pcre.findall(r"(\w)(\d)", "a1 b2 c3")
     assert groups == [("a", "1"), ("b", "2"), ("c", "3")]
+    assert pcre.findall("foo", "foo foo") == ["foo", "foo"]
 
 
 def test_module_split_and_substitutions():
     assert pcre.split(r"\s*,\s*", "a, b, c") == ["a", "b", "c"]
     assert pcre.split(r"\s+", "one   two", maxsplit=1) == ["one", "two"]
+    assert pcre.split(", ", "a, b, c") == ["a", "b", "c"]
 
     templated = pcre.sub(r"(?P<num>\d+)", r"<\g<num>>", "item1 item2")
     assert templated == "item<1> item<2>"
+    assert pcre.sub("foo", "bar", "foo foo") == "bar bar"
+    assert pcre.subn("foo", "bar", "foo foo", count=1) == ("bar foo", 1)
+    assert pcre.subn("foo", "bar", "foo foo", count=-1) == ("foo foo", 0)
 
     def bump(match):
         return str(int(match.group(0)) + 1)
