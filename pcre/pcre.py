@@ -307,6 +307,7 @@ class Pattern:
         "_thread_mode",
         "_is_c_pattern",
         "_literal_findall",
+        "_literal_findall_multi",
         "_literal_split",
     )
 
@@ -321,6 +322,7 @@ class Pattern:
 
         literal_split: str | bytes | None = None
         literal_findall: str | bytes | None = None
+        literal_findall_multi: tuple[str | bytes, tuple[str | bytes, ...]] | None = None
         if self._is_c_pattern:
             source = pattern.pattern
             if type(source) in (str, bytes) and source:
@@ -337,17 +339,35 @@ class Pattern:
                 if pattern.flags == expected_flags:
                     if not any(char in metacharacters for char in source):
                         literal_split = source
-                    if 3 <= len(source) <= 66:
+                    if 3 <= len(source) <= 80:
                         opening = "(" if type(source) is str else b"("
                         closing = ")" if type(source) is str else b")"
-                        if source[:1] == opening and source[-1:] == closing:
-                            inner = source[1:-1]
-                            if inner and not any(
+                        literal_groups: list[str | bytes] = []
+                        cursor = 0
+                        literal_units = 0
+                        while cursor < len(source) and len(literal_groups) < 8:
+                            if source[cursor : cursor + 1] != opening:
+                                break
+                            closing_index = source.find(closing, cursor + 1)
+                            inner = source[cursor + 1 : closing_index]
+                            if not inner or any(
                                 char in metacharacters for char in inner
                             ):
-                                literal_findall = inner
+                                break
+                            literal_units += len(inner)
+                            if literal_units > 64:
+                                break
+                            literal_groups.append(inner)
+                            cursor = closing_index + 1
+                        if cursor == len(source) and len(literal_groups) == 1:
+                            literal_findall = literal_groups[0]
+                        elif cursor == len(source) and len(literal_groups) >= 2:
+                            empty = "" if type(source) is str else b""
+                            groups = tuple(literal_groups)
+                            literal_findall_multi = (empty.join(groups), groups)
         self._literal_split = literal_split
         self._literal_findall = literal_findall
+        self._literal_findall_multi = literal_findall_multi
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -597,6 +617,20 @@ class Pattern:
             and options == 0
         ):
             return [literal_capture] * subject.count(literal_capture)
+        literal_multi = getattr(self, "_literal_findall_multi", None)
+        if (
+            getattr(self, "_is_c_pattern", False)
+            and type(self) is Pattern
+            and literal_multi is not None
+            and type(subject) is type(literal_multi[0])
+            and type(pos) is int
+            and pos == 0
+            and endpos is None
+            and type(options) is int
+            and options == 0
+        ):
+            needle, groups = literal_multi
+            return [groups] * subject.count(needle)
         literal_source = getattr(self, "_literal_split", None)
         if (
             getattr(self, "_is_c_pattern", False)

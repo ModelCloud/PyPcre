@@ -44,6 +44,7 @@ def main() -> int:
     short_subject = "x" * 10
     pattern = pcre.compile("(x)")
     literal_capture_pattern = pcre.compile("(token)")
+    literal_multi_capture_pattern = pcre.compile("(token)(-)(id)")
     named_pattern = pcre.compile("(?P<word>x)")
     captured = pattern.match(short_subject)
     named_captured = pcre.compile("(?P<word>x)").match(short_subject)
@@ -63,6 +64,10 @@ def main() -> int:
         (
             "bound.findall.capture",
             lambda: literal_capture_pattern.findall("token," * 100),
+        ),
+        (
+            "bound.findall.multi",
+            lambda: literal_multi_capture_pattern.findall("token-id," * 100),
         ),
         ("bound.finditer", lambda: list(pattern.finditer(short_subject))),
         ("bound.split", lambda: pattern.split("x " * 8)),
