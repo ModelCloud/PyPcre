@@ -13,8 +13,6 @@ surfacing PCRE2-specific flags and behaviours.
 from __future__ import annotations
 
 import importlib as _importlib
-import re as _std_re
-from typing import Any
 
 import pcre_ext_c as _backend
 
@@ -41,7 +39,6 @@ from .pcre import (
     template,
 )
 from .threads import configure_thread_pool, configure_threads, shutdown_thread_pool
-
 
 _error_module = _importlib.import_module(".error", __name__)
 pcre_ext_c = _backend
@@ -76,10 +73,7 @@ error = PcreError
 PatternError = PcreError
 
 
-def escape(pattern: Any) -> Any:
-    """Escape special characters in *pattern* using :mod:`re` semantics."""
-
-    return _std_re.escape(pattern)
+escape = _backend.escape
 
 
 # Compat: expose stdlib-style flag constants so migrating `re` users can

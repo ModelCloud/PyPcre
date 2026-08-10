@@ -5398,6 +5398,7 @@ static PyMethodDef module_methods[] = {
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
     {"_debug_thread_cache_count", (PyCFunction)module_debug_thread_cache_count, METH_NOARGS, PyDoc_STR("Return the number of live thread cache states (requires PYPCRE_DEBUG=1)." )},
     {"translate_unicode_escapes", (PyCFunction)module_translate_unicode_escapes, METH_O, PyDoc_STR("Translate literal \\uXXXX/\\UXXXXXXXX escapes to PCRE2-compatible \\x{...} sequences." )},
+    {"escape", (PyCFunction)(void(*)(void))module_escape, METH_FASTCALL | METH_KEYWORDS, PyDoc_STR("escape($module, pattern)\n--\n\nEscape special characters using re.escape semantics.")},
     {NULL, NULL, 0, NULL},
 };
 

@@ -152,6 +152,10 @@ int ensure_valid_utf8_for_bytes_subject(PatternObject *pattern, int subject_is_b
 int ascii_vector_mode(void);
 PyObject *module_translate_unicode_escapes(PyObject *module, PyObject *arg);
 PyObject *module_cpu_ascii_vector_mode(PyObject *module, PyObject *args);
+PyObject *module_escape(PyObject *module,
+                        PyObject *const *args,
+                        Py_ssize_t nargs,
+                        PyObject *kwnames);
 
 /* Memory management */
 int pcre_memory_initialize(void);
