@@ -231,7 +231,13 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
 class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
-    __slots__ = ("_pattern", "_groups_hint", "_thread_mode", "_is_c_pattern")
+    __slots__ = (
+        "_pattern",
+        "_groups_hint",
+        "_thread_mode",
+        "_is_c_pattern",
+        "_literal_split",
+    )
 
     def __init__(self, pattern: _CPattern) -> None:
         self._pattern = pattern
@@ -241,6 +247,24 @@ class Pattern:
             self._groups_hint = pattern.capture_count
         except AttributeError:  # pragma: no cover - older extension fallback
             self._groups_hint = maybe_infer_group_count(pattern.pattern)
+
+        literal_split: str | bytes | None = None
+        if self._is_c_pattern:
+            source = pattern.pattern
+            if type(source) in (str, bytes) and len(source) == 1:
+                metacharacters = (
+                    ".^$*+?{}[]\\|()" if type(source) is str else b".^$*+?{}[]\\|()"
+                )
+                expected_flags = (
+                    _pcre2.PCRE2_UTF
+                    | _pcre2.PCRE2_UCP
+                    | getattr(_pcre2, "PCRE2_NEVER_BACKSLASH_C", 0x00100000)
+                    if type(source) is str
+                    else 0
+                )
+                if source not in metacharacters and pattern.flags == expected_flags:
+                    literal_split = source
+        self._literal_split = literal_split
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -529,6 +553,20 @@ class Pattern:
         return results
 
     def split(self, subject: Any, maxsplit: Any = 0) -> List[Any]:
+        # A one-code-unit literal has exactly the same split semantics as the
+        # built-in immutable string/bytes splitter.  The immutable construction
+        # check restricts this to canonical patterns with default options.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(maxsplit) is int
+            and type(subject) is type(self._literal_split)
+        ):
+            # Python's explicit ``maxsplit=0`` means unlimited splitting for
+            # ``Pattern.split`` (unlike ``str.split(sep, 0)``).
+            return subject.split(self._literal_split, -1 if maxsplit <= 0 else maxsplit)
+
         # The common immutable/default shape can go straight to the C splitter.
         # Keep subclasses, buffer exporters, and non-default limits on the
         # compatibility path so their coercion and override semantics remain

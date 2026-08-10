@@ -571,10 +571,13 @@ def test_empty_pattern_split_fast_path_matches_re(
     assert compiled.split(subject, maxsplit=1) == re.compile(pattern).split(
         subject, maxsplit=1
     )
+
     class Zero(int):
         pass
 
-    assert compiled.split(subject, maxsplit=Zero(0)) == re.compile(pattern).split(subject)
+    assert compiled.split(subject, maxsplit=Zero(0)) == re.compile(pattern).split(
+        subject
+    )
 
 
 def test_c_split_default_dispatch_preserves_results() -> None:
@@ -582,6 +585,20 @@ def test_c_split_default_dispatch_preserves_results() -> None:
     assert pattern.split("a b  c") == ["a", "b", "c"]
     bytes_pattern = pcre.compile(rb"\s+")
     assert bytes_pattern.split(b"a b  c") == [b"a", b"b", b"c"]
+
+
+def test_c_literal_split_uses_builtin_only_for_safe_shape() -> None:
+    text_pattern = pcre.compile(" ")
+    assert text_pattern.split("a b c") == ["a", "b", "c"]
+    assert text_pattern.split("a b c", maxsplit=1) == ["a", "b c"]
+    assert text_pattern.split("a b c", maxsplit=-1) == ["a", "b", "c"]
+
+    bytes_pattern = pcre.compile(b",")
+    assert bytes_pattern.split(b"a,b,c") == [b"a", b"b", b"c"]
+
+    # Regex metacharacters and non-default compile flags must retain PCRE2.
+    assert pcre.compile(".").split("a.b") == ["", "", "", ""]
+    assert pcre.compile("x", flags=pcre.Flag.CASELESS).split("Xx") == ["", "", ""]
 
 
 def test_c_literal_subn_default_dispatch_preserves_results() -> None:
