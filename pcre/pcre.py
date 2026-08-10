@@ -1227,6 +1227,23 @@ def subn(
     flags: FlagInput = 0,
 ) -> tuple[Any, int]:
     compiled = _module_compile(pattern, flags)
+    literal_split = getattr(compiled, "_literal_split", None)
+    if (
+        type(pattern) in (str, bytes)
+        and type(flags) in (int, Flag)
+        and flags == 0
+        and type(string) in (str, bytes)
+        and type(repl) is type(string)
+        and type(count) is int
+        and compiled._is_c_pattern
+        and literal_split is not None
+        and type(string) is type(literal_split)
+        and (
+            (type(repl) is str and "\\" not in repl and "$" not in repl)
+            or (type(repl) is bytes and b"\\" not in repl and b"$" not in repl)
+        )
+    ):
+        return compiled.subn(repl, string, count=count)
     if (
         type(pattern) in (str, bytes)
         and type(flags) in (int, Flag)

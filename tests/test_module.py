@@ -46,6 +46,7 @@ def test_module_split_and_substitutions():
     assert templated == "item<1> item<2>"
     assert pcre.sub("foo", "bar", "foo foo") == "bar bar"
     assert pcre.subn("foo", "bar", "foo foo", count=1) == ("bar foo", 1)
+    assert pcre.subn("foo", "bar", "foo foo", count=-1) == ("foo foo", 0)
 
     def bump(match):
         return str(int(match.group(0)) + 1)
