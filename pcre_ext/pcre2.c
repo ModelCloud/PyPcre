@@ -943,6 +943,47 @@ Match_get_lastindex(MatchObject *self, void *closure)
         Py_RETURN_NONE;
     }
 
+    int cached_lastindex = -2;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    cached_lastindex = self->lastindex_cache;
+    Py_END_CRITICAL_SECTION();
+    if (cached_lastindex != -2) {
+        if (cached_lastindex < 0) {
+            Py_RETURN_NONE;
+        }
+        return PyLong_FromLong(cached_lastindex);
+    }
+
+    /* The expensive AUTO_CALLOUT replay is only needed to order two or more
+     * participating captures.  With zero or one set ovector pair, the exact
+     * Python lastindex is already known from the immutable match snapshot. */
+    int sole_participant = -1;
+    for (uint32_t index = 1; index < self->ovec_count; ++index) {
+        Py_ssize_t start = self->ovector[(size_t)index * 2];
+        Py_ssize_t end = self->ovector[(size_t)index * 2 + 1];
+        if (start < 0 || end < 0) {
+            continue;
+        }
+        if (sole_participant >= 0) {
+            sole_participant = -2;
+            break;
+        }
+        sole_participant = (int)index;
+    }
+    if (sole_participant >= -1) {
+        int lastindex = sole_participant;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        if (self->lastindex_cache == -2) {
+            self->lastindex_cache = lastindex;
+        }
+        lastindex = self->lastindex_cache;
+        Py_END_CRITICAL_SECTION();
+        if (lastindex < 0) {
+            Py_RETURN_NONE;
+        }
+        return PyLong_FromLong(lastindex);
+    }
+
     int lastindex = -1;
     int replay_ok = 0;
     Py_BEGIN_CRITICAL_SECTION(self);
@@ -1065,6 +1106,751 @@ Match_get_regs(MatchObject *self, void *closure)
 }
 
 static PyObject *
+match_expand_render_reference(MatchObject *self,
+                              PyObject *template_obj,
+                              Py_ssize_t prefix_length,
+                              Py_ssize_t suffix_start,
+                              Py_ssize_t group_index,
+                              int *handled)
+{
+    *handled = 0;
+    Py_ssize_t template_length = self->subject_is_bytes
+        ? PyBytes_GET_SIZE(template_obj)
+        : PyUnicode_GET_LENGTH(template_obj);
+    if (prefix_length < 0 || suffix_start < prefix_length ||
+        suffix_start > template_length || group_index < 0 ||
+        (size_t)group_index >= self->ovec_count) {
+        return NULL;
+    }
+
+    PyObject *group = match_get_group_value(self, group_index);
+    if (group == NULL) {
+        return NULL;
+    }
+    *handled = 1;
+
+    if (group == Py_None) {
+        Py_DECREF(group);
+        group = NULL;
+    }
+
+    Py_ssize_t suffix_length = template_length - suffix_start;
+    if (prefix_length == 0 && suffix_length == 0) {
+        if (group != NULL) {
+            return group;
+        }
+        return self->subject_is_bytes
+            ? PyBytes_FromStringAndSize("", 0)
+            : PyUnicode_New(0, 127);
+    }
+
+    Py_ssize_t group_length = group == NULL ? 0 : PyObject_Length(group);
+    if (group_length < 0) {
+        Py_XDECREF(group);
+        return NULL;
+    }
+    if (group_length > PY_SSIZE_T_MAX - prefix_length - suffix_length) {
+        Py_XDECREF(group);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    Py_ssize_t result_length = prefix_length + group_length + suffix_length;
+
+    if (self->subject_is_bytes) {
+        PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
+        if (result == NULL) {
+            Py_XDECREF(group);
+            return NULL;
+        }
+        char *output = PyBytes_AS_STRING(result);
+        const char *template_data = PyBytes_AS_STRING(template_obj);
+        memcpy(output, template_data, (size_t)prefix_length);
+        if (group != NULL && group_length > 0) {
+            memcpy(output + prefix_length,
+                   PyBytes_AS_STRING(group),
+                   (size_t)group_length);
+        }
+        memcpy(output + prefix_length + group_length,
+               template_data + suffix_start,
+               (size_t)suffix_length);
+        Py_XDECREF(group);
+        return result;
+    }
+
+    Py_UCS4 max_character = PyUnicode_MAX_CHAR_VALUE(template_obj);
+    if (group != NULL) {
+        Py_UCS4 group_max = PyUnicode_MAX_CHAR_VALUE(group);
+        if (group_max > max_character) {
+            max_character = group_max;
+        }
+    }
+    PyObject *result = PyUnicode_New(result_length, max_character);
+    if (result == NULL) {
+        Py_XDECREF(group);
+        return NULL;
+    }
+    if (prefix_length > 0 &&
+        PyUnicode_CopyCharacters(result, 0, template_obj, 0, prefix_length) < 0) {
+        Py_DECREF(result);
+        Py_XDECREF(group);
+        return NULL;
+    }
+    if (group != NULL && group_length > 0 &&
+        PyUnicode_CopyCharacters(result, prefix_length, group, 0, group_length) < 0) {
+        Py_DECREF(result);
+        Py_DECREF(group);
+        return NULL;
+    }
+    if (suffix_length > 0 &&
+        PyUnicode_CopyCharacters(result,
+                                 prefix_length + group_length,
+                                 template_obj,
+                                 suffix_start,
+                                 suffix_length) < 0) {
+        Py_DECREF(result);
+        Py_XDECREF(group);
+        return NULL;
+    }
+    Py_XDECREF(group);
+    return result;
+}
+
+static PyObject *
+match_expand_simple_numeric(MatchObject *self,
+                            PyObject *template_obj,
+                            Py_ssize_t slash_index,
+                            Py_ssize_t template_length,
+                            int *handled)
+{
+    *handled = 0;
+    if (slash_index < 0 || slash_index + 1 >= template_length) {
+        return NULL;
+    }
+
+    int digit = -1;
+    if (!self->subject_is_bytes && PyUnicode_CheckExact(template_obj)) {
+        Py_UCS4 character = PyUnicode_ReadChar(template_obj, slash_index + 1);
+        if (character == (Py_UCS4)-1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        if (character < '1' || character > '9') {
+            return NULL;
+        }
+        if (slash_index + 2 < template_length) {
+            Py_UCS4 following = PyUnicode_ReadChar(template_obj, slash_index + 2);
+            if (following == (Py_UCS4)-1 && PyErr_Occurred()) {
+                return NULL;
+            }
+            if (following >= '0' && following <= '9') {
+                return NULL;
+            }
+            Py_ssize_t next_slash = PyUnicode_FindChar(
+                template_obj,
+                '\\',
+                slash_index + 2,
+                template_length,
+                1
+            );
+            if (next_slash >= 0) {
+                return NULL;
+            }
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+        digit = (int)(character - '0');
+    } else if (self->subject_is_bytes && PyBytes_CheckExact(template_obj)) {
+        const unsigned char *template_data = (const unsigned char *)PyBytes_AS_STRING(template_obj);
+        unsigned char character = template_data[slash_index + 1];
+        if (character < '1' || character > '9') {
+            return NULL;
+        }
+        if (slash_index + 2 < template_length) {
+            unsigned char following = template_data[slash_index + 2];
+            if (following >= '0' && following <= '9') {
+                return NULL;
+            }
+            if (memchr(template_data + slash_index + 2,
+                       '\\',
+                       (size_t)(template_length - slash_index - 2)) != NULL) {
+                return NULL;
+            }
+        }
+        digit = (int)(character - '0');
+    } else {
+        return NULL;
+    }
+
+    if (digit <= 0 || (size_t)digit >= self->ovec_count) {
+        return NULL;
+    }
+    return match_expand_render_reference(
+        self, template_obj, slash_index, slash_index + 2, digit, handled
+    );
+}
+
+static PyObject *
+match_expand_explicit_numeric(MatchObject *self,
+                              PyObject *template_obj,
+                              Py_ssize_t slash_index,
+                              Py_ssize_t template_length,
+                              int *handled)
+{
+    *handled = 0;
+    if (slash_index < 0 || template_length - slash_index < 5) {
+        return NULL;
+    }
+
+    Py_ssize_t cursor = slash_index + 1;
+    Py_ssize_t group_index = 0;
+    if (!self->subject_is_bytes && PyUnicode_CheckExact(template_obj)) {
+        if (PyUnicode_ReadChar(template_obj, cursor) != 'g' ||
+            PyUnicode_ReadChar(template_obj, cursor + 1) != '<') {
+            return NULL;
+        }
+        cursor += 2;
+        Py_ssize_t digit_start = cursor;
+        while (cursor < template_length) {
+            Py_UCS4 character = PyUnicode_ReadChar(template_obj, cursor);
+            if (character == '>') {
+                break;
+            }
+            if (character < '0' || character > '9' ||
+                group_index > (PY_SSIZE_T_MAX - (character - '0')) / 10) {
+                return NULL;
+            }
+            group_index = group_index * 10 + (Py_ssize_t)(character - '0');
+            cursor += 1;
+        }
+        if (cursor == digit_start || cursor >= template_length) {
+            return NULL;
+        }
+        if (cursor + 1 < template_length) {
+            Py_ssize_t next_slash = PyUnicode_FindChar(
+                template_obj, '\\', cursor + 1, template_length, 1
+            );
+            if (next_slash >= 0) {
+                return NULL;
+            }
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+    } else if (self->subject_is_bytes && PyBytes_CheckExact(template_obj)) {
+        const unsigned char *template_data = (const unsigned char *)PyBytes_AS_STRING(template_obj);
+        if (template_data[cursor] != 'g' || template_data[cursor + 1] != '<') {
+            return NULL;
+        }
+        cursor += 2;
+        Py_ssize_t digit_start = cursor;
+        while (cursor < template_length) {
+            unsigned char character = template_data[cursor];
+            if (character == '>') {
+                break;
+            }
+            if (character < '0' || character > '9' ||
+                group_index > (PY_SSIZE_T_MAX - (character - '0')) / 10) {
+                return NULL;
+            }
+            group_index = group_index * 10 + (Py_ssize_t)(character - '0');
+            cursor += 1;
+        }
+        if (cursor == digit_start || cursor >= template_length) {
+            return NULL;
+        }
+        if (cursor + 1 < template_length &&
+            memchr(template_data + cursor + 1,
+                   '\\',
+                   (size_t)(template_length - cursor - 1)) != NULL) {
+            return NULL;
+        }
+    } else {
+        return NULL;
+    }
+
+    if ((size_t)group_index >= self->ovec_count) {
+        return NULL;
+    }
+    return match_expand_render_reference(
+        self, template_obj, slash_index, cursor + 1, group_index, handled
+    );
+}
+
+static int
+match_expand_resolve_ascii_name(MatchObject *self,
+                                const char *name,
+                                Py_ssize_t name_length,
+                                Py_ssize_t *group_index)
+{
+    uint32_t name_count = 0;
+    uint32_t entry_size = 0;
+    PCRE2_SPTR name_table = NULL;
+    if (name_length <= 0 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMECOUNT,
+                           &name_count) != 0 ||
+        name_count == 0 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMEENTRYSIZE,
+                           &entry_size) != 0 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMETABLE,
+                           &name_table) != 0 ||
+        name_table == NULL || entry_size < 3) {
+        return 0;
+    }
+
+    Py_ssize_t first_match = -1;
+    size_t name_max = (size_t)entry_size - 2;
+    for (uint32_t i = 0; i < name_count; ++i) {
+        const unsigned char *entry = (const unsigned char *)(
+            name_table + (size_t)i * entry_size
+        );
+        const char *entry_name = (const char *)(entry + 2);
+        size_t entry_length = strnlen(entry_name, name_max);
+        if (entry_length != (size_t)name_length ||
+            memcmp(entry_name, name, entry_length) != 0) {
+            continue;
+        }
+
+        Py_ssize_t candidate = (Py_ssize_t)((entry[0] << 8) | entry[1]);
+        if (first_match < 0) {
+            first_match = candidate;
+        }
+        if (candidate >= 0 && (size_t)candidate < self->ovec_count) {
+            Py_ssize_t start = self->ovector[(size_t)candidate * 2];
+            Py_ssize_t end = self->ovector[(size_t)candidate * 2 + 1];
+            if (start >= 0 && end >= 0) {
+                *group_index = candidate;
+                return 1;
+            }
+        }
+    }
+    if (first_match >= 0) {
+        *group_index = first_match;
+        return 1;
+    }
+    return 0;
+}
+
+static PyObject *
+match_expand_explicit_named(MatchObject *self,
+                            PyObject *template_obj,
+                            Py_ssize_t slash_index,
+                            Py_ssize_t template_length,
+                            int *handled)
+{
+    *handled = 0;
+    if (slash_index < 0 || template_length - slash_index < 5) {
+        return NULL;
+    }
+
+    char name[129];
+    Py_ssize_t cursor = slash_index + 1;
+    Py_ssize_t name_length = 0;
+    if (!self->subject_is_bytes && PyUnicode_CheckExact(template_obj)) {
+        if (PyUnicode_ReadChar(template_obj, cursor) != 'g' ||
+            PyUnicode_ReadChar(template_obj, cursor + 1) != '<') {
+            return NULL;
+        }
+        cursor += 2;
+        while (cursor < template_length) {
+            Py_UCS4 character = PyUnicode_ReadChar(template_obj, cursor);
+            if (character == '>') {
+                break;
+            }
+            if (character > 0x7f || name_length >= 128) {
+                return NULL;
+            }
+            name[name_length++] = (char)character;
+            cursor += 1;
+        }
+        if (name_length == 0 || cursor >= template_length) {
+            return NULL;
+        }
+        if (cursor + 1 < template_length) {
+            Py_ssize_t next_slash = PyUnicode_FindChar(
+                template_obj, '\\', cursor + 1, template_length, 1
+            );
+            if (next_slash >= 0) {
+                return NULL;
+            }
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+    } else if (self->subject_is_bytes && PyBytes_CheckExact(template_obj)) {
+        const unsigned char *template_data = (const unsigned char *)PyBytes_AS_STRING(template_obj);
+        if (template_data[cursor] != 'g' || template_data[cursor + 1] != '<') {
+            return NULL;
+        }
+        cursor += 2;
+        while (cursor < template_length) {
+            unsigned char character = template_data[cursor];
+            if (character == '>') {
+                break;
+            }
+            if (character > 0x7f || name_length >= 128) {
+                return NULL;
+            }
+            name[name_length++] = (char)character;
+            cursor += 1;
+        }
+        if (name_length == 0 || cursor >= template_length) {
+            return NULL;
+        }
+        if (cursor + 1 < template_length &&
+            memchr(template_data + cursor + 1,
+                   '\\',
+                   (size_t)(template_length - cursor - 1)) != NULL) {
+            return NULL;
+        }
+    } else {
+        return NULL;
+    }
+
+    Py_ssize_t group_index = -1;
+    if (!match_expand_resolve_ascii_name(
+            self, name, name_length, &group_index)) {
+        return NULL;
+    }
+    return match_expand_render_reference(
+        self, template_obj, slash_index, cursor + 1, group_index, handled
+    );
+}
+
+typedef struct {
+    Py_ssize_t slash_index;
+    Py_ssize_t reference_end;
+    Py_ssize_t group_index;
+    int literal_backslash;
+} MatchExpandToken;
+
+static int
+match_expand_parse_reference(MatchObject *self,
+                             PyObject *template_obj,
+                             Py_ssize_t slash_index,
+                             Py_ssize_t template_length,
+                             MatchExpandToken *reference)
+{
+    if (slash_index < 0 || slash_index + 1 >= template_length) {
+        return 0;
+    }
+
+    Py_UCS4 following = self->subject_is_bytes
+        ? (unsigned char)PyBytes_AS_STRING(template_obj)[slash_index + 1]
+        : PyUnicode_ReadChar(template_obj, slash_index + 1);
+    if (following == '\\') {
+        reference->slash_index = slash_index;
+        reference->reference_end = slash_index + 2;
+        reference->group_index = -1;
+        reference->literal_backslash = 1;
+        return 1;
+    }
+    if (following >= '1' && following <= '9') {
+        if (slash_index + 2 < template_length) {
+            Py_UCS4 next = self->subject_is_bytes
+                ? (unsigned char)PyBytes_AS_STRING(template_obj)[slash_index + 2]
+                : PyUnicode_ReadChar(template_obj, slash_index + 2);
+            if (next >= '0' && next <= '9') {
+                return 0;
+            }
+        }
+        Py_ssize_t group_index = (Py_ssize_t)(following - '0');
+        if ((size_t)group_index >= self->ovec_count) {
+            return 0;
+        }
+        reference->slash_index = slash_index;
+        reference->reference_end = slash_index + 2;
+        reference->group_index = group_index;
+        reference->literal_backslash = 0;
+        return 1;
+    }
+
+    if (following != 'g' || slash_index + 4 >= template_length) {
+        return 0;
+    }
+    Py_UCS4 opener = self->subject_is_bytes
+        ? (unsigned char)PyBytes_AS_STRING(template_obj)[slash_index + 2]
+        : PyUnicode_ReadChar(template_obj, slash_index + 2);
+    if (opener != '<') {
+        return 0;
+    }
+
+    char name[129];
+    Py_ssize_t name_length = 0;
+    Py_ssize_t numeric_index = 0;
+    int is_numeric = 1;
+    Py_ssize_t cursor = slash_index + 3;
+    while (cursor < template_length) {
+        Py_UCS4 character = self->subject_is_bytes
+            ? (unsigned char)PyBytes_AS_STRING(template_obj)[cursor]
+            : PyUnicode_ReadChar(template_obj, cursor);
+        if (character == '>') {
+            break;
+        }
+        if (character > 0x7f || name_length >= 128) {
+            return 0;
+        }
+        name[name_length++] = (char)character;
+        if (character < '0' || character > '9') {
+            is_numeric = 0;
+        } else if (is_numeric) {
+            if (numeric_index >
+                (PY_SSIZE_T_MAX - (Py_ssize_t)(character - '0')) / 10) {
+                return 0;
+            }
+            numeric_index = numeric_index * 10 +
+                (Py_ssize_t)(character - '0');
+        }
+        cursor += 1;
+    }
+    if (name_length == 0 || cursor >= template_length) {
+        return 0;
+    }
+
+    Py_ssize_t group_index = -1;
+    if (is_numeric) {
+        if ((size_t)numeric_index >= self->ovec_count) {
+            return 0;
+        }
+        group_index = numeric_index;
+    } else if (!match_expand_resolve_ascii_name(
+                   self, name, name_length, &group_index)) {
+        return 0;
+    }
+    reference->slash_index = slash_index;
+    reference->reference_end = cursor + 1;
+    reference->group_index = group_index;
+    reference->literal_backslash = 0;
+    return 1;
+}
+
+static int
+match_expand_checked_add(Py_ssize_t *total, Py_ssize_t value)
+{
+    if (value < 0 || *total > PY_SSIZE_T_MAX - value) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    *total += value;
+    return 0;
+}
+
+#define MATCH_EXPAND_MAX_TOKENS 8
+
+static PyObject *
+match_expand_multiple_tokens(MatchObject *self,
+                             PyObject *template_obj,
+                             Py_ssize_t first_slash,
+                             Py_ssize_t template_length,
+                             int *handled)
+{
+    *handled = 0;
+    MatchExpandToken references[MATCH_EXPAND_MAX_TOKENS];
+    PyObject *groups[MATCH_EXPAND_MAX_TOKENS] = {NULL};
+    Py_ssize_t group_offsets[MATCH_EXPAND_MAX_TOKENS] = {0};
+    Py_ssize_t group_lengths[MATCH_EXPAND_MAX_TOKENS] = {0};
+    Py_ssize_t reference_count = 0;
+    Py_ssize_t slash_index = first_slash;
+
+    while (slash_index >= 0) {
+        if (reference_count >= MATCH_EXPAND_MAX_TOKENS ||
+            !match_expand_parse_reference(
+                self,
+                template_obj,
+                slash_index,
+                template_length,
+                &references[reference_count])) {
+            return NULL;
+        }
+        Py_ssize_t search_start =
+            references[reference_count].reference_end;
+        reference_count += 1;
+        if (self->subject_is_bytes) {
+            const char *input = PyBytes_AS_STRING(template_obj);
+            const char *found = memchr(
+                input + search_start,
+                '\\',
+                (size_t)(template_length - search_start)
+            );
+            slash_index = found == NULL
+                ? -1 : (Py_ssize_t)(found - input);
+        } else {
+            slash_index = PyUnicode_FindChar(
+                template_obj, '\\', search_start, template_length, 1
+            );
+            if (slash_index < 0 && PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+    }
+    if (reference_count < 2 && !references[0].literal_backslash) {
+        return NULL;
+    }
+
+    Py_ssize_t result_length = 0;
+    Py_ssize_t literal_start = 0;
+    int direct_groups = self->subject_is_bytes || PyUnicode_IS_ASCII(self->subject);
+    Py_UCS4 max_character = self->subject_is_bytes
+        ? 0 : PyUnicode_MAX_CHAR_VALUE(template_obj);
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        if (references[i].literal_backslash) {
+            group_offsets[i] = 0;
+            group_lengths[i] = 1;
+        } else {
+            size_t offset_index = (size_t)references[i].group_index * 2;
+            Py_ssize_t group_start = self->ovector[offset_index];
+            Py_ssize_t group_end = self->ovector[offset_index + 1];
+            if (group_start < 0 || group_end < 0) {
+                group_offsets[i] = 0;
+                group_lengths[i] = 0;
+            } else if (group_end < group_start ||
+                       group_end > self->utf8_length) {
+                PyErr_SetString(PyExc_RuntimeError, "invalid capture offsets");
+                goto error;
+            } else if (direct_groups) {
+                group_offsets[i] = group_start;
+                group_lengths[i] = group_end - group_start;
+            } else {
+                groups[i] = match_get_group_value(
+                    self, references[i].group_index
+                );
+                if (groups[i] == NULL) {
+                    goto error;
+                }
+                group_lengths[i] = PyObject_Length(groups[i]);
+                if (group_lengths[i] < 0) {
+                    goto error;
+                }
+                if (!self->subject_is_bytes &&
+                    PyUnicode_MAX_CHAR_VALUE(groups[i]) > max_character) {
+                    max_character = PyUnicode_MAX_CHAR_VALUE(groups[i]);
+                }
+            }
+        }
+        Py_ssize_t literal_length = references[i].slash_index - literal_start;
+        if (match_expand_checked_add(&result_length, literal_length) < 0 ||
+            match_expand_checked_add(&result_length, group_lengths[i]) < 0) {
+            goto error;
+        }
+        literal_start = references[i].reference_end;
+    }
+    if (match_expand_checked_add(
+            &result_length, template_length - literal_start) < 0) {
+        goto error;
+    }
+    *handled = 1;
+
+    if (self->subject_is_bytes) {
+        PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
+        if (result == NULL) {
+            goto error;
+        }
+        char *output = PyBytes_AS_STRING(result);
+        const char *input = PyBytes_AS_STRING(template_obj);
+        Py_ssize_t output_offset = 0;
+        literal_start = 0;
+        for (Py_ssize_t i = 0; i < reference_count; ++i) {
+            Py_ssize_t literal_length =
+                references[i].slash_index - literal_start;
+            if (literal_length > 0) {
+                memcpy(output + output_offset,
+                       input + literal_start,
+                       (size_t)literal_length);
+                output_offset += literal_length;
+            }
+            if (group_lengths[i] > 0) {
+                if (references[i].literal_backslash) {
+                    output[output_offset] = '\\';
+                } else {
+                    const char *group_data = direct_groups
+                        ? self->utf8_data + group_offsets[i]
+                        : PyBytes_AS_STRING(groups[i]);
+                    memcpy(output + output_offset,
+                           group_data,
+                           (size_t)group_lengths[i]);
+                }
+                output_offset += group_lengths[i];
+            }
+            literal_start = references[i].reference_end;
+        }
+        Py_ssize_t suffix_length = template_length - literal_start;
+        if (suffix_length > 0) {
+            memcpy(output + output_offset,
+                   input + literal_start,
+                   (size_t)suffix_length);
+        }
+        for (Py_ssize_t i = 0; i < reference_count; ++i) {
+            Py_XDECREF(groups[i]);
+        }
+        return result;
+    }
+
+    PyObject *result = PyUnicode_New(result_length, max_character);
+    if (result == NULL) {
+        goto error;
+    }
+    Py_ssize_t output_offset = 0;
+    literal_start = 0;
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        Py_ssize_t literal_length = references[i].slash_index - literal_start;
+        if (literal_length > 0) {
+            if (PyUnicode_CopyCharacters(result,
+                                         output_offset,
+                                         template_obj,
+                                         literal_start,
+                                         literal_length) < 0) {
+                Py_DECREF(result);
+                goto error;
+            }
+            output_offset += literal_length;
+        }
+        if (group_lengths[i] > 0) {
+            if (references[i].literal_backslash) {
+                if (PyUnicode_WriteChar(result, output_offset, '\\') < 0) {
+                    Py_DECREF(result);
+                    goto error;
+                }
+            } else {
+                PyObject *group_source = direct_groups
+                    ? self->subject : groups[i];
+                if (PyUnicode_CopyCharacters(result,
+                                             output_offset,
+                                             group_source,
+                                             group_offsets[i],
+                                             group_lengths[i]) < 0) {
+                    Py_DECREF(result);
+                    goto error;
+                }
+            }
+            output_offset += group_lengths[i];
+        }
+        literal_start = references[i].reference_end;
+    }
+    Py_ssize_t suffix_length = template_length - literal_start;
+    if (suffix_length > 0 &&
+        PyUnicode_CopyCharacters(result,
+                                 output_offset,
+                                 template_obj,
+                                 literal_start,
+                                 suffix_length) < 0) {
+        Py_DECREF(result);
+        goto error;
+    }
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        Py_XDECREF(groups[i]);
+    }
+    return result;
+
+error:
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        Py_XDECREF(groups[i]);
+    }
+    return NULL;
+}
+
+static PyObject *
 Match_expand(MatchObject *self, PyObject *template_obj)
 {
     /* A template without a backslash has no group references or escapes.
@@ -1074,9 +1860,38 @@ Match_expand(MatchObject *self, PyObject *template_obj)
        in PyUnicode_FromObject. */
     if (!self->subject_is_bytes && PyUnicode_Check(template_obj)) {
         Py_ssize_t template_length = PyUnicode_GET_LENGTH(template_obj);
-        if (PyUnicode_FindChar(template_obj, '\\', 0, template_length, 1) < 0 &&
-            !PyErr_Occurred()) {
+        Py_ssize_t slash_index = PyUnicode_FindChar(
+            template_obj, '\\', 0, template_length, 1
+        );
+        if (slash_index < 0 && !PyErr_Occurred()) {
             return PyUnicode_FromObject(template_obj);
+        }
+        if (slash_index >= 0 && PyUnicode_CheckExact(template_obj)) {
+            int handled = 0;
+            PyObject *result = match_expand_simple_numeric(
+                self, template_obj, slash_index, template_length, &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_explicit_numeric(
+                self, template_obj, slash_index, template_length, &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_explicit_named(
+                self, template_obj, slash_index, template_length, &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_multiple_tokens(
+                self, template_obj, slash_index, template_length, &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
         }
         PyErr_Clear();
     }
@@ -1088,8 +1903,52 @@ Match_expand(MatchObject *self, PyObject *template_obj)
         Py_ssize_t template_length = PyBytes_Check(template_obj)
             ? PyBytes_GET_SIZE(template_obj)
             : PyByteArray_GET_SIZE(template_obj);
-        if (memchr(template_data, '\\', (size_t)template_length) == NULL) {
+        const char *slash = memchr(template_data, '\\', (size_t)template_length);
+        if (slash == NULL) {
             return PyBytes_FromObject(template_obj);
+        }
+        if (PyBytes_CheckExact(template_obj)) {
+            int handled = 0;
+            PyObject *result = match_expand_simple_numeric(
+                self,
+                template_obj,
+                (Py_ssize_t)(slash - template_data),
+                template_length,
+                &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_explicit_numeric(
+                self,
+                template_obj,
+                (Py_ssize_t)(slash - template_data),
+                template_length,
+                &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_explicit_named(
+                self,
+                template_obj,
+                (Py_ssize_t)(slash - template_data),
+                template_length,
+                &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_multiple_tokens(
+                self,
+                template_obj,
+                (Py_ssize_t)(slash - template_data),
+                template_length,
+                &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
         }
     }
 
@@ -3125,11 +3984,34 @@ Pattern_findall_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     return Pattern_findall(self, subject, pos, endpos, options);
 }
 
+typedef struct {
+    uint32_t limit;
+    int stopped;
+} SubstituteLimitState;
+
+enum {
+    SUBSTITUTE_REPLACEMENT_GENERAL = 0,
+    SUBSTITUTE_REPLACEMENT_LITERAL = 1,
+    SUBSTITUTE_REPLACEMENT_SINGLE_REFERENCE = 2,
+};
+
+static int PCRE2_CALL_CONVENTION
+bounded_substitute_callout(pcre2_substitute_callout_block *block, void *data)
+{
+    SubstituteLimitState *state = (SubstituteLimitState *)data;
+    if (block->subscount > state->limit) {
+        state->stopped = 1;
+        return -1;
+    }
+    return 0;
+}
+
 static PyObject *
 Pattern_substitute(PatternObject *self,
                    PyObject *subject_obj,
                    PyObject *repl_obj,
-                   Py_ssize_t count)
+                   Py_ssize_t count,
+                   int replacement_shape)
 {
     PyObject *result = NULL;
     PyObject *result_tuple = NULL;
@@ -3147,8 +4029,10 @@ Pattern_substitute(PatternObject *self,
     pcre2_jit_stack *jit_stack = NULL;
     int match_data_from_pattern = 0;
     int match_context_from_pattern = 0;
+    int substitute_callout_installed = 0;
 
-    if (count != 0) {
+    if (count < 0 || count > 8 ||
+        (count > 1 && replacement_shape == SUBSTITUTE_REPLACEMENT_GENERAL)) {
         Py_RETURN_NOTIMPLEMENTED;
     }
 
@@ -3240,12 +4124,30 @@ Pattern_substitute(PatternObject *self,
         goto error;
     }
 
-    if (pattern_jit_get(self)) {
+    if (pattern_jit_get(self) || count > 1) {
         match_context = pattern_match_context_acquire(self, 0, &match_context_from_pattern);
         if (match_context == NULL) {
             PyErr_NoMemory();
             goto error;
         }
+    }
+
+    SubstituteLimitState limit_state = {(uint32_t)count, 0};
+
+    if (count > 1) {
+        int callout_rc = pcre2_set_substitute_callout(
+            match_context,
+            bounded_substitute_callout,
+            &limit_state
+        );
+        if (callout_rc < 0) {
+            raise_pcre_error("set_substitute_callout", callout_rc, 0);
+            goto error;
+        }
+        substitute_callout_installed = 1;
+    }
+
+    if (pattern_jit_get(self)) {
         jit_stack = jit_stack_cache_acquire();
         if (jit_stack == NULL) {
             PyErr_NoMemory();
@@ -3254,10 +4156,12 @@ Pattern_substitute(PatternObject *self,
         pcre2_jit_stack_assign(match_context, NULL, jit_stack);
     }
 
-    uint32_t sub_options = PCRE2_SUBSTITUTE_GLOBAL
-                         | PCRE2_SUBSTITUTE_EXTENDED
+    uint32_t sub_options = PCRE2_SUBSTITUTE_EXTENDED
                          | PCRE2_SUBSTITUTE_UNSET_EMPTY
                          | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
+    if (count != 1) {
+        sub_options |= PCRE2_SUBSTITUTE_GLOBAL;
+    }
     if (!subject_is_bytes) {
         sub_options |= PCRE2_NO_UTF_CHECK;
     }
@@ -3268,7 +4172,44 @@ Pattern_substitute(PatternObject *self,
         goto error;
     }
     PCRE2_SIZE initial_outlen = (PCRE2_SIZE)(subject_length + repl_length + 16);
+    PCRE2_SIZE bounded_max_outlen = 0;
+    if (count > 1) {
+        if (repl_length > (PY_SSIZE_T_MAX - subject_length - 16) / count) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        initial_outlen = (PCRE2_SIZE)(
+            subject_length + count * repl_length + 16
+        );
+
+        if (replacement_shape == SUBSTITUTE_REPLACEMENT_LITERAL) {
+            bounded_max_outlen = initial_outlen;
+        } else {
+            /* Exactly one capture can contribute at most one whole subject
+             * per accepted replacement. The first allocation uses the usual
+             * compact bound; only a genuine expansion overflow grows
+             * geometrically toward this strict linear ceiling. */
+            if (subject_length > PY_SSIZE_T_MAX - repl_length) {
+                PyErr_NoMemory();
+                goto error;
+            }
+            Py_ssize_t per_replacement = subject_length + repl_length;
+            if (per_replacement >
+                (PY_SSIZE_T_MAX - subject_length - 16) / count) {
+                PyErr_NoMemory();
+                goto error;
+            }
+            bounded_max_outlen = (PCRE2_SIZE)(
+                subject_length + count * per_replacement + 16
+            );
+        }
+        if (bounded_max_outlen < initial_outlen) {
+            PyErr_NoMemory();
+            goto error;
+        }
+    }
     PCRE2_SIZE outlen = initial_outlen;
+    PCRE2_SIZE out_capacity = initial_outlen;
     PCRE2_UCHAR *out = (PCRE2_UCHAR *)PyMem_Malloc(outlen);
     if (out == NULL) {
         PyErr_NoMemory();
@@ -3276,6 +4217,7 @@ Pattern_substitute(PatternObject *self,
     }
 
     for (int attempts = 0; attempts < 5; ++attempts) {
+        limit_state.stopped = 0;
         int rc = pcre2_substitute(self->code,
                                   (PCRE2_SPTR)subject_data,
                                   (PCRE2_SIZE)subject_length,
@@ -3289,7 +4231,16 @@ Pattern_substitute(PatternObject *self,
                                   &outlen);
         if (rc == PCRE2_ERROR_NOMEMORY) {
             PCRE2_SIZE required = outlen;
-            if (required == (PCRE2_SIZE)-1) {
+            if (count > 1) {
+                if (out_capacity >= bounded_max_outlen) {
+                    PyMem_Free(out);
+                    PyErr_NoMemory();
+                    goto error;
+                }
+                required = out_capacity <= bounded_max_outlen / 2
+                    ? out_capacity * 2
+                    : bounded_max_outlen;
+            } else if (required == (PCRE2_SIZE)-1) {
                 if ((PCRE2_SIZE)subject_length > (PCRE2_SIZE)PY_SSIZE_T_MAX - initial_outlen) {
                     PyMem_Free(out);
                     PyErr_NoMemory();
@@ -3312,6 +4263,7 @@ Pattern_substitute(PatternObject *self,
                 goto error;
             }
             out = (PCRE2_UCHAR *)new_out;
+            out_capacity = required;
             outlen = required;
             continue;
         }
@@ -3320,6 +4272,11 @@ Pattern_substitute(PatternObject *self,
             PyMem_Free(out);
             raise_pcre_error("substitute", rc, error_offset);
             goto error;
+        }
+        if (count > 1 && limit_state.stopped && rc > 0) {
+            /* PCRE2 includes the rejected stopping match in its return value;
+             * public subn() counts accepted replacements only. */
+            rc -= 1;
         }
 
         PyObject *out_obj = NULL;
@@ -3364,6 +4321,16 @@ error:
     result = NULL;
 
 cleanup:
+    if (substitute_callout_installed && match_context != NULL) {
+        int clear_rc = pcre2_set_substitute_callout(match_context, NULL, NULL);
+        if (clear_rc < 0) {
+            /* Never publish a context that could retain a pointer to the
+             * stack-local limit state, even if a future PCRE2 build reports a
+             * failure while clearing the callout. */
+            pcre2_match_context_free(match_context);
+            match_context = NULL;
+        }
+    }
     if (jit_stack != NULL) {
         if (match_context != NULL) {
             pcre2_jit_stack_assign(match_context, NULL, NULL);
@@ -3393,7 +4360,13 @@ Pattern_substitute_method(PatternObject *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    return Pattern_substitute(self, subject, replacement, count);
+    return Pattern_substitute(
+        self,
+        subject,
+        replacement,
+        count,
+        SUBSTITUTE_REPLACEMENT_GENERAL
+    );
 }
 
 static PyObject *
@@ -3716,15 +4689,463 @@ Pattern_findall_fast(PatternObject *self, PyObject *const *args, Py_ssize_t narg
 }
 
 static PyObject *
+Pattern_split_literal_capture_fast(PatternObject *self,
+                                   PyObject *const *args,
+                                   Py_ssize_t nargs)
+{
+    (void)self;
+    if (nargs != 3) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "_split_literal_capture_fast() takes exactly 3 positional arguments (%zd given)",
+            nargs
+        );
+        return NULL;
+    }
+
+    int subject_is_bytes = PyBytes_CheckExact(args[0]);
+    if ((!subject_is_bytes && !PyUnicode_CheckExact(args[0])) ||
+        (subject_is_bytes
+            ? !PyBytes_CheckExact(args[1])
+            : !PyUnicode_CheckExact(args[1]))) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+
+    Py_ssize_t maxsplit = PyLong_AsSsize_t(args[2]);
+    if (maxsplit == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    Py_ssize_t split_limit = maxsplit == 0
+        ? -1
+        : (maxsplit < 0 ? 0 : maxsplit);
+
+    PyObject *pieces = subject_is_bytes
+        ? PyObject_CallMethod(args[0], "split", "On", args[1], split_limit)
+        : PyUnicode_Split(args[0], args[1], split_limit);
+    if (pieces == NULL) {
+        return NULL;
+    }
+    if (!PyList_CheckExact(pieces)) {
+        Py_DECREF(pieces);
+        PyErr_SetString(PyExc_RuntimeError, "built-in split returned a non-list");
+        return NULL;
+    }
+
+    Py_ssize_t piece_count = PyList_GET_SIZE(pieces);
+    if (piece_count <= 1) {
+        return pieces;
+    }
+    if (piece_count > PY_SSIZE_T_MAX / 2) {
+        Py_DECREF(pieces);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    PyObject *result = PyList_New(piece_count * 2 - 1);
+    if (result == NULL) {
+        Py_DECREF(pieces);
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < piece_count; ++index) {
+        PyObject *piece = PyList_GET_ITEM(pieces, index);
+        /* Transfer the temporary list's owned piece reference directly into
+         * the final list.  Leave a valid singleton behind so list teardown
+         * never observes a NULL slot. */
+        Py_INCREF(Py_None);
+        PyList_SET_ITEM(pieces, index, Py_None);
+        PyList_SET_ITEM(result, index * 2, piece);
+        if (index + 1 < piece_count) {
+            Py_INCREF(args[1]);
+            PyList_SET_ITEM(result, index * 2 + 1, args[1]);
+        }
+    }
+    Py_DECREF(pieces);
+    return result;
+}
+
+static PyObject *
+Pattern_split_literal_captures_fast(PatternObject *self,
+                                    PyObject *const *args,
+                                    Py_ssize_t nargs)
+{
+    (void)self;
+    if (nargs != 4) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "_split_literal_captures_fast() takes exactly 4 positional arguments (%zd given)",
+            nargs
+        );
+        return NULL;
+    }
+
+    int subject_is_bytes = PyBytes_CheckExact(args[0]);
+    if ((!subject_is_bytes && !PyUnicode_CheckExact(args[0])) ||
+        (subject_is_bytes
+            ? !PyBytes_CheckExact(args[1])
+            : !PyUnicode_CheckExact(args[1])) ||
+        !PyTuple_CheckExact(args[2])) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+
+    Py_ssize_t group_count = PyTuple_GET_SIZE(args[2]);
+    if (group_count < 2 || group_count > 8) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    for (Py_ssize_t index = 0; index < group_count; ++index) {
+        PyObject *group = PyTuple_GET_ITEM(args[2], index);
+        if (subject_is_bytes
+                ? !PyBytes_CheckExact(group)
+                : !PyUnicode_CheckExact(group)) {
+            Py_RETURN_NOTIMPLEMENTED;
+        }
+    }
+
+    Py_ssize_t maxsplit = PyLong_AsSsize_t(args[3]);
+    if (maxsplit == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    Py_ssize_t split_limit = maxsplit == 0
+        ? -1
+        : (maxsplit < 0 ? 0 : maxsplit);
+
+    PyObject *pieces = subject_is_bytes
+        ? PyObject_CallMethod(args[0], "split", "On", args[1], split_limit)
+        : PyUnicode_Split(args[0], args[1], split_limit);
+    if (pieces == NULL) {
+        return NULL;
+    }
+    if (!PyList_CheckExact(pieces)) {
+        Py_DECREF(pieces);
+        PyErr_SetString(PyExc_RuntimeError, "built-in split returned a non-list");
+        return NULL;
+    }
+
+    Py_ssize_t piece_count = PyList_GET_SIZE(pieces);
+    if (piece_count <= 1) {
+        return pieces;
+    }
+    Py_ssize_t match_count = piece_count - 1;
+    if (match_count > (PY_SSIZE_T_MAX - piece_count) / group_count) {
+        Py_DECREF(pieces);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    Py_ssize_t result_count = piece_count + match_count * group_count;
+    PyObject *result = PyList_New(result_count);
+    if (result == NULL) {
+        Py_DECREF(pieces);
+        return NULL;
+    }
+    Py_ssize_t output_index = 0;
+    for (Py_ssize_t piece_index = 0;
+         piece_index < piece_count;
+         ++piece_index) {
+        PyObject *piece = PyList_GET_ITEM(pieces, piece_index);
+        Py_INCREF(Py_None);
+        PyList_SET_ITEM(pieces, piece_index, Py_None);
+        PyList_SET_ITEM(result, output_index++, piece);
+        if (piece_index + 1 < piece_count) {
+            for (Py_ssize_t group_index = 0;
+                 group_index < group_count;
+                 ++group_index) {
+                PyObject *group = PyTuple_GET_ITEM(args[2], group_index);
+                Py_INCREF(group);
+                PyList_SET_ITEM(result, output_index++, group);
+            }
+        }
+    }
+    Py_DECREF(pieces);
+    return result;
+}
+
+static PyObject *
 Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
-    if (nargs != 2) {
+    if (nargs != 2 && nargs != 3) {
         PyErr_Format(PyExc_TypeError,
-                     "_substitute_fast() takes exactly 2 positional arguments (%zd given)",
+                     "_substitute_fast() takes 2 or 3 positional arguments (%zd given)",
                      nargs);
         return NULL;
     }
-    return Pattern_substitute(self, args[0], args[1], 0);
+    Py_ssize_t count = 0;
+    if (nargs == 3) {
+        count = PyLong_AsSsize_t(args[2]);
+        if (count == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+    }
+    int replacement_shape = SUBSTITUTE_REPLACEMENT_GENERAL;
+    if (count > 1) {
+        if (PyBytes_CheckExact(args[1])) {
+            const char *data = PyBytes_AS_STRING(args[1]);
+            Py_ssize_t length = PyBytes_GET_SIZE(args[1]);
+            if (memchr(data, '\\', (size_t)length) == NULL &&
+                memchr(data, '$', (size_t)length) == NULL) {
+                replacement_shape = SUBSTITUTE_REPLACEMENT_LITERAL;
+            }
+        } else if (PyUnicode_CheckExact(args[1]) &&
+                   PyUnicode_FindChar(
+                       args[1], '\\', 0, PyUnicode_GET_LENGTH(args[1]), 1
+                   ) < 0 &&
+                   PyUnicode_FindChar(
+                       args[1], '$', 0, PyUnicode_GET_LENGTH(args[1]), 1
+                   ) < 0) {
+            replacement_shape = SUBSTITUTE_REPLACEMENT_LITERAL;
+        }
+    }
+    return Pattern_substitute(
+        self, args[0], args[1], count, replacement_shape
+    );
+}
+
+static int
+pattern_has_ascii_group_name(PatternObject *self,
+                             const char *name,
+                             Py_ssize_t name_length)
+{
+    uint32_t name_count = 0;
+    uint32_t entry_size = 0;
+    PCRE2_SPTR name_table = NULL;
+    if (name_length <= 0 ||
+        pcre2_pattern_info(self->code, PCRE2_INFO_NAMECOUNT, &name_count) != 0 ||
+        pcre2_pattern_info(self->code,
+                           PCRE2_INFO_NAMEENTRYSIZE,
+                           &entry_size) != 0 ||
+        pcre2_pattern_info(self->code,
+                           PCRE2_INFO_NAMETABLE,
+                           &name_table) != 0 ||
+        name_table == NULL || entry_size < 3) {
+        return 0;
+    }
+    size_t name_max = (size_t)entry_size - 2;
+    for (uint32_t i = 0; i < name_count; ++i) {
+        const char *entry_name = (const char *)(
+            name_table + (size_t)i * entry_size + 2
+        );
+        size_t entry_length = strnlen(entry_name, name_max);
+        if (entry_length == (size_t)name_length &&
+            memcmp(entry_name, name, entry_length) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static Py_UCS4
+replacement_character_at(PyObject *replacement,
+                         int replacement_is_bytes,
+                         Py_ssize_t index)
+{
+    return replacement_is_bytes
+        ? (unsigned char)PyBytes_AS_STRING(replacement)[index]
+        : PyUnicode_ReadChar(replacement, index);
+}
+
+static Py_ssize_t
+replacement_find_character(PyObject *replacement,
+                           int replacement_is_bytes,
+                           Py_UCS4 character,
+                           Py_ssize_t start,
+                           Py_ssize_t length)
+{
+    if (!replacement_is_bytes) {
+        return PyUnicode_FindChar(replacement, character, start, length, 1);
+    }
+    const char *data = PyBytes_AS_STRING(replacement);
+    const char *found = memchr(
+        data + start, (unsigned char)character, (size_t)(length - start)
+    );
+    return found == NULL ? -1 : (Py_ssize_t)(found - data);
+}
+
+static PyObject *
+pattern_translate_single_replacement(PatternObject *self,
+                                     PyObject *replacement,
+                                     int *handled)
+{
+    *handled = 0;
+    int replacement_is_bytes = PyBytes_CheckExact(replacement);
+    if (!replacement_is_bytes && !PyUnicode_CheckExact(replacement)) {
+        return NULL;
+    }
+    if (!replacement_is_bytes && PyUnicode_READY(replacement) < 0) {
+        return NULL;
+    }
+    Py_ssize_t length = replacement_is_bytes
+        ? PyBytes_GET_SIZE(replacement) : PyUnicode_GET_LENGTH(replacement);
+    Py_ssize_t slash_index = replacement_find_character(
+        replacement, replacement_is_bytes, '\\', 0, length
+    );
+    if (slash_index < 0 ||
+        replacement_find_character(
+            replacement, replacement_is_bytes, '$', 0, length
+        ) >= 0 ||
+        slash_index + 1 >= length) {
+        return NULL;
+    }
+
+    Py_UCS4 following = replacement_character_at(
+        replacement, replacement_is_bytes, slash_index + 1
+    );
+    if (following >= '1' && following <= '9') {
+        if ((uint32_t)(following - '0') > self->capture_count ||
+            (slash_index + 2 < length &&
+             replacement_character_at(
+                 replacement, replacement_is_bytes, slash_index + 2
+             ) >= '0' &&
+             replacement_character_at(
+                 replacement, replacement_is_bytes, slash_index + 2
+             ) <= '9') ||
+            replacement_find_character(
+                replacement,
+                replacement_is_bytes,
+                '\\',
+                slash_index + 2,
+                length
+            ) >= 0) {
+            return NULL;
+        }
+        if (length > PY_SSIZE_T_MAX - 3) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+        *handled = 1;
+        Py_ssize_t result_length = length + 3;
+        if (replacement_is_bytes) {
+            PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
+            if (result == NULL) {
+                return NULL;
+            }
+            char *output = PyBytes_AS_STRING(result);
+            const char *input = PyBytes_AS_STRING(replacement);
+            memcpy(output, input, (size_t)slash_index);
+            output[slash_index] = '\\';
+            output[slash_index + 1] = 'g';
+            output[slash_index + 2] = '<';
+            output[slash_index + 3] = (char)following;
+            output[slash_index + 4] = '>';
+            memcpy(output + slash_index + 5,
+                   input + slash_index + 2,
+                   (size_t)(length - slash_index - 2));
+            return result;
+        }
+
+        PyObject *result = PyUnicode_New(
+            result_length, PyUnicode_MAX_CHAR_VALUE(replacement)
+        );
+        if (result == NULL) {
+            return NULL;
+        }
+        if ((slash_index > 0 &&
+             PyUnicode_CopyCharacters(
+                 result, 0, replacement, 0, slash_index
+             ) < 0) ||
+            PyUnicode_WriteChar(result, slash_index, '\\') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 1, 'g') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 2, '<') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 3, following) < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 4, '>') < 0 ||
+            (slash_index + 2 < length &&
+             PyUnicode_CopyCharacters(result,
+                                      slash_index + 5,
+                                      replacement,
+                                      slash_index + 2,
+                                      length - slash_index - 2) < 0)) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        return result;
+    }
+
+    if (following != 'g' || slash_index + 4 >= length ||
+        replacement_character_at(
+            replacement, replacement_is_bytes, slash_index + 2
+        ) != '<') {
+        return NULL;
+    }
+    char name[129];
+    Py_ssize_t name_length = 0;
+    uint32_t group_index = 0;
+    int numeric = 1;
+    Py_ssize_t cursor = slash_index + 3;
+    while (cursor < length) {
+        Py_UCS4 character = replacement_character_at(
+            replacement, replacement_is_bytes, cursor
+        );
+        if (character == '>') {
+            break;
+        }
+        if (character > 0x7f || name_length >= 128) {
+            return NULL;
+        }
+        name[name_length++] = (char)character;
+        if (character < '0' || character > '9') {
+            numeric = 0;
+        } else if (numeric) {
+            uint32_t digit = (uint32_t)(character - '0');
+            if (group_index > (UINT32_MAX - digit) / 10) {
+                return NULL;
+            }
+            group_index = group_index * 10 + digit;
+        }
+        cursor += 1;
+    }
+    if (name_length == 0 || cursor >= length ||
+        replacement_find_character(
+            replacement,
+            replacement_is_bytes,
+            '\\',
+            cursor + 1,
+            length
+        ) >= 0 ||
+        (numeric
+            ? group_index > self->capture_count
+            : !pattern_has_ascii_group_name(self, name, name_length))) {
+        return NULL;
+    }
+    *handled = 1;
+    Py_INCREF(replacement);
+    return replacement;
+}
+
+static PyObject *
+Pattern_substitute_python_fast(PatternObject *self,
+                               PyObject *const *args,
+                               Py_ssize_t nargs)
+{
+    if (nargs != 2 && nargs != 3) {
+        PyErr_Format(PyExc_TypeError,
+                     "_substitute_python_fast() takes 2 or 3 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    Py_ssize_t count = 0;
+    if (nargs == 3) {
+        count = PyLong_AsSsize_t(args[2]);
+        if (count == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+    }
+    int handled = 0;
+    PyObject *replacement = pattern_translate_single_replacement(
+        self, args[1], &handled
+    );
+    if (replacement == NULL) {
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    PyObject *result = Pattern_substitute(
+        self,
+        args[0],
+        replacement,
+        count,
+        SUBSTITUTE_REPLACEMENT_SINGLE_REFERENCE
+    );
+    Py_DECREF(replacement);
+    return result;
 }
 
 /*
@@ -3817,7 +5238,10 @@ static PyMethodDef Pattern_methods[] = {
     {"search", (PyCFunction)Pattern_search_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search the subject for the pattern." )},
     {"fullmatch", (PyCFunction)Pattern_fullmatch_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Require the pattern to match the entire subject." )},
     {"_findall_fast", (PyCFunction)(void(*)(void))Pattern_findall_fast, METH_FASTCALL, NULL},
+    {"_split_literal_capture_fast", (PyCFunction)(void(*)(void))Pattern_split_literal_capture_fast, METH_FASTCALL, NULL},
+    {"_split_literal_captures_fast", (PyCFunction)(void(*)(void))Pattern_split_literal_captures_fast, METH_FASTCALL, NULL},
     {"_substitute_fast", (PyCFunction)(void(*)(void))Pattern_substitute_fast, METH_FASTCALL, NULL},
+    {"_substitute_python_fast", (PyCFunction)(void(*)(void))Pattern_substitute_python_fast, METH_FASTCALL, NULL},
     {"_match_fast", (PyCFunction)(void(*)(void))Pattern_match_fast, METH_FASTCALL, NULL},
     {"_search_fast", (PyCFunction)(void(*)(void))Pattern_search_fast, METH_FASTCALL, NULL},
     {"_fullmatch_fast", (PyCFunction)(void(*)(void))Pattern_fullmatch_fast, METH_FASTCALL, NULL},
@@ -3913,11 +5337,26 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     }
 #endif
 
+    /* Python text is guaranteed to encode as valid UTF-8, but arbitrary
+     * bytes are not.  PCRE2_NO_UTF_CHECK makes validity a hard caller
+     * precondition; forwarding malformed bytes invokes undefined behavior in
+     * the compiler.  An inline directive such as (*UTF) can enable UTF after the
+     * outer options have been parsed, so checking only compile_options & UTF
+     * is not sufficient.  Validate every bytes pattern that asks us to skip
+     * checks, while retaining the requested option in Pattern.flags after a
+     * successful compile. */
+    uint32_t engine_compile_options = compile_options;
+    int validate_bytes_utf = is_bytes &&
+        (compile_options & PCRE2_NO_UTF_CHECK) != 0;
+    if (validate_bytes_utf) {
+        engine_compile_options &= ~PCRE2_NO_UTF_CHECK;
+    }
+
     int error_code;
     PCRE2_SIZE error_offset;
     pcre2_code *code = pcre2_compile((PCRE2_SPTR)PyBytes_AS_STRING(pattern_bytes),
                                      (PCRE2_SIZE)pattern_length,
-                                     compile_options,
+                                     engine_compile_options,
                                      &error_code,
                                      &error_offset,
                                      NULL);
@@ -3973,6 +5412,9 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     uint32_t effective_options = compile_options;
     if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &effective_options) == 0) {
         pattern->compile_options = effective_options;
+    }
+    if (validate_bytes_utf) {
+        pattern->compile_options |= PCRE2_NO_UTF_CHECK;
     }
     pattern->compile_options = apply_leading_inline_options(
         PyBytes_AS_STRING(pattern_bytes),
@@ -4343,6 +5785,7 @@ static PyMethodDef module_methods[] = {
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
     {"_debug_thread_cache_count", (PyCFunction)module_debug_thread_cache_count, METH_NOARGS, PyDoc_STR("Return the number of live thread cache states (requires PYPCRE_DEBUG=1)." )},
     {"translate_unicode_escapes", (PyCFunction)module_translate_unicode_escapes, METH_O, PyDoc_STR("Translate literal \\uXXXX/\\UXXXXXXXX escapes to PCRE2-compatible \\x{...} sequences." )},
+    {"escape", (PyCFunction)(void(*)(void))module_escape, METH_FASTCALL | METH_KEYWORDS, PyDoc_STR("escape($module, pattern)\n--\n\nEscape special characters using re.escape semantics.")},
     {NULL, NULL, 0, NULL},
 };
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re as _std_re
+import warnings as _warnings
 from collections.abc import Iterable, Iterator, Mapping
 from functools import lru_cache
 from threading import local
@@ -174,9 +175,15 @@ _STD_RE_FLAG_MAP: dict[_std_re.RegexFlag, int] = {
     _std_re.RegexFlag.VERBOSE: _pcre2.PCRE2_EXTENDED,
 }
 
+# Keep the hot coercion loop on plain integers.  ``RegexFlag.__and__`` creates
+# a new IntFlag object for every probe, which dominates cached compile calls.
+_STD_RE_FLAG_PAIRS: tuple[tuple[int, int], ...] = tuple(
+    (int(flag), native_value) for flag, native_value in _STD_RE_FLAG_MAP.items()
+)
+
 _STD_RE_FLAG_MASK = 0
-for _flag in _STD_RE_FLAG_MAP:
-    _STD_RE_FLAG_MASK |= int(_flag)
+for _flag_value, _native_value in _STD_RE_FLAG_PAIRS:
+    _STD_RE_FLAG_MASK |= _flag_value
 
 
 def _convert_regex_compat(pattern: str) -> str:
@@ -205,7 +212,8 @@ def _apply_default_unicode_flags(pattern: Any, flags: int) -> int:
 
 
 def _coerce_stdlib_regexflag(flag: _std_re.RegexFlag) -> int:
-    unsupported_bits = int(flag) & ~(
+    flag_value = int(flag)
+    unsupported_bits = flag_value & ~(
         _STD_RE_FLAG_MASK | RE_TEMPLATE_FLAG | RE_UNICODE_FLAG
     )
     if unsupported_bits:
@@ -215,8 +223,8 @@ def _coerce_stdlib_regexflag(flag: _std_re.RegexFlag) -> int:
         )
 
     resolved = 0
-    for std_flag, native_value in _STD_RE_FLAG_MAP.items():
-        if flag & std_flag:
+    for std_flag_value, native_value in _STD_RE_FLAG_PAIRS:
+        if flag_value & std_flag_value:
             resolved |= native_value
     return resolved
 
@@ -298,6 +306,8 @@ class Pattern:
         "_groups_hint",
         "_thread_mode",
         "_is_c_pattern",
+        "_literal_findall",
+        "_literal_findall_multi",
         "_literal_split",
     )
 
@@ -311,6 +321,8 @@ class Pattern:
             self._groups_hint = maybe_infer_group_count(pattern.pattern)
 
         literal_split: str | bytes | None = None
+        literal_findall: str | bytes | None = None
+        literal_findall_multi: tuple[str | bytes, tuple[str | bytes, ...]] | None = None
         if self._is_c_pattern:
             source = pattern.pattern
             if type(source) in (str, bytes) and source:
@@ -324,12 +336,38 @@ class Pattern:
                     if type(source) is str
                     else 0
                 )
-                if (
-                    not any(char in metacharacters for char in source)
-                    and pattern.flags == expected_flags
-                ):
-                    literal_split = source
+                if pattern.flags == expected_flags:
+                    if not any(char in metacharacters for char in source):
+                        literal_split = source
+                    if 3 <= len(source) <= 80:
+                        opening = "(" if type(source) is str else b"("
+                        closing = ")" if type(source) is str else b")"
+                        literal_groups: list[str | bytes] = []
+                        cursor = 0
+                        literal_units = 0
+                        while cursor < len(source) and len(literal_groups) < 8:
+                            if source[cursor : cursor + 1] != opening:
+                                break
+                            closing_index = source.find(closing, cursor + 1)
+                            inner = source[cursor + 1 : closing_index]
+                            if not inner or any(
+                                char in metacharacters for char in inner
+                            ):
+                                break
+                            literal_units += len(inner)
+                            if literal_units > 64:
+                                break
+                            literal_groups.append(inner)
+                            cursor = closing_index + 1
+                        if cursor == len(source) and len(literal_groups) == 1:
+                            literal_findall = literal_groups[0]
+                        elif cursor == len(source) and len(literal_groups) >= 2:
+                            empty = "" if type(source) is str else b""
+                            groups = tuple(literal_groups)
+                            literal_findall_multi = (empty.join(groups), groups)
         self._literal_split = literal_split
+        self._literal_findall = literal_findall
+        self._literal_findall_multi = literal_findall_multi
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -566,6 +604,33 @@ class Pattern:
     ) -> List[Any]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        literal_capture = getattr(self, "_literal_findall", None)
+        if (
+            getattr(self, "_is_c_pattern", False)
+            and type(self) is Pattern
+            and literal_capture is not None
+            and type(subject) is type(literal_capture)
+            and type(pos) is int
+            and pos == 0
+            and endpos is None
+            and type(options) is int
+            and options == 0
+        ):
+            return [literal_capture] * subject.count(literal_capture)
+        literal_multi = getattr(self, "_literal_findall_multi", None)
+        if (
+            getattr(self, "_is_c_pattern", False)
+            and type(self) is Pattern
+            and literal_multi is not None
+            and type(subject) is type(literal_multi[0])
+            and type(pos) is int
+            and pos == 0
+            and endpos is None
+            and type(options) is int
+            and options == 0
+        ):
+            needle, groups = literal_multi
+            return [groups] * subject.count(needle)
         literal_source = getattr(self, "_literal_split", None)
         if (
             getattr(self, "_is_c_pattern", False)
@@ -647,6 +712,31 @@ class Pattern:
             # ``Pattern.split`` (unlike ``str.split(sep, 0)``).
             split_limit = -1 if maxsplit == 0 else (0 if maxsplit < 0 else maxsplit)
             return subject.split(self._literal_split, split_limit)
+
+        literal_capture = self._literal_findall
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and literal_capture is not None
+            and type(subject) is type(literal_capture)
+            and type(maxsplit) is int
+        ):
+            return self._pattern._split_literal_capture_fast(
+                subject, literal_capture, maxsplit
+            )
+
+        literal_multi = self._literal_findall_multi
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and literal_multi is not None
+            and type(subject) is type(literal_multi[0])
+            and type(maxsplit) is int
+        ):
+            needle, groups = literal_multi
+            return self._pattern._split_literal_captures_fast(
+                subject, needle, groups, maxsplit
+            )
 
         # The common immutable/default shape can go straight to the C splitter.
         # Keep subclasses, buffer exporters, and non-default limits on the
@@ -771,13 +861,36 @@ class Pattern:
             and type(subject) in (str, bytes)
             and type(repl) is type(subject)
             and type(count) is int
-            and count == 0
+            and 0 <= count <= 8
             and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
             and ("$" not in repl if type(repl) is str else b"$" not in repl)
         ):
             fast_substitute = getattr(self._pattern, "_substitute_fast", None)
             if fast_substitute is not None:
-                return fast_substitute(subject, repl)
+                if count == 0:
+                    return fast_substitute(subject, repl)
+                return fast_substitute(subject, repl, count)
+
+        # One exact, valid Python capture reference can be translated to
+        # PCRE2's equivalent replacement syntax with call-local state only.
+        # Keep every ambiguous or extended form on the compatibility parser.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and 0 <= count <= 8
+        ):
+            fast_substitute = getattr(self._pattern, "_substitute_python_fast", None)
+            if fast_substitute is not None:
+                direct_result = (
+                    fast_substitute(subject, repl)
+                    if count == 0
+                    else fast_substitute(subject, repl, count)
+                )
+                if direct_result is not NotImplemented:
+                    return direct_result
 
         subject = prepare_subject(subject)
         subject_is_bytes = is_bytes_like(subject)
@@ -1139,6 +1252,27 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
         )
         return _policy_wrapper(compiled, thread_mode)
 
+    # Exact built-in patterns with stdlib RegexFlag values have no PyPcre-only
+    # thread/JIT markers.  Translate their small finite bitset once and go
+    # directly to the existing bounded, thread-local flagged cache.  Other
+    # inputs keep the fully dynamic normalization path below.
+    if (
+        isinstance(flags, _std_re.RegexFlag)
+        and type(pattern) in (str, bytes)
+        and cached_compile is _ORIGINAL_CACHED_COMPILE
+    ):
+        resolved_stdlib_flags = _coerce_stdlib_regexflag(flags)
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
+        return _compile_flagged_builtin(
+            pattern,
+            resolved_stdlib_flags,
+            bool(_DEFAULT_JIT),
+            bool(_DEFAULT_COMPAT_REGEX),
+            thread_mode,
+        )
+
     resolved_flags = _normalise_flags(flags)
     threads_requested = bool(resolved_flags & THREADS)
     no_threads_requested = bool(resolved_flags & NO_THREADS)
@@ -1407,7 +1541,7 @@ def subn(
         and type(string) in (str, bytes)
         and type(repl) is type(string)
         and type(count) is int
-        and count == 0
+        and 0 <= count <= 8
         and compiled._is_c_pattern
         and (
             (type(repl) is str and "\\" not in repl and "$" not in repl)
@@ -1416,23 +1550,26 @@ def subn(
     ):
         fast = getattr(compiled._pattern, "_substitute_fast", None)
         if fast is not None:
-            return fast(string, repl)
+            if count == 0:
+                return fast(string, repl)
+            return fast(string, repl, count)
     return compiled.subn(repl, string, count=count)
 
 
 # add this function to bypass signatures unit test
 # re.template() is deprecated and removed since python 3.12
 def template(pattern, flags=0):
-    import warnings
-
-    warnings.warn(
+    _warnings.warn(
         "The re.template() function is deprecated "
         "as it is an undocumented function "
         "without an obvious purpose. "
         "Use re.compile() instead.",
         DeprecationWarning,
     )
-    return compile(pattern, flags | RE_TEMPLATE)
+    template_flags = (
+        RE_TEMPLATE if type(flags) is int and flags == 0 else flags | RE_TEMPLATE
+    )
+    return compile(pattern, template_flags)
 
 
 _PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})

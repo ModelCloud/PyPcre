@@ -13,6 +13,190 @@
 #   include <intrin.h>
 #endif
 
+static inline int
+escape_required(Py_UCS4 character)
+{
+    switch (character) {
+        case '(':
+        case ')':
+        case '[':
+        case ']':
+        case '{':
+        case '}':
+        case '?':
+        case '*':
+        case '+':
+        case '-':
+        case '|':
+        case '^':
+        case '$':
+        case '\\':
+        case '.':
+        case '&':
+        case '~':
+        case '#':
+        case ' ':
+        case '\t':
+        case '\n':
+        case '\v':
+        case '\f':
+        case '\r':
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static PyObject *
+escape_exact_bytes(PyObject *pattern)
+{
+    const unsigned char *input = (const unsigned char *)PyBytes_AS_STRING(pattern);
+    Py_ssize_t length = PyBytes_GET_SIZE(pattern);
+    Py_ssize_t escape_count = 0;
+    for (Py_ssize_t index = 0; index < length; ++index) {
+        escape_count += escape_required((Py_UCS4)input[index]);
+    }
+
+    if (escape_count == 0) {
+        return Py_NewRef(pattern);
+    }
+    if (length > PY_SSIZE_T_MAX - escape_count) {
+        return PyErr_NoMemory();
+    }
+
+    PyObject *result = PyBytes_FromStringAndSize(NULL, length + escape_count);
+    if (result == NULL) {
+        return NULL;
+    }
+    char *output = PyBytes_AS_STRING(result);
+    for (Py_ssize_t index = 0; index < length; ++index) {
+        unsigned char character = input[index];
+        if (escape_required((Py_UCS4)character)) {
+            *output++ = '\\';
+        }
+        *output++ = (char)character;
+    }
+    return result;
+}
+
+static PyObject *
+escape_exact_unicode(PyObject *pattern)
+{
+    Py_ssize_t length = PyUnicode_GET_LENGTH(pattern);
+    int input_kind = PyUnicode_KIND(pattern);
+    void *input_data = PyUnicode_DATA(pattern);
+    Py_ssize_t escape_count = 0;
+    for (Py_ssize_t index = 0; index < length; ++index) {
+        escape_count += escape_required(PyUnicode_READ(input_kind, input_data, index));
+    }
+
+    if (escape_count == 0) {
+        return Py_NewRef(pattern);
+    }
+    if (length > PY_SSIZE_T_MAX - escape_count) {
+        return PyErr_NoMemory();
+    }
+
+    PyObject *result = PyUnicode_New(
+        length + escape_count,
+        PyUnicode_MAX_CHAR_VALUE(pattern)
+    );
+    if (result == NULL) {
+        return NULL;
+    }
+    int output_kind = PyUnicode_KIND(result);
+    void *output_data = PyUnicode_DATA(result);
+    Py_ssize_t output_index = 0;
+    for (Py_ssize_t index = 0; index < length; ++index) {
+        Py_UCS4 character = PyUnicode_READ(input_kind, input_data, index);
+        if (escape_required(character)) {
+            PyUnicode_WRITE(output_kind, output_data, output_index++, '\\');
+        }
+        PyUnicode_WRITE(output_kind, output_data, output_index++, character);
+    }
+    return result;
+}
+
+static PyObject *
+escape_stdlib_fallback(PyObject *pattern)
+{
+    /* Preserve dynamic ``str.translate`` overrides and the full stdlib buffer
+     * coercion/error behaviour for non-exact inputs. This is intentionally
+     * uncached: keeping a ``re`` module or callable in process-global extension
+     * state would create interpreter-lifetime and teardown hazards. */
+    PyObject *re_module = PyImport_ImportModule("re");
+    if (re_module == NULL) {
+        return NULL;
+    }
+    PyObject *escape_callable = PyObject_GetAttrString(re_module, "escape");
+    Py_DECREF(re_module);
+    if (escape_callable == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_CallOneArg(escape_callable, pattern);
+    Py_DECREF(escape_callable);
+    return result;
+}
+
+PyObject *
+module_escape(PyObject *Py_UNUSED(module),
+              PyObject *const *args,
+              Py_ssize_t nargs,
+              PyObject *kwnames)
+{
+    Py_ssize_t keyword_count = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+    PyObject *pattern = NULL;
+
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError,
+                     "escape() takes 1 positional argument but %zd were given",
+                     nargs);
+        return NULL;
+    }
+
+    for (Py_ssize_t index = 0; index < keyword_count; ++index) {
+        PyObject *keyword = PyTuple_GET_ITEM(kwnames, index);
+        if (!PyUnicode_Check(keyword) ||
+            PyUnicode_CompareWithASCIIString(keyword, "pattern") != 0) {
+            PyErr_Format(PyExc_TypeError,
+                         "escape() got an unexpected keyword argument '%U'",
+                         keyword);
+            return NULL;
+        }
+        if (nargs != 0) {
+            PyErr_SetString(PyExc_TypeError,
+                            "escape() got multiple values for argument 'pattern'");
+            return NULL;
+        }
+        if (pattern != NULL) {
+            PyErr_SetString(PyExc_TypeError,
+                            "escape() got multiple values for argument 'pattern'");
+            return NULL;
+        }
+        pattern = args[nargs + index];
+    }
+
+    if (pattern == NULL) {
+        if (nargs == 0) {
+            PyErr_SetString(PyExc_TypeError,
+                            "escape() missing 1 required positional argument: 'pattern'");
+        } else {
+            pattern = args[0];
+        }
+    }
+    if (pattern == NULL) {
+        return NULL;
+    }
+
+    if (PyUnicode_CheckExact(pattern)) {
+        return escape_exact_unicode(pattern);
+    }
+    if (PyBytes_CheckExact(pattern)) {
+        return escape_exact_bytes(pattern);
+    }
+    return escape_stdlib_fallback(pattern);
+}
+
 static inline Py_ssize_t
 ascii_prefix_length_scalar(const char *data, Py_ssize_t max_len)
 {

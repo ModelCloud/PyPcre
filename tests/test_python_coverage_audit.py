@@ -59,16 +59,34 @@ def test_replacement_template_cache_reuses_and_clears(
         return original(template, state)
 
     monkeypatch.setattr(pcre_mod._parser, "parse_template", counted_parse)
-    assert pattern.sub(r"[\1]", "x") == "[x]"
-    assert pattern.sub(r"[\1]", "x") == "[x]"
+    assert pattern.sub(r"[\1]-\1", "x") == "[x]-x"
+    assert pattern.sub(r"[\1]-\1", "x") == "[x]-x"
     assert calls == 1
 
     pcre.clear_cache()
-    assert pattern.sub(r"[\1]", "x") == "[x]"
+    assert pattern.sub(r"[\1]-\1", "x") == "[x]-x"
     assert calls == 2
 
     with pytest.raises(pcre.PcreError):
         pattern.sub(r"\2", "x", count=1)
+
+
+def test_replacement_template_cache_disabled_and_explicit_clear() -> None:
+    pattern = pcre.compile(r"(x)")
+    original_limit = cache_mod.get_cache_limit()
+    try:
+        cache_mod.set_cache_limit(0)
+        pcre_mod._cached_replacement_parts(pattern, r"\1-\1", False)
+
+        cache_mod.set_cache_limit(2)
+        pcre_mod._cached_replacement_parts.cache_clear()
+        pcre_mod._cached_replacement_parts(pattern, r"\1-\1", False)
+        assert pcre_mod._replacement_cache_size() == 1
+        pcre_mod._cached_replacement_parts.cache_clear()
+        assert pcre_mod._replacement_cache_size() == 0
+    finally:
+        cache_mod.set_cache_limit(original_limit)
+        pcre.clear_cache()
 
 
 def test_local_cache_lazy_initializers_and_module_lru_clear() -> None:
@@ -101,12 +119,13 @@ def test_expand_template_cache_reuses_and_clears(
         return original(template, state)
 
     monkeypatch.setattr(compat._parser, "parse_template", counted_parse)
-    assert match.expand(r"[\g<x>]") == "[x]"
-    assert match.expand(r"[\g<x>]") == "[x]"
+    template = r"[\g<x>]" + r"-\g<x>" * 8
+    assert match.expand(template) == "[x]" + "-x" * 8
+    assert match.expand(template) == "[x]" + "-x" * 8
     assert calls == 1
 
     pcre.clear_cache()
-    assert match.expand(r"[\g<x>]") == "[x]"
+    assert match.expand(template) == "[x]" + "-x" * 8
     assert calls == 2
 
 
@@ -236,9 +255,20 @@ def test_expand_template_cache_limit_and_trim_branches() -> None:
         long_name = "n" * (compat._MAX_GROUPINDEX_CACHE_UNITS + 1)
         assert compat._cached_expand_template("name-not-cached", 1, ((long_name, 1),))
         assert compat._expand_template_cache_size() == 0
+
+        compat._EXPAND_TEMPLATE_LOCAL.epoch = cache_mod.get_cache_epoch() - 1
+        compat._EXPAND_TEMPLATE_LOCAL.lru = None
+        assert compat._cached_expand_template("stale-without-lru", 0, ())
     finally:
         cache_mod.set_cache_limit(original_limit)
         pcre.clear_cache()
+
+
+def test_bytes_match_expand_coerces_unsupported_bytearray_template() -> None:
+    match = pcre.fullmatch(b"(a)", b"a")
+    assert match is not None
+
+    assert match.expand(bytearray(rb"\n")) == b"\n"
 
 
 def test_default_compile_cache_is_thread_local_and_tracks_thread_mode(
