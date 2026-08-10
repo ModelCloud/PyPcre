@@ -147,23 +147,44 @@ module_escape(PyObject *Py_UNUSED(module),
     Py_ssize_t keyword_count = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
     PyObject *pattern = NULL;
 
-    if (nargs == 1 && keyword_count == 0) {
-        pattern = args[0];
-    } else if (nargs == 0 && keyword_count == 1) {
-        PyObject *keyword = PyTuple_GET_ITEM(kwnames, 0);
-        if (PyUnicode_Check(keyword) &&
-            PyUnicode_CompareWithASCIIString(keyword, "pattern") == 0) {
-            pattern = args[0];
-        } else {
+    if (nargs > 1) {
+        PyErr_Format(PyExc_TypeError,
+                     "escape() takes 1 positional argument but %zd were given",
+                     nargs);
+        return NULL;
+    }
+
+    for (Py_ssize_t index = 0; index < keyword_count; ++index) {
+        PyObject *keyword = PyTuple_GET_ITEM(kwnames, index);
+        if (!PyUnicode_Check(keyword) ||
+            PyUnicode_CompareWithASCIIString(keyword, "pattern") != 0) {
             PyErr_Format(PyExc_TypeError,
                          "escape() got an unexpected keyword argument '%U'",
                          keyword);
             return NULL;
         }
-    } else {
-        PyErr_Format(PyExc_TypeError,
-                     "escape() takes 1 argument (%zd given)",
-                     nargs + keyword_count);
+        if (nargs != 0) {
+            PyErr_SetString(PyExc_TypeError,
+                            "escape() got multiple values for argument 'pattern'");
+            return NULL;
+        }
+        if (pattern != NULL) {
+            PyErr_SetString(PyExc_TypeError,
+                            "escape() got multiple values for argument 'pattern'");
+            return NULL;
+        }
+        pattern = args[nargs + index];
+    }
+
+    if (pattern == NULL) {
+        if (nargs == 0) {
+            PyErr_SetString(PyExc_TypeError,
+                            "escape() missing 1 required positional argument: 'pattern'");
+        } else {
+            pattern = args[0];
+        }
+    }
+    if (pattern == NULL) {
         return NULL;
     }
 

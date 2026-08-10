@@ -58,6 +58,23 @@ def test_escape_keyword_and_signature_match_stdlib():
     assert inspect.signature(pcre.escape) == inspect.signature(re.escape)
 
 
+@pytest.mark.parametrize(
+    ("args", "kwargs"),
+    [
+        (("a", "b"), {}),
+        (("a",), {"pattern": "b"}),
+        ((), {}),
+        ((), {"unexpected": "a"}),
+    ],
+)
+def test_escape_argument_errors_match_stdlib(args, kwargs):
+    with pytest.raises(TypeError) as expected:
+        re.escape(*args, **kwargs)
+    with pytest.raises(TypeError) as actual:
+        pcre.escape(*args, **kwargs)
+    assert str(actual.value) == str(expected.value)
+
+
 @pytest.mark.parametrize("value", [None, 1, object()])
 def test_escape_invalid_input_matches_stdlib_exception(value):
     with pytest.raises(TypeError):
