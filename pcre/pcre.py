@@ -504,6 +504,20 @@ class Pattern:
     ) -> List[Any]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and self._literal_split is not None
+            and type(subject) is type(self._literal_split)
+            and type(pos) is int
+            and pos == 0
+            and endpos is None
+            and type(options) is int
+            and options == 0
+        ):
+            if subject.find(self._literal_split[:1]) < 0:
+                return []
+            return [self._literal_split] * subject.count(self._literal_split)
         backend_findall = getattr(self._pattern, "findall", None)
         if backend_findall is not None:
             compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
@@ -1134,6 +1148,12 @@ def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: str) -> 
         and type(string) in (str, bytes)
         and compiled._is_c_pattern
     ):
+        if (
+            method == "findall"
+            and getattr(compiled, "_literal_split", None) is not None
+            and type(string) is type(compiled._literal_split)
+        ):
+            return compiled.findall(string)
         fast = getattr(compiled._pattern, f"_{method}_fast", None)
         if fast is not None:
             if method == "findall":

@@ -626,6 +626,16 @@ def test_c_plain_literal_subn_uses_builtin_only_for_safe_shape() -> None:
     assert pcre.compile("foo").subn(r"\\g<0>", "foo") == (r"\g<0>", 1)
 
 
+def test_c_plain_literal_findall_uses_builtin_count_only_for_safe_shape() -> None:
+    pattern = pcre.compile("foo")
+    assert pattern.findall("foo foo") == ["foo", "foo"]
+    assert pattern.findall("no match") == []
+    assert pattern.findall("foo foo", pos=1) == ["foo"]
+
+    bytes_pattern = pcre.compile(b"foo")
+    assert bytes_pattern.findall(b"foo foo") == [b"foo", b"foo"]
+
+
 def test_compile_existing_pattern_slow_path_and_jit_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -34,6 +34,7 @@ def test_module_finditer_and_findall_helpers():
 
     groups = pcre.findall(r"(\w)(\d)", "a1 b2 c3")
     assert groups == [("a", "1"), ("b", "2"), ("c", "3")]
+    assert pcre.findall("foo", "foo foo") == ["foo", "foo"]
 
 
 def test_module_split_and_substitutions():
