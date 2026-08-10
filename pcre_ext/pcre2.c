@@ -943,6 +943,47 @@ Match_get_lastindex(MatchObject *self, void *closure)
         Py_RETURN_NONE;
     }
 
+    int cached_lastindex = -2;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    cached_lastindex = self->lastindex_cache;
+    Py_END_CRITICAL_SECTION();
+    if (cached_lastindex != -2) {
+        if (cached_lastindex < 0) {
+            Py_RETURN_NONE;
+        }
+        return PyLong_FromLong(cached_lastindex);
+    }
+
+    /* The expensive AUTO_CALLOUT replay is only needed to order two or more
+     * participating captures.  With zero or one set ovector pair, the exact
+     * Python lastindex is already known from the immutable match snapshot. */
+    int sole_participant = -1;
+    for (uint32_t index = 1; index < self->ovec_count; ++index) {
+        Py_ssize_t start = self->ovector[(size_t)index * 2];
+        Py_ssize_t end = self->ovector[(size_t)index * 2 + 1];
+        if (start < 0 || end < 0) {
+            continue;
+        }
+        if (sole_participant >= 0) {
+            sole_participant = -2;
+            break;
+        }
+        sole_participant = (int)index;
+    }
+    if (sole_participant >= -1) {
+        int lastindex = sole_participant;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        if (self->lastindex_cache == -2) {
+            self->lastindex_cache = lastindex;
+        }
+        lastindex = self->lastindex_cache;
+        Py_END_CRITICAL_SECTION();
+        if (lastindex < 0) {
+            Py_RETURN_NONE;
+        }
+        return PyLong_FromLong(lastindex);
+    }
+
     int lastindex = -1;
     int replay_ok = 0;
     Py_BEGIN_CRITICAL_SECTION(self);

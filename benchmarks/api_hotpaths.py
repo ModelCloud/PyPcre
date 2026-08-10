@@ -73,6 +73,7 @@ def main() -> int:
             lambda: named_pattern.sub(r"[\g<word>]", short_subject),
         ),
         ("match.groups", captured.groups),
+        ("match.first_lastindex", lambda: pattern.match("x").lastindex),
         ("module.escape.text", lambda: pcre.escape("identifier_123")),
         ("module.escape.bytes", lambda: pcre.escape(b"identifier123")),
         ("module.escape.special", lambda: pcre.escape("a+b [c]")),
