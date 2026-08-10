@@ -58,6 +58,7 @@ def main() -> int:
         ("match.expand.numeric", lambda: captured.expand(r"[\1]")),
         ("match.expand.explicit", lambda: captured.expand(r"[\g<1>]")),
         ("match.expand.named", lambda: named_captured.expand(r"[\g<word>]")),
+        ("match.expand.escaped", lambda: named_captured.expand(r"\\\g<word>")),
         (
             "match.expand.multi",
             lambda: multi_captured.expand(r"[\g<a>]-\g<b>"),

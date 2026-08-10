@@ -40,6 +40,11 @@ from pcre import re_compat
         (r"(?P<word>é)", "é", "前\\g<word>後", "前é後"),
         (r"(?P<word>a)?(?P<other>b)?", "a", r"[\g<other>]", "[]"),
         (b"(?P<word>a)", b"a", rb"[\g<word>]", b"[a]"),
+        (r"(a)", "a", r"\\", "\\"),
+        (r"(a)", "a", r"\\1", r"\1"),
+        (r"(?P<word>a)", "a", r"\\\g<word>", r"\a"),
+        (r"(?P<word>a)", "a", r"[\g<word>]\\tail", r"[a]\tail"),
+        (b"(?P<word>a)", b"a", rb"\\\g<word>", rb"\a"),
     ],
 )
 def test_single_numeric_expand_is_exact_and_call_local(
@@ -66,7 +71,7 @@ def test_single_numeric_expand_is_exact_and_call_local(
     "template",
     [
         r"\12",
-        r"\\1",
+        r"\n",
         r"\g<name>",
         r"\g<999999999999999999999999999>",
         r"\g<13>",
@@ -97,6 +102,7 @@ def test_single_numeric_expand_is_safe_on_one_match_across_threads() -> None:
             assert match.expand("前\\1後") == "前é後"
             assert match.expand("前\\g<word>後") == "前é後"
             assert match.expand("前\\1中\\g<word>後") == "前é中é後"
+            assert match.expand("\\\\\\g<word>") == "\\é"
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(lambda _: expand_many(), range(8)))
@@ -244,3 +250,24 @@ def test_multiple_reference_expand_uses_immutable_buffer_snapshot() -> None:
     subject[:] = b"zz"
 
     assert match.expand(rb"[\1]-\2") == b"[a]-b"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "subject"),
+    [
+        (r"(?P<word>a)", "a"),
+        (r"(?P<word>é)", "é"),
+        (b"(?P<word>a)", b"a"),
+    ],
+)
+def test_literal_backslash_expand_differential_matrix(pattern, subject) -> None:
+    expected_match = re.fullmatch(pattern, subject)
+    actual_match = pcre.fullmatch(pattern, subject)
+    assert expected_match is not None
+    assert actual_match is not None
+
+    templates = (r"\\", r"\\1", r"\\\g<word>", r"[\g<word>]\\tail")
+    for template in templates:
+        if isinstance(pattern, bytes):
+            template = template.encode()
+        assert actual_match.expand(template) == expected_match.expand(template)
