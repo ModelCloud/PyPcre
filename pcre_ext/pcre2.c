@@ -5164,11 +5164,24 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     }
 #endif
 
+    /* Python text is guaranteed to encode as valid UTF-8, but arbitrary
+     * bytes are not.  PCRE2_NO_UTF_CHECK makes validity a hard caller
+     * precondition; forwarding malformed bytes invokes undefined behavior in
+     * the compiler.  Validate bytes patterns in PCRE2 while retaining the
+     * requested option in Pattern.flags after a successful compile. */
+    uint32_t engine_compile_options = compile_options;
+    int validate_bytes_utf = is_bytes &&
+        (compile_options & PCRE2_UTF) != 0 &&
+        (compile_options & PCRE2_NO_UTF_CHECK) != 0;
+    if (validate_bytes_utf) {
+        engine_compile_options &= ~PCRE2_NO_UTF_CHECK;
+    }
+
     int error_code;
     PCRE2_SIZE error_offset;
     pcre2_code *code = pcre2_compile((PCRE2_SPTR)PyBytes_AS_STRING(pattern_bytes),
                                      (PCRE2_SIZE)pattern_length,
-                                     compile_options,
+                                     engine_compile_options,
                                      &error_code,
                                      &error_offset,
                                      NULL);
@@ -5224,6 +5237,9 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     uint32_t effective_options = compile_options;
     if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &effective_options) == 0) {
         pattern->compile_options = effective_options;
+    }
+    if (validate_bytes_utf) {
+        pattern->compile_options |= PCRE2_NO_UTF_CHECK;
     }
     pattern->compile_options = apply_leading_inline_options(
         PyBytes_AS_STRING(pattern_bytes),
