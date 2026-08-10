@@ -1586,167 +1586,197 @@ match_expand_checked_add(Py_ssize_t *total, Py_ssize_t value)
     return 0;
 }
 
+#define MATCH_EXPAND_MAX_REFERENCES 8
+
 static PyObject *
-match_expand_two_references(MatchObject *self,
-                            PyObject *template_obj,
-                            Py_ssize_t first_slash,
-                            Py_ssize_t template_length,
-                            int *handled)
+match_expand_multiple_references(MatchObject *self,
+                                 PyObject *template_obj,
+                                 Py_ssize_t first_slash,
+                                 Py_ssize_t template_length,
+                                 int *handled)
 {
     *handled = 0;
-    Py_ssize_t second_slash;
-    if (self->subject_is_bytes) {
-        const char *template_data = PyBytes_AS_STRING(template_obj);
-        const char *found = memchr(template_data + first_slash + 1,
-                                   '\\',
-                                   (size_t)(template_length - first_slash - 1));
-        if (found == NULL) {
+    MatchExpandReference references[MATCH_EXPAND_MAX_REFERENCES];
+    PyObject *groups[MATCH_EXPAND_MAX_REFERENCES] = {NULL};
+    Py_ssize_t group_offsets[MATCH_EXPAND_MAX_REFERENCES] = {0};
+    Py_ssize_t group_lengths[MATCH_EXPAND_MAX_REFERENCES] = {0};
+    Py_ssize_t reference_count = 0;
+    Py_ssize_t slash_index = first_slash;
+
+    while (slash_index >= 0) {
+        if (reference_count >= MATCH_EXPAND_MAX_REFERENCES ||
+            !match_expand_parse_reference(
+                self,
+                template_obj,
+                slash_index,
+                template_length,
+                &references[reference_count])) {
             return NULL;
         }
-        second_slash = (Py_ssize_t)(found - template_data);
-        if (memchr(found + 1,
-                   '\\',
-                   (size_t)(template_length - second_slash - 1)) != NULL) {
-            return NULL;
+        Py_ssize_t search_start =
+            references[reference_count].reference_end;
+        reference_count += 1;
+        if (self->subject_is_bytes) {
+            const char *input = PyBytes_AS_STRING(template_obj);
+            const char *found = memchr(
+                input + search_start,
+                '\\',
+                (size_t)(template_length - search_start)
+            );
+            slash_index = found == NULL
+                ? -1 : (Py_ssize_t)(found - input);
+        } else {
+            slash_index = PyUnicode_FindChar(
+                template_obj, '\\', search_start, template_length, 1
+            );
+            if (slash_index < 0 && PyErr_Occurred()) {
+                return NULL;
+            }
         }
-    } else {
-        second_slash = PyUnicode_FindChar(
-            template_obj, '\\', first_slash + 1, template_length, 1
-        );
-        if (second_slash < 0) {
-            return NULL;
-        }
-        Py_ssize_t third_slash = PyUnicode_FindChar(
-            template_obj, '\\', second_slash + 1, template_length, 1
-        );
-        if (third_slash >= 0 || PyErr_Occurred()) {
-            return NULL;
-        }
+    }
+    if (reference_count < 2) {
+        return NULL;
     }
 
-    MatchExpandReference first;
-    MatchExpandReference second;
-    if (!match_expand_parse_reference(
-            self, template_obj, first_slash, template_length, &first) ||
-        first.reference_end > second_slash ||
-        !match_expand_parse_reference(
-            self, template_obj, second_slash, template_length, &second)) {
-        return NULL;
+    Py_ssize_t result_length = 0;
+    Py_ssize_t literal_start = 0;
+    int direct_groups = self->subject_is_bytes || PyUnicode_IS_ASCII(self->subject);
+    Py_UCS4 max_character = self->subject_is_bytes
+        ? 0 : PyUnicode_MAX_CHAR_VALUE(template_obj);
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        size_t offset_index = (size_t)references[i].group_index * 2;
+        Py_ssize_t group_start = self->ovector[offset_index];
+        Py_ssize_t group_end = self->ovector[offset_index + 1];
+        if (group_start < 0 || group_end < 0) {
+            group_offsets[i] = 0;
+            group_lengths[i] = 0;
+        } else if (group_end < group_start || group_end > self->utf8_length) {
+            PyErr_SetString(PyExc_RuntimeError, "invalid capture offsets");
+            goto error;
+        } else if (direct_groups) {
+            group_offsets[i] = group_start;
+            group_lengths[i] = group_end - group_start;
+        } else {
+            groups[i] = match_get_group_value(self, references[i].group_index);
+            if (groups[i] == NULL) {
+                goto error;
+            }
+            group_lengths[i] = PyObject_Length(groups[i]);
+            if (group_lengths[i] < 0) {
+                goto error;
+            }
+            if (!self->subject_is_bytes &&
+                PyUnicode_MAX_CHAR_VALUE(groups[i]) > max_character) {
+                max_character = PyUnicode_MAX_CHAR_VALUE(groups[i]);
+            }
+        }
+        Py_ssize_t literal_length = references[i].slash_index - literal_start;
+        if (match_expand_checked_add(&result_length, literal_length) < 0 ||
+            match_expand_checked_add(&result_length, group_lengths[i]) < 0) {
+            goto error;
+        }
+        literal_start = references[i].reference_end;
     }
-
-    PyObject *first_group = match_get_group_value(self, first.group_index);
-    if (first_group == NULL) {
-        return NULL;
-    }
-    PyObject *second_group = match_get_group_value(self, second.group_index);
-    if (second_group == NULL) {
-        Py_DECREF(first_group);
-        return NULL;
+    if (match_expand_checked_add(
+            &result_length, template_length - literal_start) < 0) {
+        goto error;
     }
     *handled = 1;
-    if (first_group == Py_None) {
-        Py_DECREF(first_group);
-        first_group = NULL;
-    }
-    if (second_group == Py_None) {
-        Py_DECREF(second_group);
-        second_group = NULL;
-    }
-
-    Py_ssize_t first_length = first_group == NULL
-        ? 0 : PyObject_Length(first_group);
-    Py_ssize_t second_length = second_group == NULL
-        ? 0 : PyObject_Length(second_group);
-    if (first_length < 0 || second_length < 0) {
-        Py_XDECREF(first_group);
-        Py_XDECREF(second_group);
-        return NULL;
-    }
-    Py_ssize_t middle_start = first.reference_end;
-    Py_ssize_t middle_length = second.slash_index - middle_start;
-    Py_ssize_t suffix_length = template_length - second.reference_end;
-    Py_ssize_t result_length = first.slash_index;
-    if (match_expand_checked_add(&result_length, first_length) < 0 ||
-        match_expand_checked_add(&result_length, middle_length) < 0 ||
-        match_expand_checked_add(&result_length, second_length) < 0 ||
-        match_expand_checked_add(&result_length, suffix_length) < 0) {
-        Py_XDECREF(first_group);
-        Py_XDECREF(second_group);
-        return NULL;
-    }
 
     if (self->subject_is_bytes) {
         PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
         if (result == NULL) {
-            Py_XDECREF(first_group);
-            Py_XDECREF(second_group);
-            return NULL;
+            goto error;
         }
         char *output = PyBytes_AS_STRING(result);
         const char *input = PyBytes_AS_STRING(template_obj);
         Py_ssize_t output_offset = 0;
-#define COPY_EXPAND_BYTES(source, length) do { \
-            if ((length) > 0) { \
-                memcpy(output + output_offset, (source), (size_t)(length)); \
-                output_offset += (length); \
-            } \
-        } while (0)
-        COPY_EXPAND_BYTES(input, first.slash_index);
-        if (first_group != NULL) {
-            COPY_EXPAND_BYTES(PyBytes_AS_STRING(first_group), first_length);
+        literal_start = 0;
+        for (Py_ssize_t i = 0; i < reference_count; ++i) {
+            Py_ssize_t literal_length =
+                references[i].slash_index - literal_start;
+            if (literal_length > 0) {
+                memcpy(output + output_offset,
+                       input + literal_start,
+                       (size_t)literal_length);
+                output_offset += literal_length;
+            }
+            if (group_lengths[i] > 0) {
+                const char *group_data = direct_groups
+                    ? self->utf8_data + group_offsets[i]
+                    : PyBytes_AS_STRING(groups[i]);
+                memcpy(output + output_offset,
+                       group_data,
+                       (size_t)group_lengths[i]);
+                output_offset += group_lengths[i];
+            }
+            literal_start = references[i].reference_end;
         }
-        COPY_EXPAND_BYTES(input + middle_start, middle_length);
-        if (second_group != NULL) {
-            COPY_EXPAND_BYTES(PyBytes_AS_STRING(second_group), second_length);
+        Py_ssize_t suffix_length = template_length - literal_start;
+        if (suffix_length > 0) {
+            memcpy(output + output_offset,
+                   input + literal_start,
+                   (size_t)suffix_length);
         }
-        COPY_EXPAND_BYTES(input + second.reference_end, suffix_length);
-#undef COPY_EXPAND_BYTES
-        Py_XDECREF(first_group);
-        Py_XDECREF(second_group);
+        for (Py_ssize_t i = 0; i < reference_count; ++i) {
+            Py_XDECREF(groups[i]);
+        }
         return result;
     }
 
-    Py_UCS4 max_character = PyUnicode_MAX_CHAR_VALUE(template_obj);
-    if (first_group != NULL &&
-        PyUnicode_MAX_CHAR_VALUE(first_group) > max_character) {
-        max_character = PyUnicode_MAX_CHAR_VALUE(first_group);
-    }
-    if (second_group != NULL &&
-        PyUnicode_MAX_CHAR_VALUE(second_group) > max_character) {
-        max_character = PyUnicode_MAX_CHAR_VALUE(second_group);
-    }
     PyObject *result = PyUnicode_New(result_length, max_character);
     if (result == NULL) {
-        Py_XDECREF(first_group);
-        Py_XDECREF(second_group);
-        return NULL;
+        goto error;
     }
     Py_ssize_t output_offset = 0;
-#define COPY_EXPAND_UNICODE(source, start, length) do { \
-        if ((length) > 0) { \
-            if (PyUnicode_CopyCharacters(result, output_offset, \
-                                         (source), (start), (length)) < 0) { \
-                Py_DECREF(result); \
-                Py_XDECREF(first_group); \
-                Py_XDECREF(second_group); \
-                return NULL; \
-            } \
-            output_offset += (length); \
-        } \
-    } while (0)
-    COPY_EXPAND_UNICODE(template_obj, 0, first.slash_index);
-    if (first_group != NULL) {
-        COPY_EXPAND_UNICODE(first_group, 0, first_length);
+    literal_start = 0;
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        Py_ssize_t literal_length = references[i].slash_index - literal_start;
+        if (literal_length > 0) {
+            if (PyUnicode_CopyCharacters(result,
+                                         output_offset,
+                                         template_obj,
+                                         literal_start,
+                                         literal_length) < 0) {
+                Py_DECREF(result);
+                goto error;
+            }
+            output_offset += literal_length;
+        }
+        if (group_lengths[i] > 0) {
+            PyObject *group_source = direct_groups ? self->subject : groups[i];
+            if (PyUnicode_CopyCharacters(result,
+                                         output_offset,
+                                         group_source,
+                                         group_offsets[i],
+                                         group_lengths[i]) < 0) {
+                Py_DECREF(result);
+                goto error;
+            }
+            output_offset += group_lengths[i];
+        }
+        literal_start = references[i].reference_end;
     }
-    COPY_EXPAND_UNICODE(template_obj, middle_start, middle_length);
-    if (second_group != NULL) {
-        COPY_EXPAND_UNICODE(second_group, 0, second_length);
+    Py_ssize_t suffix_length = template_length - literal_start;
+    if (suffix_length > 0 &&
+        PyUnicode_CopyCharacters(result,
+                                 output_offset,
+                                 template_obj,
+                                 literal_start,
+                                 suffix_length) < 0) {
+        Py_DECREF(result);
+        goto error;
     }
-    COPY_EXPAND_UNICODE(template_obj, second.reference_end, suffix_length);
-#undef COPY_EXPAND_UNICODE
-    Py_XDECREF(first_group);
-    Py_XDECREF(second_group);
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        Py_XDECREF(groups[i]);
+    }
     return result;
+
+error:
+    for (Py_ssize_t i = 0; i < reference_count; ++i) {
+        Py_XDECREF(groups[i]);
+    }
+    return NULL;
 }
 
 static PyObject *
@@ -1785,7 +1815,7 @@ Match_expand(MatchObject *self, PyObject *template_obj)
             if (handled || result != NULL || PyErr_Occurred()) {
                 return result;
             }
-            result = match_expand_two_references(
+            result = match_expand_multiple_references(
                 self, template_obj, slash_index, template_length, &handled
             );
             if (handled || result != NULL || PyErr_Occurred()) {
@@ -1838,7 +1868,7 @@ Match_expand(MatchObject *self, PyObject *template_obj)
             if (handled || result != NULL || PyErr_Occurred()) {
                 return result;
             }
-            result = match_expand_two_references(
+            result = match_expand_multiple_references(
                 self,
                 template_obj,
                 (Py_ssize_t)(slash - template_data),

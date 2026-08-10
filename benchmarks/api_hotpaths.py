@@ -62,6 +62,10 @@ def main() -> int:
             "match.expand.multi",
             lambda: multi_captured.expand(r"[\g<a>]-\g<b>"),
         ),
+        (
+            "match.expand.three",
+            lambda: multi_captured.expand(r"[\g<a>]-\g<b>-\g<a>"),
+        ),
         ("module.match", lambda: pcre.match("(x)", subject)),
         ("module.search", lambda: pcre.search("(x)", subject)),
         ("module.fullmatch", lambda: pcre.fullmatch("(x)", subject)),

@@ -172,9 +172,16 @@ def test_named_expand_differential_matrix(pattern, subject) -> None:
             rb"[\g<a>]-\g<b>",
             b"[a]-b",
         ),
+        (r"(a)(b)(c)", "abc", r"\1-\2-\3", "a-b-c"),
+        (
+            r"(a)(b)(c)(d)(e)(f)(g)(h)",
+            "abcdefgh",
+            r"\1\2\3\4\5\6\7\8",
+            "abcdefgh",
+        ),
     ],
 )
-def test_two_reference_expand_is_exact_and_call_local(
+def test_bounded_multiple_reference_expand_is_exact_and_call_local(
     pattern,
     subject,
     template,
@@ -187,22 +194,22 @@ def test_two_reference_expand_is_exact_and_call_local(
     monkeypatch.setattr(
         re_compat,
         "expand_match_template",
-        lambda *args: pytest.fail("two-reference expansion reached Python parser"),
+        lambda *args: pytest.fail("bounded-reference expansion reached Python parser"),
     )
 
     assert match.expand(template) == expected
     assert re_compat._expand_template_cache_size() == 0
 
 
-def test_three_references_stay_on_compatibility_parser(
+def test_nine_references_stay_on_compatibility_parser(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    match = pcre.fullmatch(r"(a)(b)(c)", "abc")
+    match = pcre.fullmatch(r"(a)(b)(c)(d)(e)(f)(g)(h)(i)", "abcdefghi")
     assert match is not None
     sentinel = object()
     monkeypatch.setattr(re_compat, "expand_match_template", lambda *args: sentinel)
 
-    assert match.expand(r"\1\2\3") is sentinel
+    assert match.expand(r"\1\2\3\4\5\6\7\8\9") is sentinel
 
 
 @pytest.mark.parametrize(
@@ -228,3 +235,12 @@ def test_two_reference_expand_differential_matrix(pattern, subject) -> None:
                 if isinstance(pattern, bytes):
                     template = template.encode()
                 assert actual_match.expand(template) == expected_match.expand(template)
+
+
+def test_multiple_reference_expand_uses_immutable_buffer_snapshot() -> None:
+    subject = bytearray(b"ab")
+    match = pcre.fullmatch(b"(a)(b)", subject)
+    assert match is not None
+    subject[:] = b"zz"
+
+    assert match.expand(rb"[\1]-\2") == b"[a]-b"
