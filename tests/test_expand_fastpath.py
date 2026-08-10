@@ -24,6 +24,18 @@ from pcre import re_compat
         (b"(a)", b"a", rb"\1", b"a"),
         (b"(a)", b"a", rb"[\1]", b"[a]"),
         (b"(a)?(b)?", b"a", rb"[\2]", b"[]"),
+        (r"(a)", "a", r"\g<0>", "a"),
+        (r"(a)", "a", r"[\g<1>]", "[a]"),
+        (r"(é)", "é", "前\\g<1>後", "前é後"),
+        (b"(a)", b"a", rb"\g<0>", b"a"),
+        (b"(a)", b"a", rb"[\g<1>]", b"[a]"),
+        (
+            "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)",
+            "abcdefghijkl",
+            r"[\g<12>]",
+            "[l]",
+        ),
+        (r"(a)", "a", r"[\g<001>]", "[a]"),
     ],
 )
 def test_single_numeric_expand_is_exact_and_call_local(
@@ -46,7 +58,16 @@ def test_single_numeric_expand_is_exact_and_call_local(
     assert re_compat._expand_template_cache_size() == 0
 
 
-@pytest.mark.parametrize("template", [r"\12", r"\\1", r"\g<1>"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        r"\12",
+        r"\\1",
+        r"\g<name>",
+        r"\g<999999999999999999999999999>",
+        r"\g<13>",
+    ],
+)
 def test_ambiguous_or_extended_expand_stays_on_compatibility_parser(
     template: str,
     monkeypatch: pytest.MonkeyPatch,
