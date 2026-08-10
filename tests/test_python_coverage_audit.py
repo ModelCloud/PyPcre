@@ -570,6 +570,13 @@ def test_empty_pattern_split_fast_path_matches_re(
     )
 
 
+def test_c_split_default_dispatch_preserves_results() -> None:
+    pattern = pcre.compile(r"\s+")
+    assert pattern.split("a b  c") == ["a", "b", "c"]
+    bytes_pattern = pcre.compile(rb"\s+")
+    assert bytes_pattern.split(b"a b  c") == [b"a", b"b", b"c"]
+
+
 def test_compile_existing_pattern_slow_path_and_jit_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -529,6 +529,21 @@ class Pattern:
         return results
 
     def split(self, subject: Any, maxsplit: Any = 0) -> List[Any]:
+        # The common immutable/default shape can go straight to the C splitter.
+        # Keep subclasses, buffer exporters, and non-default limits on the
+        # compatibility path so their coercion and override semantics remain
+        # unchanged.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(maxsplit) is int
+            and maxsplit == 0
+        ):
+            fast_split = getattr(self._pattern, "_split_fast", None)
+            if fast_split is not None:
+                return fast_split(subject, 0)
+
         subject = prepare_subject(subject)
         limit = normalise_count(maxsplit)
         if limit == 0:
