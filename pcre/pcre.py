@@ -306,6 +306,7 @@ class Pattern:
         "_groups_hint",
         "_thread_mode",
         "_is_c_pattern",
+        "_literal_findall",
         "_literal_split",
     )
 
@@ -319,6 +320,7 @@ class Pattern:
             self._groups_hint = maybe_infer_group_count(pattern.pattern)
 
         literal_split: str | bytes | None = None
+        literal_findall: str | bytes | None = None
         if self._is_c_pattern:
             source = pattern.pattern
             if type(source) in (str, bytes) and source:
@@ -332,12 +334,20 @@ class Pattern:
                     if type(source) is str
                     else 0
                 )
-                if (
-                    not any(char in metacharacters for char in source)
-                    and pattern.flags == expected_flags
-                ):
-                    literal_split = source
+                if pattern.flags == expected_flags:
+                    if not any(char in metacharacters for char in source):
+                        literal_split = source
+                    if 3 <= len(source) <= 66:
+                        opening = "(" if type(source) is str else b"("
+                        closing = ")" if type(source) is str else b")"
+                        if source[:1] == opening and source[-1:] == closing:
+                            inner = source[1:-1]
+                            if inner and not any(
+                                char in metacharacters for char in inner
+                            ):
+                                literal_findall = inner
         self._literal_split = literal_split
+        self._literal_findall = literal_findall
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -574,6 +584,19 @@ class Pattern:
     ) -> List[Any]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        literal_capture = getattr(self, "_literal_findall", None)
+        if (
+            getattr(self, "_is_c_pattern", False)
+            and type(self) is Pattern
+            and literal_capture is not None
+            and type(subject) is type(literal_capture)
+            and type(pos) is int
+            and pos == 0
+            and endpos is None
+            and type(options) is int
+            and options == 0
+        ):
+            return [literal_capture] * subject.count(literal_capture)
         literal_source = getattr(self, "_literal_split", None)
         if (
             getattr(self, "_is_c_pattern", False)

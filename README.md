@@ -24,6 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
+* 08/10/2026 **Bounded literal-capture `findall`**: exact default-option patterns containing one plain capture such as `(token)` now use immutable `str`/`bytes.count` plus list construction. Pinned delimiter-heavy measurements improve 100/500 captures by **5.0x/7.0x** on Python 3.10 and **6.2x/8.4x** on free-threaded Python 3.14t/GIL=0. The per-Pattern literal snapshot is capped at 64 code units, lives only as long as that Pattern (including its already bounded thread-local cache entry), and never retains subjects or results; metacharacters, options, subclasses, and non-default ranges keep the native PCRE2 path. 20,000 randomized parity cases and shared-pattern stress cover text/bytes behavior. ⚡🛡️
 * 08/10/2026 **UTF bytes compile safety**: bytes patterns can no longer bypass PCRE2's UTF validation by combining `UTF` with `NO_UTF_CHECK`. Malformed inputs previously violated a PCRE2 compiler precondition and could corrupt memory or crash concurrent free-threaded compilation; they now raise the precise PCRE error, while valid bytes preserve the requested flag and behavior. Subprocess fault tests and 8-thread invalid-pattern stress cover the boundary. The fix adds no cache, copy, or retained input and only validates calls that explicitly requested the unsafe bytes combination. 🛡️
 * 08/10/2026 **Stateless 3.10 `template()` dispatch**: the deprecated compatibility helper now reuses its imported warning module and passes the precomputed default template flag directly, while dynamic flag objects and integer subclasses retain their original `__or__` dispatch. Pinned Python 3.10 calls improve from 4.81 μs at the merged base to 0.78 μs (**6.2x**); Python 3.14, where `re.TEMPLATE` no longer exists, remains effectively flat. Every call still warns, delegates to `compile`, and adds no cache or retained input. ⚡🛡️
 * 08/10/2026 **Exact ovector `lastindex` shortcut**: a Match with zero or one participating capture now derives `lastindex`/`lastgroup` directly from its immutable ovector; only matches with multiple participating captures pay for the exact AUTO_CALLOUT ordering replay. Pinned measurements reduce the first-read `lastindex` portion by **11–15x** on Python 3.10 and **8–16x** on free-threaded Python 3.14t/GIL=0, while preserving nested/lookaround/duplicate-name semantics. The shortcut adds no object field, replay code, cache entry, or retained capture value; concurrent first publication still uses the Match critical section. ⚡🛡️
@@ -101,6 +102,8 @@ hard CPU affinity.
 | Cached compile with `re.I|re.M|re.S|re.X` | **6.2x** | **6.4x** |
 | First-read `lastindex` cost, sole capture | **11.8x** | **8.2x** |
 | Deprecated `template()` compatibility call | **6.2x** | **1.1x** |
+| Literal-capture `findall`, 100 matches | **5.0x** | **6.2x** |
+| Literal-capture `findall`, 500 matches | **7.0x** | **8.4x** |
 | Bound one-character literal `Pattern.split` | **2.1x** | **1.7x** |
 | Bound backreference `sub` hot path | **1.38 μs** | **1.14 μs** |
 | One-match numeric-reference `Pattern.sub` | **0.45 μs** | **0.34 μs** |

@@ -43,6 +43,7 @@ def main() -> int:
     subject = "x" * 1000
     short_subject = "x" * 10
     pattern = pcre.compile("(x)")
+    literal_capture_pattern = pcre.compile("(token)")
     named_pattern = pcre.compile("(?P<word>x)")
     captured = pattern.match(short_subject)
     named_captured = pcre.compile("(?P<word>x)").match(short_subject)
@@ -59,6 +60,10 @@ def main() -> int:
         ("bound.search", lambda: pattern.search(subject)),
         ("bound.fullmatch", lambda: pattern.fullmatch(subject)),
         ("bound.findall", lambda: pattern.findall(short_subject)),
+        (
+            "bound.findall.capture",
+            lambda: literal_capture_pattern.findall("token," * 100),
+        ),
         ("bound.finditer", lambda: list(pattern.finditer(short_subject))),
         ("bound.split", lambda: pattern.split("x " * 8)),
         ("bound.sub.literal", lambda: pattern.sub("[X]", short_subject)),
