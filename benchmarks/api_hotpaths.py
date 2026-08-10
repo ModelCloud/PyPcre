@@ -38,10 +38,13 @@ def main() -> int:
     pattern = pcre.compile("(x)")
     captured = pattern.match(short_subject)
     named_captured = pcre.compile("(?P<word>x)").match(short_subject)
+    multi_captured = pcre.compile("(?P<a>x)(?P<b>x)").match(short_subject)
     if captured is None:
         raise AssertionError("benchmark pattern failed to produce a match")
     if named_captured is None:
         raise AssertionError("benchmark named pattern failed to produce a match")
+    if multi_captured is None:
+        raise AssertionError("benchmark multi pattern failed to produce a match")
     operations: list[tuple[str, Callable[[], object]]] = [
         ("bound.match", lambda: pattern.match(subject)),
         ("bound.search", lambda: pattern.search(subject)),
@@ -55,6 +58,10 @@ def main() -> int:
         ("match.expand.numeric", lambda: captured.expand(r"[\1]")),
         ("match.expand.explicit", lambda: captured.expand(r"[\g<1>]")),
         ("match.expand.named", lambda: named_captured.expand(r"[\g<word>]")),
+        (
+            "match.expand.multi",
+            lambda: multi_captured.expand(r"[\g<a>]-\g<b>"),
+        ),
         ("module.match", lambda: pcre.match("(x)", subject)),
         ("module.search", lambda: pcre.search("(x)", subject)),
         ("module.fullmatch", lambda: pcre.fullmatch("(x)", subject)),

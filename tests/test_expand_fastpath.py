@@ -96,6 +96,7 @@ def test_single_numeric_expand_is_safe_on_one_match_across_threads() -> None:
         for _ in range(10_000):
             assert match.expand("前\\1後") == "前é後"
             assert match.expand("前\\g<word>後") == "前é後"
+            assert match.expand("前\\1中\\g<word>後") == "前é中é後"
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(lambda _: expand_many(), range(8)))
@@ -154,3 +155,76 @@ def test_named_expand_differential_matrix(pattern, subject) -> None:
             if isinstance(pattern, bytes):
                 template = template.encode()
             assert actual_match.expand(template) == expected_match.expand(template)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "subject", "template", "expected"),
+    [
+        (r"(a)(b)", "ab", r"[\1]-\2", "[a]-b"),
+        (r"(?P<a>a)(?P<b>b)", "ab", r"[\g<a>]-\g<b>", "[a]-b"),
+        (r"(?P<a>a)", "a", r"\g<0>:\g<a>", "a:a"),
+        (r"(é)(β)", "éβ", "前\\1中\\g<2>後", "前é中β後"),
+        (r"(a)?(b)?", "a", r"[\1]-[\2]", "[a]-[]"),
+        (b"(a)(b)", b"ab", rb"[\1]-\g<2>", b"[a]-b"),
+        (
+            b"(?P<a>a)(?P<b>b)",
+            b"ab",
+            rb"[\g<a>]-\g<b>",
+            b"[a]-b",
+        ),
+    ],
+)
+def test_two_reference_expand_is_exact_and_call_local(
+    pattern,
+    subject,
+    template,
+    expected,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    match = pcre.fullmatch(pattern, subject)
+    assert match is not None
+    re_compat._cached_expand_template.cache_clear()
+    monkeypatch.setattr(
+        re_compat,
+        "expand_match_template",
+        lambda *args: pytest.fail("two-reference expansion reached Python parser"),
+    )
+
+    assert match.expand(template) == expected
+    assert re_compat._expand_template_cache_size() == 0
+
+
+def test_three_references_stay_on_compatibility_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    match = pcre.fullmatch(r"(a)(b)(c)", "abc")
+    assert match is not None
+    sentinel = object()
+    monkeypatch.setattr(re_compat, "expand_match_template", lambda *args: sentinel)
+
+    assert match.expand(r"\1\2\3") is sentinel
+
+
+@pytest.mark.parametrize(
+    ("pattern", "subject"),
+    [
+        (r"(?P<first>a)?(?P<second>b)?", "a"),
+        (r"(?P<first>é)?(?P<second>β)?", "éβ"),
+        (b"(?P<first>a)?(?P<second>b)?", b"a"),
+    ],
+)
+def test_two_reference_expand_differential_matrix(pattern, subject) -> None:
+    expected_match = re.fullmatch(pattern, subject)
+    actual_match = pcre.fullmatch(pattern, subject)
+    assert expected_match is not None
+    assert actual_match is not None
+
+    references = (r"\1", r"\2", r"\g<0>", r"\g<01>", r"\g<first>", r"\g<second>")
+    literals = (("", "", ""), ("[", "]: [", "]"), ("前", "中", "後"))
+    for first in references:
+        for second in references:
+            for prefix, middle, suffix in literals:
+                template = f"{prefix}{first}{middle}{second}{suffix}"
+                if isinstance(pattern, bytes):
+                    template = template.encode()
+                assert actual_match.expand(template) == expected_match.expand(template)
