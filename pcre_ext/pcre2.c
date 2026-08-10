@@ -1335,6 +1335,149 @@ match_expand_explicit_numeric(MatchObject *self,
     );
 }
 
+static int
+match_expand_resolve_ascii_name(MatchObject *self,
+                                const char *name,
+                                Py_ssize_t name_length,
+                                Py_ssize_t *group_index)
+{
+    uint32_t name_count = 0;
+    uint32_t entry_size = 0;
+    PCRE2_SPTR name_table = NULL;
+    if (name_length <= 0 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMECOUNT,
+                           &name_count) != 0 ||
+        name_count == 0 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMEENTRYSIZE,
+                           &entry_size) != 0 ||
+        pcre2_pattern_info(self->pattern->code,
+                           PCRE2_INFO_NAMETABLE,
+                           &name_table) != 0 ||
+        name_table == NULL || entry_size < 3) {
+        return 0;
+    }
+
+    Py_ssize_t first_match = -1;
+    size_t name_max = (size_t)entry_size - 2;
+    for (uint32_t i = 0; i < name_count; ++i) {
+        const unsigned char *entry = (const unsigned char *)(
+            name_table + (size_t)i * entry_size
+        );
+        const char *entry_name = (const char *)(entry + 2);
+        size_t entry_length = strnlen(entry_name, name_max);
+        if (entry_length != (size_t)name_length ||
+            memcmp(entry_name, name, entry_length) != 0) {
+            continue;
+        }
+
+        Py_ssize_t candidate = (Py_ssize_t)((entry[0] << 8) | entry[1]);
+        if (first_match < 0) {
+            first_match = candidate;
+        }
+        if (candidate >= 0 && (size_t)candidate < self->ovec_count) {
+            Py_ssize_t start = self->ovector[(size_t)candidate * 2];
+            Py_ssize_t end = self->ovector[(size_t)candidate * 2 + 1];
+            if (start >= 0 && end >= 0) {
+                *group_index = candidate;
+                return 1;
+            }
+        }
+    }
+    if (first_match >= 0) {
+        *group_index = first_match;
+        return 1;
+    }
+    return 0;
+}
+
+static PyObject *
+match_expand_explicit_named(MatchObject *self,
+                            PyObject *template_obj,
+                            Py_ssize_t slash_index,
+                            Py_ssize_t template_length,
+                            int *handled)
+{
+    *handled = 0;
+    if (slash_index < 0 || template_length - slash_index < 5) {
+        return NULL;
+    }
+
+    char name[129];
+    Py_ssize_t cursor = slash_index + 1;
+    Py_ssize_t name_length = 0;
+    if (!self->subject_is_bytes && PyUnicode_CheckExact(template_obj)) {
+        if (PyUnicode_ReadChar(template_obj, cursor) != 'g' ||
+            PyUnicode_ReadChar(template_obj, cursor + 1) != '<') {
+            return NULL;
+        }
+        cursor += 2;
+        while (cursor < template_length) {
+            Py_UCS4 character = PyUnicode_ReadChar(template_obj, cursor);
+            if (character == '>') {
+                break;
+            }
+            if (character > 0x7f || name_length >= 128) {
+                return NULL;
+            }
+            name[name_length++] = (char)character;
+            cursor += 1;
+        }
+        if (name_length == 0 || cursor >= template_length) {
+            return NULL;
+        }
+        if (cursor + 1 < template_length) {
+            Py_ssize_t next_slash = PyUnicode_FindChar(
+                template_obj, '\\', cursor + 1, template_length, 1
+            );
+            if (next_slash >= 0) {
+                return NULL;
+            }
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+    } else if (self->subject_is_bytes && PyBytes_CheckExact(template_obj)) {
+        const unsigned char *template_data = (const unsigned char *)PyBytes_AS_STRING(template_obj);
+        if (template_data[cursor] != 'g' || template_data[cursor + 1] != '<') {
+            return NULL;
+        }
+        cursor += 2;
+        while (cursor < template_length) {
+            unsigned char character = template_data[cursor];
+            if (character == '>') {
+                break;
+            }
+            if (character > 0x7f || name_length >= 128) {
+                return NULL;
+            }
+            name[name_length++] = (char)character;
+            cursor += 1;
+        }
+        if (name_length == 0 || cursor >= template_length) {
+            return NULL;
+        }
+        if (cursor + 1 < template_length &&
+            memchr(template_data + cursor + 1,
+                   '\\',
+                   (size_t)(template_length - cursor - 1)) != NULL) {
+            return NULL;
+        }
+    } else {
+        return NULL;
+    }
+
+    Py_ssize_t group_index = -1;
+    if (!match_expand_resolve_ascii_name(
+            self, name, name_length, &group_index)) {
+        return NULL;
+    }
+    return match_expand_render_reference(
+        self, template_obj, slash_index, cursor + 1, group_index, handled
+    );
+}
+
 static PyObject *
 Match_expand(MatchObject *self, PyObject *template_obj)
 {
@@ -1360,6 +1503,12 @@ Match_expand(MatchObject *self, PyObject *template_obj)
                 return result;
             }
             result = match_expand_explicit_numeric(
+                self, template_obj, slash_index, template_length, &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_explicit_named(
                 self, template_obj, slash_index, template_length, &handled
             );
             if (handled || result != NULL || PyErr_Occurred()) {
@@ -1393,6 +1542,16 @@ Match_expand(MatchObject *self, PyObject *template_obj)
                 return result;
             }
             result = match_expand_explicit_numeric(
+                self,
+                template_obj,
+                (Py_ssize_t)(slash - template_data),
+                template_length,
+                &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
+            result = match_expand_explicit_named(
                 self,
                 template_obj,
                 (Py_ssize_t)(slash - template_data),

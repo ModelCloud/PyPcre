@@ -101,12 +101,12 @@ def test_expand_template_cache_reuses_and_clears(
         return original(template, state)
 
     monkeypatch.setattr(compat._parser, "parse_template", counted_parse)
-    assert match.expand(r"[\g<x>]") == "[x]"
-    assert match.expand(r"[\g<x>]") == "[x]"
+    assert match.expand(r"[\g<x>]-\g<x>") == "[x]-x"
+    assert match.expand(r"[\g<x>]-\g<x>") == "[x]-x"
     assert calls == 1
 
     pcre.clear_cache()
-    assert match.expand(r"[\g<x>]") == "[x]"
+    assert match.expand(r"[\g<x>]-\g<x>") == "[x]-x"
     assert calls == 2
 
 

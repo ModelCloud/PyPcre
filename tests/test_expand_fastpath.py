@@ -36,6 +36,10 @@ from pcre import re_compat
             "[l]",
         ),
         (r"(a)", "a", r"[\g<001>]", "[a]"),
+        (r"(?P<word>a)", "a", r"[\g<word>]", "[a]"),
+        (r"(?P<word>é)", "é", "前\\g<word>後", "前é後"),
+        (r"(?P<word>a)?(?P<other>b)?", "a", r"[\g<other>]", "[]"),
+        (b"(?P<word>a)", b"a", rb"[\g<word>]", b"[a]"),
     ],
 )
 def test_single_numeric_expand_is_exact_and_call_local(
@@ -85,12 +89,13 @@ def test_ambiguous_or_extended_expand_stays_on_compatibility_parser(
 
 
 def test_single_numeric_expand_is_safe_on_one_match_across_threads() -> None:
-    match = pcre.compile(r"(é)").fullmatch("é")
+    match = pcre.compile(r"(?P<word>é)").fullmatch("é")
     assert match is not None
 
     def expand_many() -> None:
         for _ in range(10_000):
             assert match.expand("前\\1後") == "前é後"
+            assert match.expand("前\\g<word>後") == "前é後"
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(lambda _: expand_many(), range(8)))
@@ -119,3 +124,33 @@ def test_numeric_expand_differential_matrix(pattern, subject) -> None:
                 if isinstance(pattern, bytes):
                     template = template.encode()
                 assert actual_match.expand(template) == expected_match.expand(template)
+
+
+@pytest.mark.parametrize("subject", ["a", "b"])
+def test_duplicate_named_expand_selects_the_participating_capture(subject: str) -> None:
+    match = pcre.fullmatch(r"(?J)(?P<word>a)|(?P<word>b)", subject)
+    assert match is not None
+
+    assert match.expand(r"[\g<word>]") == f"[{subject}]"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "subject"),
+    [
+        (r"(?P<first>a)?(?P<second>b)?", "a"),
+        (r"(?P<first>é)?(?P<second>β)?", "éβ"),
+        (b"(?P<first>a)?(?P<second>b)?", b"a"),
+    ],
+)
+def test_named_expand_differential_matrix(pattern, subject) -> None:
+    expected_match = re.fullmatch(pattern, subject)
+    actual_match = pcre.fullmatch(pattern, subject)
+    assert expected_match is not None
+    assert actual_match is not None
+
+    for name in ("first", "second"):
+        for prefix, suffix in (("", ""), ("[", "]"), ("前", "後")):
+            template = f"{prefix}\\g<{name}>{suffix}"
+            if isinstance(pattern, bytes):
+                template = template.encode()
+            assert actual_match.expand(template) == expected_match.expand(template)
