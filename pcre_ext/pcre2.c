@@ -5340,7 +5340,7 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     /* Python text is guaranteed to encode as valid UTF-8, but arbitrary
      * bytes are not.  PCRE2_NO_UTF_CHECK makes validity a hard caller
      * precondition; forwarding malformed bytes invokes undefined behavior in
-     * the compiler.  An inline option such as (?u) can enable UTF after the
+     * the compiler.  An inline directive such as (*UTF) can enable UTF after the
      * outer options have been parsed, so checking only compile_options & UTF
      * is not sufficient.  Validate every bytes pattern that asks us to skip
      * checks, while retaining the requested option in Pattern.flags after a

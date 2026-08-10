@@ -24,7 +24,7 @@ _INVALID_UTF8_PATTERNS = (
 
 @pytest.mark.parametrize("suffix", _INVALID_UTF8_PATTERNS)
 def test_inline_utf_bytes_pattern_is_checked_despite_no_utf_check(suffix):
-    pattern = b"(?u)" + suffix
+    pattern = b"(*UTF)" + suffix
     with pytest.raises(pcre.PcreError):
         pcre_ext_c.compile(pattern, _NO_UTF_CHECK, jit=False)
     with pytest.raises(pcre.PcreError):
@@ -55,6 +55,24 @@ def test_valid_utf_bytes_pattern_preserves_requested_flag_and_behavior():
     match = pattern.fullmatch("éé".encode())
     assert match is not None
     assert match.group("word") == "éé".encode()
+    assert pattern.flags & _NO_UTF_CHECK
+
+
+def test_valid_inline_utf_bytes_pattern_preserves_flag_and_behavior():
+    source = b"(*UTF)(?P<word>\xc3\xa9+)"
+    pattern = pcre_ext_c.compile(source, _NO_UTF_CHECK, jit=False)
+    match = pattern.fullmatch("éé".encode())
+    assert match is not None
+    assert match.group("word") == "éé".encode()
+    assert pattern.flags & _NO_UTF_CHECK
+    assert pattern.flags & int(pcre.Flag.UTF)
+
+
+def test_no_utf_check_does_not_reject_arbitrary_non_utf_pattern():
+    pattern = pcre_ext_c.compile(b"\xff", _NO_UTF_CHECK, jit=False)
+    match = pattern.fullmatch(b"\xff")
+    assert match is not None
+    assert match.group() == b"\xff"
     assert pattern.flags & _NO_UTF_CHECK
 
 
@@ -90,7 +108,7 @@ import pcre_ext_c
 flags = int(pcre.Flag.NO_UTF_CHECK)
 for _ in range(2000):
     for suffix in (b"\\xff", b"\\x80", b"\\xe2\\x82", b"a\\xed\\xa0\\x80z"):
-        pattern = b"(?u)" + suffix
+        pattern = b"(*UTF)" + suffix
         try:
             pcre_ext_c.compile(pattern, flags, jit=bool(_ & 1))
         except pcre.PcreError:
@@ -107,13 +125,19 @@ for _ in range(2000):
     assert completed.returncode == 0, completed.stderr
 
 
-def test_invalid_utf_no_check_compile_is_thread_safe():
-    flags = pcre.Flag.UTF | pcre.Flag.NO_UTF_CHECK
+@pytest.mark.parametrize(
+    ("prefix", "flags"),
+    [
+        (b"", pcre.Flag.UTF | pcre.Flag.NO_UTF_CHECK),
+        (b"(*UTF)", pcre.Flag.NO_UTF_CHECK),
+    ],
+)
+def test_invalid_utf_no_check_compile_is_thread_safe(prefix, flags):
 
     def exercise(worker: int):
         rejected = 0
         for index in range(1000):
-            pattern = _INVALID_UTF8_PATTERNS[
+            pattern = prefix + _INVALID_UTF8_PATTERNS[
                 (worker + index) % len(_INVALID_UTF8_PATTERNS)
             ]
             try:
