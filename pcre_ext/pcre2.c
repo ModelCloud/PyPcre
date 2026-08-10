@@ -4689,6 +4689,81 @@ Pattern_findall_fast(PatternObject *self, PyObject *const *args, Py_ssize_t narg
 }
 
 static PyObject *
+Pattern_split_literal_capture_fast(PatternObject *self,
+                                   PyObject *const *args,
+                                   Py_ssize_t nargs)
+{
+    (void)self;
+    if (nargs != 3) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "_split_literal_capture_fast() takes exactly 3 positional arguments (%zd given)",
+            nargs
+        );
+        return NULL;
+    }
+
+    int subject_is_bytes = PyBytes_CheckExact(args[0]);
+    if ((!subject_is_bytes && !PyUnicode_CheckExact(args[0])) ||
+        (subject_is_bytes
+            ? !PyBytes_CheckExact(args[1])
+            : !PyUnicode_CheckExact(args[1]))) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+
+    Py_ssize_t maxsplit = PyLong_AsSsize_t(args[2]);
+    if (maxsplit == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    Py_ssize_t split_limit = maxsplit == 0
+        ? -1
+        : (maxsplit < 0 ? 0 : maxsplit);
+
+    PyObject *pieces = subject_is_bytes
+        ? PyObject_CallMethod(args[0], "split", "On", args[1], split_limit)
+        : PyUnicode_Split(args[0], args[1], split_limit);
+    if (pieces == NULL) {
+        return NULL;
+    }
+    if (!PyList_CheckExact(pieces)) {
+        Py_DECREF(pieces);
+        PyErr_SetString(PyExc_RuntimeError, "built-in split returned a non-list");
+        return NULL;
+    }
+
+    Py_ssize_t piece_count = PyList_GET_SIZE(pieces);
+    if (piece_count <= 1) {
+        return pieces;
+    }
+    if (piece_count > PY_SSIZE_T_MAX / 2) {
+        Py_DECREF(pieces);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    PyObject *result = PyList_New(piece_count * 2 - 1);
+    if (result == NULL) {
+        Py_DECREF(pieces);
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < piece_count; ++index) {
+        PyObject *piece = PyList_GET_ITEM(pieces, index);
+        /* Transfer the temporary list's owned piece reference directly into
+         * the final list.  Leave a valid singleton behind so list teardown
+         * never observes a NULL slot. */
+        Py_INCREF(Py_None);
+        PyList_SET_ITEM(pieces, index, Py_None);
+        PyList_SET_ITEM(result, index * 2, piece);
+        if (index + 1 < piece_count) {
+            Py_INCREF(args[1]);
+            PyList_SET_ITEM(result, index * 2 + 1, args[1]);
+        }
+    }
+    Py_DECREF(pieces);
+    return result;
+}
+
+static PyObject *
 Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
     if (nargs != 2 && nargs != 3) {
@@ -5067,6 +5142,7 @@ static PyMethodDef Pattern_methods[] = {
     {"search", (PyCFunction)Pattern_search_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Search the subject for the pattern." )},
     {"fullmatch", (PyCFunction)Pattern_fullmatch_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Require the pattern to match the entire subject." )},
     {"_findall_fast", (PyCFunction)(void(*)(void))Pattern_findall_fast, METH_FASTCALL, NULL},
+    {"_split_literal_capture_fast", (PyCFunction)(void(*)(void))Pattern_split_literal_capture_fast, METH_FASTCALL, NULL},
     {"_substitute_fast", (PyCFunction)(void(*)(void))Pattern_substitute_fast, METH_FASTCALL, NULL},
     {"_substitute_python_fast", (PyCFunction)(void(*)(void))Pattern_substitute_python_fast, METH_FASTCALL, NULL},
     {"_match_fast", (PyCFunction)(void(*)(void))Pattern_match_fast, METH_FASTCALL, NULL},
