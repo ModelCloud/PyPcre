@@ -593,6 +593,9 @@ def test_c_literal_split_uses_builtin_only_for_safe_shape() -> None:
     assert text_pattern.split("a b c", maxsplit=1) == ["a", "b c"]
     assert text_pattern.split("a b c", maxsplit=-1) == ["a", "b", "c"]
 
+    multi_pattern = pcre.compile(", ")
+    assert multi_pattern.split("a, b, c") == ["a", "b", "c"]
+
     bytes_pattern = pcre.compile(b",")
     assert bytes_pattern.split(b"a,b,c") == [b"a", b"b", b"c"]
 

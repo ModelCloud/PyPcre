@@ -251,7 +251,7 @@ class Pattern:
         literal_split: str | bytes | None = None
         if self._is_c_pattern:
             source = pattern.pattern
-            if type(source) in (str, bytes) and len(source) == 1:
+            if type(source) in (str, bytes) and source:
                 metacharacters = (
                     ".^$*+?{}[]\\|()" if type(source) is str else b".^$*+?{}[]\\|()"
                 )
@@ -262,7 +262,10 @@ class Pattern:
                     if type(source) is str
                     else 0
                 )
-                if source not in metacharacters and pattern.flags == expected_flags:
+                if (
+                    not any(char in metacharacters for char in source)
+                    and pattern.flags == expected_flags
+                ):
                     literal_split = source
         self._literal_split = literal_split
 
@@ -553,9 +556,9 @@ class Pattern:
         return results
 
     def split(self, subject: Any, maxsplit: Any = 0) -> List[Any]:
-        # A one-code-unit literal has exactly the same split semantics as the
-        # built-in immutable string/bytes splitter.  The immutable construction
-        # check restricts this to canonical patterns with default options.
+        # A plain literal has exactly the same split semantics as the built-in
+        # immutable string/bytes splitter.  The immutable construction check
+        # restricts this to canonical patterns with default options.
         if (
             self._is_c_pattern
             and type(self) is Pattern
