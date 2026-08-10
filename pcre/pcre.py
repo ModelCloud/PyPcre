@@ -771,13 +771,15 @@ class Pattern:
             and type(subject) in (str, bytes)
             and type(repl) is type(subject)
             and type(count) is int
-            and count == 0
+            and count in (0, 1)
             and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
             and ("$" not in repl if type(repl) is str else b"$" not in repl)
         ):
             fast_substitute = getattr(self._pattern, "_substitute_fast", None)
             if fast_substitute is not None:
-                return fast_substitute(subject, repl)
+                if count == 0:
+                    return fast_substitute(subject, repl)
+                return fast_substitute(subject, repl, count)
 
         # One exact, valid Python capture reference can be translated to
         # PCRE2's equivalent replacement syntax with call-local state only.
@@ -788,11 +790,15 @@ class Pattern:
             and type(subject) in (str, bytes)
             and type(repl) is type(subject)
             and type(count) is int
-            and count == 0
+            and count in (0, 1)
         ):
             fast_substitute = getattr(self._pattern, "_substitute_python_fast", None)
             if fast_substitute is not None:
-                direct_result = fast_substitute(subject, repl)
+                direct_result = (
+                    fast_substitute(subject, repl)
+                    if count == 0
+                    else fast_substitute(subject, repl, count)
+                )
                 if direct_result is not NotImplemented:
                     return direct_result
 
@@ -1424,7 +1430,7 @@ def subn(
         and type(string) in (str, bytes)
         and type(repl) is type(string)
         and type(count) is int
-        and count == 0
+        and count in (0, 1)
         and compiled._is_c_pattern
         and (
             (type(repl) is str and "\\" not in repl and "$" not in repl)
@@ -1433,7 +1439,9 @@ def subn(
     ):
         fast = getattr(compiled._pattern, "_substitute_fast", None)
         if fast is not None:
-            return fast(string, repl)
+            if count == 0:
+                return fast(string, repl)
+            return fast(string, repl, count)
     return compiled.subn(repl, string, count=count)
 
 

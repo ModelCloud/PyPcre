@@ -3966,7 +3966,7 @@ Pattern_substitute(PatternObject *self,
     int match_data_from_pattern = 0;
     int match_context_from_pattern = 0;
 
-    if (count != 0) {
+    if (count != 0 && count != 1) {
         Py_RETURN_NOTIMPLEMENTED;
     }
 
@@ -4072,10 +4072,12 @@ Pattern_substitute(PatternObject *self,
         pcre2_jit_stack_assign(match_context, NULL, jit_stack);
     }
 
-    uint32_t sub_options = PCRE2_SUBSTITUTE_GLOBAL
-                         | PCRE2_SUBSTITUTE_EXTENDED
+    uint32_t sub_options = PCRE2_SUBSTITUTE_EXTENDED
                          | PCRE2_SUBSTITUTE_UNSET_EMPTY
                          | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
+    if (count == 0) {
+        sub_options |= PCRE2_SUBSTITUTE_GLOBAL;
+    }
     if (!subject_is_bytes) {
         sub_options |= PCRE2_NO_UTF_CHECK;
     }
@@ -4536,13 +4538,20 @@ Pattern_findall_fast(PatternObject *self, PyObject *const *args, Py_ssize_t narg
 static PyObject *
 Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
-    if (nargs != 2) {
+    if (nargs != 2 && nargs != 3) {
         PyErr_Format(PyExc_TypeError,
-                     "_substitute_fast() takes exactly 2 positional arguments (%zd given)",
+                     "_substitute_fast() takes 2 or 3 positional arguments (%zd given)",
                      nargs);
         return NULL;
     }
-    return Pattern_substitute(self, args[0], args[1], 0);
+    Py_ssize_t count = 0;
+    if (nargs == 3) {
+        count = PyLong_AsSsize_t(args[2]);
+        if (count == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+    }
+    return Pattern_substitute(self, args[0], args[1], count);
 }
 
 static int
@@ -4760,11 +4769,18 @@ Pattern_substitute_python_fast(PatternObject *self,
                                PyObject *const *args,
                                Py_ssize_t nargs)
 {
-    if (nargs != 2) {
+    if (nargs != 2 && nargs != 3) {
         PyErr_Format(PyExc_TypeError,
-                     "_substitute_python_fast() takes exactly 2 positional arguments (%zd given)",
+                     "_substitute_python_fast() takes 2 or 3 positional arguments (%zd given)",
                      nargs);
         return NULL;
+    }
+    Py_ssize_t count = 0;
+    if (nargs == 3) {
+        count = PyLong_AsSsize_t(args[2]);
+        if (count == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
     }
     int handled = 0;
     PyObject *replacement = pattern_translate_single_replacement(
@@ -4776,7 +4792,7 @@ Pattern_substitute_python_fast(PatternObject *self,
         }
         Py_RETURN_NOTIMPLEMENTED;
     }
-    PyObject *result = Pattern_substitute(self, args[0], replacement, 0);
+    PyObject *result = Pattern_substitute(self, args[0], replacement, count);
     Py_DECREF(replacement);
     return result;
 }

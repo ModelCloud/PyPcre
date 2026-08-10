@@ -67,7 +67,7 @@ def test_extended_replacements_stay_on_compatibility_parser(
     assert calls == 1
 
 
-def test_bounded_count_and_replacement_subclass_stay_compatible(
+def test_single_count_is_call_local_and_replacement_subclass_stays_compatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Replacement(str):
@@ -85,7 +85,7 @@ def test_bounded_count_and_replacement_subclass_stay_compatible(
     monkeypatch.setattr(pcre_mod, "_cached_replacement_parts", counted)
     assert compiled.sub(r"[\1]", "aa", count=1) == "[a]a"
     assert compiled.sub(Replacement(r"[\1]"), "a") == "[a]"
-    assert calls == 1
+    assert calls == 0
 
 
 def test_single_reference_subn_is_safe_on_shared_pattern() -> None:
