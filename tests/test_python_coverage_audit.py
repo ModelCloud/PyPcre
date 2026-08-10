@@ -526,12 +526,14 @@ class _LegacySplitPattern:
     def finditer(
         self,
         subject: str,
-        *,
+        *args: Any,
         pos: int = 0,
         endpos: int = -1,
         options: int = 0,
         owner: Any = None,
     ) -> Any:
+        if args:
+            pos, endpos, options, owner = args
         del options, owner
         resolved_end = len(subject) if endpos < 0 else endpos
         return re.compile(self.pattern).finditer(subject, pos, resolved_end)
@@ -549,6 +551,7 @@ class _LegacyNoSplitPattern(_LegacySplitPattern):
 
 def test_split_legacy_backend_fallback_and_limit() -> None:
     pattern = pcre_mod.Pattern(_LegacySplitPattern())  # type: ignore[arg-type]
+    pattern._is_c_pattern = True
     assert pattern.split("a,b,c") == ["a", ",", "b", ",", "c"]
     assert pattern.split("a,b,c", maxsplit=1) == ["a", ",", "b,c"]
 
@@ -568,6 +571,10 @@ def test_empty_pattern_split_fast_path_matches_re(
     assert compiled.split(subject, maxsplit=1) == re.compile(pattern).split(
         subject, maxsplit=1
     )
+    class Zero(int):
+        pass
+
+    assert compiled.split(subject, maxsplit=Zero(0)) == re.compile(pattern).split(subject)
 
 
 def test_c_split_default_dispatch_preserves_results() -> None:
