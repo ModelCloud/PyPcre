@@ -208,8 +208,9 @@ def test_parallel_map_memoryview_subject(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_parallel_map_threading_unsupported_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pcre_mod, "threading_supported", lambda: False)
     pattern = pcre.compile(r"\d+", flags=pcre.Flag.THREADS)
-    results = pcre.parallel_map(pattern, ["1", "22", "333", "4444"])
-    assert [m.group(0) for m in results] == ["1", "22", "333", "4444"]
+    subjects = ["1", "22", "333", "4444", "5", "66", "777", "8888", "9"]
+    results = pcre.parallel_map(pattern, subjects)
+    assert [m.group(0) for m in results] == subjects
 
 
 def test_compile_disabled_default_with_non_thread_flags(monkeypatch: pytest.MonkeyPatch) -> None:
