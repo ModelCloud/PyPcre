@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re as _std_re
+import warnings as _warnings
 from collections.abc import Iterable, Iterator, Mapping
 from functools import lru_cache
 from threading import local
@@ -1476,16 +1477,17 @@ def subn(
 # add this function to bypass signatures unit test
 # re.template() is deprecated and removed since python 3.12
 def template(pattern, flags=0):
-    import warnings
-
-    warnings.warn(
+    _warnings.warn(
         "The re.template() function is deprecated "
         "as it is an undocumented function "
         "without an obvious purpose. "
         "Use re.compile() instead.",
         DeprecationWarning,
     )
-    return compile(pattern, flags | RE_TEMPLATE)
+    template_flags = (
+        RE_TEMPLATE if type(flags) is int and flags == 0 else flags | RE_TEMPLATE
+    )
+    return compile(pattern, template_flags)
 
 
 _PARALLEL_EXEC_METHODS = frozenset({"match", "search", "fullmatch", "findall"})
