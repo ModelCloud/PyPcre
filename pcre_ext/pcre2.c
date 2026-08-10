@@ -4545,6 +4545,242 @@ Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t n
     return Pattern_substitute(self, args[0], args[1], 0);
 }
 
+static int
+pattern_has_ascii_group_name(PatternObject *self,
+                             const char *name,
+                             Py_ssize_t name_length)
+{
+    uint32_t name_count = 0;
+    uint32_t entry_size = 0;
+    PCRE2_SPTR name_table = NULL;
+    if (name_length <= 0 ||
+        pcre2_pattern_info(self->code, PCRE2_INFO_NAMECOUNT, &name_count) != 0 ||
+        pcre2_pattern_info(self->code,
+                           PCRE2_INFO_NAMEENTRYSIZE,
+                           &entry_size) != 0 ||
+        pcre2_pattern_info(self->code,
+                           PCRE2_INFO_NAMETABLE,
+                           &name_table) != 0 ||
+        name_table == NULL || entry_size < 3) {
+        return 0;
+    }
+    size_t name_max = (size_t)entry_size - 2;
+    for (uint32_t i = 0; i < name_count; ++i) {
+        const char *entry_name = (const char *)(
+            name_table + (size_t)i * entry_size + 2
+        );
+        size_t entry_length = strnlen(entry_name, name_max);
+        if (entry_length == (size_t)name_length &&
+            memcmp(entry_name, name, entry_length) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static Py_UCS4
+replacement_character_at(PyObject *replacement,
+                         int replacement_is_bytes,
+                         Py_ssize_t index)
+{
+    return replacement_is_bytes
+        ? (unsigned char)PyBytes_AS_STRING(replacement)[index]
+        : PyUnicode_ReadChar(replacement, index);
+}
+
+static Py_ssize_t
+replacement_find_character(PyObject *replacement,
+                           int replacement_is_bytes,
+                           Py_UCS4 character,
+                           Py_ssize_t start,
+                           Py_ssize_t length)
+{
+    if (!replacement_is_bytes) {
+        return PyUnicode_FindChar(replacement, character, start, length, 1);
+    }
+    const char *data = PyBytes_AS_STRING(replacement);
+    const char *found = memchr(
+        data + start, (unsigned char)character, (size_t)(length - start)
+    );
+    return found == NULL ? -1 : (Py_ssize_t)(found - data);
+}
+
+static PyObject *
+pattern_translate_single_replacement(PatternObject *self,
+                                     PyObject *replacement,
+                                     int *handled)
+{
+    *handled = 0;
+    int replacement_is_bytes = PyBytes_CheckExact(replacement);
+    if (!replacement_is_bytes && !PyUnicode_CheckExact(replacement)) {
+        return NULL;
+    }
+    if (!replacement_is_bytes && PyUnicode_READY(replacement) < 0) {
+        return NULL;
+    }
+    Py_ssize_t length = replacement_is_bytes
+        ? PyBytes_GET_SIZE(replacement) : PyUnicode_GET_LENGTH(replacement);
+    Py_ssize_t slash_index = replacement_find_character(
+        replacement, replacement_is_bytes, '\\', 0, length
+    );
+    if (slash_index < 0 ||
+        replacement_find_character(
+            replacement, replacement_is_bytes, '$', 0, length
+        ) >= 0 ||
+        slash_index + 1 >= length) {
+        return NULL;
+    }
+
+    Py_UCS4 following = replacement_character_at(
+        replacement, replacement_is_bytes, slash_index + 1
+    );
+    if (following >= '1' && following <= '9') {
+        if ((uint32_t)(following - '0') > self->capture_count ||
+            (slash_index + 2 < length &&
+             replacement_character_at(
+                 replacement, replacement_is_bytes, slash_index + 2
+             ) >= '0' &&
+             replacement_character_at(
+                 replacement, replacement_is_bytes, slash_index + 2
+             ) <= '9') ||
+            replacement_find_character(
+                replacement,
+                replacement_is_bytes,
+                '\\',
+                slash_index + 2,
+                length
+            ) >= 0) {
+            return NULL;
+        }
+        if (length > PY_SSIZE_T_MAX - 3) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+        *handled = 1;
+        Py_ssize_t result_length = length + 3;
+        if (replacement_is_bytes) {
+            PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
+            if (result == NULL) {
+                return NULL;
+            }
+            char *output = PyBytes_AS_STRING(result);
+            const char *input = PyBytes_AS_STRING(replacement);
+            memcpy(output, input, (size_t)slash_index);
+            output[slash_index] = '\\';
+            output[slash_index + 1] = 'g';
+            output[slash_index + 2] = '<';
+            output[slash_index + 3] = (char)following;
+            output[slash_index + 4] = '>';
+            memcpy(output + slash_index + 5,
+                   input + slash_index + 2,
+                   (size_t)(length - slash_index - 2));
+            return result;
+        }
+
+        PyObject *result = PyUnicode_New(
+            result_length, PyUnicode_MAX_CHAR_VALUE(replacement)
+        );
+        if (result == NULL) {
+            return NULL;
+        }
+        if ((slash_index > 0 &&
+             PyUnicode_CopyCharacters(
+                 result, 0, replacement, 0, slash_index
+             ) < 0) ||
+            PyUnicode_WriteChar(result, slash_index, '\\') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 1, 'g') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 2, '<') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 3, following) < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 4, '>') < 0 ||
+            (slash_index + 2 < length &&
+             PyUnicode_CopyCharacters(result,
+                                      slash_index + 5,
+                                      replacement,
+                                      slash_index + 2,
+                                      length - slash_index - 2) < 0)) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        return result;
+    }
+
+    if (following != 'g' || slash_index + 4 >= length ||
+        replacement_character_at(
+            replacement, replacement_is_bytes, slash_index + 2
+        ) != '<') {
+        return NULL;
+    }
+    char name[129];
+    Py_ssize_t name_length = 0;
+    uint32_t group_index = 0;
+    int numeric = 1;
+    Py_ssize_t cursor = slash_index + 3;
+    while (cursor < length) {
+        Py_UCS4 character = replacement_character_at(
+            replacement, replacement_is_bytes, cursor
+        );
+        if (character == '>') {
+            break;
+        }
+        if (character > 0x7f || name_length >= 128) {
+            return NULL;
+        }
+        name[name_length++] = (char)character;
+        if (character < '0' || character > '9') {
+            numeric = 0;
+        } else if (numeric) {
+            uint32_t digit = (uint32_t)(character - '0');
+            if (group_index > (UINT32_MAX - digit) / 10) {
+                return NULL;
+            }
+            group_index = group_index * 10 + digit;
+        }
+        cursor += 1;
+    }
+    if (name_length == 0 || cursor >= length ||
+        replacement_find_character(
+            replacement,
+            replacement_is_bytes,
+            '\\',
+            cursor + 1,
+            length
+        ) >= 0 ||
+        (numeric
+            ? group_index > self->capture_count
+            : !pattern_has_ascii_group_name(self, name, name_length))) {
+        return NULL;
+    }
+    *handled = 1;
+    Py_INCREF(replacement);
+    return replacement;
+}
+
+static PyObject *
+Pattern_substitute_python_fast(PatternObject *self,
+                               PyObject *const *args,
+                               Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_Format(PyExc_TypeError,
+                     "_substitute_python_fast() takes exactly 2 positional arguments (%zd given)",
+                     nargs);
+        return NULL;
+    }
+    int handled = 0;
+    PyObject *replacement = pattern_translate_single_replacement(
+        self, args[1], &handled
+    );
+    if (replacement == NULL) {
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    PyObject *result = Pattern_substitute(self, args[0], replacement, 0);
+    Py_DECREF(replacement);
+    return result;
+}
+
 /*
  * These lookup helpers are intentionally private.  They are used only by the
  * high-level parallel fan-out when every optional argument has its default
@@ -4636,6 +4872,7 @@ static PyMethodDef Pattern_methods[] = {
     {"fullmatch", (PyCFunction)Pattern_fullmatch_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Require the pattern to match the entire subject." )},
     {"_findall_fast", (PyCFunction)(void(*)(void))Pattern_findall_fast, METH_FASTCALL, NULL},
     {"_substitute_fast", (PyCFunction)(void(*)(void))Pattern_substitute_fast, METH_FASTCALL, NULL},
+    {"_substitute_python_fast", (PyCFunction)(void(*)(void))Pattern_substitute_python_fast, METH_FASTCALL, NULL},
     {"_match_fast", (PyCFunction)(void(*)(void))Pattern_match_fast, METH_FASTCALL, NULL},
     {"_search_fast", (PyCFunction)(void(*)(void))Pattern_search_fast, METH_FASTCALL, NULL},
     {"_fullmatch_fast", (PyCFunction)(void(*)(void))Pattern_fullmatch_fast, METH_FASTCALL, NULL},

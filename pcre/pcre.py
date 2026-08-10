@@ -779,6 +779,23 @@ class Pattern:
             if fast_substitute is not None:
                 return fast_substitute(subject, repl)
 
+        # One exact, valid Python capture reference can be translated to
+        # PCRE2's equivalent replacement syntax with call-local state only.
+        # Keep every ambiguous or extended form on the compatibility parser.
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and type(subject) in (str, bytes)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and count == 0
+        ):
+            fast_substitute = getattr(self._pattern, "_substitute_python_fast", None)
+            if fast_substitute is not None:
+                direct_result = fast_substitute(subject, repl)
+                if direct_result is not NotImplemented:
+                    return direct_result
+
         subject = prepare_subject(subject)
         subject_is_bytes = is_bytes_like(subject)
         empty = b"" if subject_is_bytes else ""

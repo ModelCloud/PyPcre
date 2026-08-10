@@ -36,6 +36,7 @@ def main() -> int:
     subject = "x" * 1000
     short_subject = "x" * 10
     pattern = pcre.compile("(x)")
+    named_pattern = pcre.compile("(?P<word>x)")
     captured = pattern.match(short_subject)
     named_captured = pcre.compile("(?P<word>x)").match(short_subject)
     multi_captured = pcre.compile("(?P<a>x)(?P<b>x)").match(short_subject)
@@ -54,6 +55,11 @@ def main() -> int:
         ("bound.split", lambda: pattern.split("x " * 8)),
         ("bound.sub.literal", lambda: pattern.sub("[X]", short_subject)),
         ("bound.sub.backref", lambda: pattern.sub(r"[\1]", short_subject)),
+        ("bound.sub.explicit", lambda: pattern.sub(r"[\g<1>]", short_subject)),
+        (
+            "bound.sub.named",
+            lambda: named_pattern.sub(r"[\g<word>]", short_subject),
+        ),
         ("match.groups", captured.groups),
         ("match.expand.numeric", lambda: captured.expand(r"[\1]")),
         ("match.expand.explicit", lambda: captured.expand(r"[\g<1>]")),
