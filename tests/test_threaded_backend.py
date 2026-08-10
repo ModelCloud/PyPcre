@@ -84,9 +84,9 @@ class TestThreadedBackend(unittest.TestCase):
 
     def test_pattern_parallel_map(self):
         pattern = pcre.compile(r"\d+", Flag.THREADS)
-        subjects = ["1", "22", "nope"]
+        subjects = ["1", "22", "nope", "4444"]
         results = pattern.parallel_map(subjects, method="findall")
-        self.assertEqual(results, [["1"], ["22"], []])
+        self.assertEqual(results, [["1"], ["22"], [], ["4444"]])
 
     def test_compile_existing_pattern_toggle(self):
         pattern = pcre.compile(r"foo")
