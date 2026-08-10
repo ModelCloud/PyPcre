@@ -591,7 +591,7 @@ def test_c_literal_split_uses_builtin_only_for_safe_shape() -> None:
     text_pattern = pcre.compile(" ")
     assert text_pattern.split("a b c") == ["a", "b", "c"]
     assert text_pattern.split("a b c", maxsplit=1) == ["a", "b c"]
-    assert text_pattern.split("a b c", maxsplit=-1) == ["a", "b", "c"]
+    assert text_pattern.split("a b c", maxsplit=-1) == ["a b c"]
 
     multi_pattern = pcre.compile(", ")
     assert multi_pattern.split("a, b, c") == ["a", "b", "c"]
@@ -615,7 +615,7 @@ def test_c_plain_literal_subn_uses_builtin_only_for_safe_shape() -> None:
     pattern = pcre.compile("foo")
     assert pattern.subn("bar", "foo foo") == ("bar bar", 2)
     assert pattern.subn("bar", "foo foo", count=1) == ("bar foo", 1)
-    assert pattern.subn("bar", "foo foo", count=-1) == ("bar bar", 2)
+    assert pattern.subn("bar", "foo foo", count=-1) == ("foo foo", 0)
     assert pattern.subn("bar", "no match") == ("no match", 0)
 
     bytes_pattern = pcre.compile(b"foo")

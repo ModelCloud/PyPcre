@@ -504,20 +504,21 @@ class Pattern:
     ) -> List[Any]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        literal_source = getattr(self, "_literal_split", None)
         if (
-            self._is_c_pattern
+            getattr(self, "_is_c_pattern", False)
             and type(self) is Pattern
-            and self._literal_split is not None
-            and type(subject) is type(self._literal_split)
+            and literal_source is not None
+            and type(subject) is type(literal_source)
             and type(pos) is int
             and pos == 0
             and endpos is None
             and type(options) is int
             and options == 0
         ):
-            if subject.find(self._literal_split[:1]) < 0:
+            if subject.find(literal_source[:1]) < 0:
                 return []
-            return [self._literal_split] * subject.count(self._literal_split)
+            return [literal_source] * subject.count(literal_source)
         backend_findall = getattr(self._pattern, "findall", None)
         if backend_findall is not None:
             compiled_end = -1 if endpos is None else resolve_endpos(subject, endpos)
@@ -582,7 +583,8 @@ class Pattern:
         ):
             # Python's explicit ``maxsplit=0`` means unlimited splitting for
             # ``Pattern.split`` (unlike ``str.split(sep, 0)``).
-            return subject.split(self._literal_split, -1 if maxsplit <= 0 else maxsplit)
+            split_limit = -1 if maxsplit == 0 else (0 if maxsplit < 0 else maxsplit)
+            return subject.split(self._literal_split, split_limit)
 
         # The common immutable/default shape can go straight to the C splitter.
         # Keep subclasses, buffer exporters, and non-default limits on the
@@ -685,6 +687,8 @@ class Pattern:
             and ("$" not in repl if type(repl) is str else b"$" not in repl)
         ):
             if subject.find(self._literal_split[:1]) < 0:
+                return subject, 0
+            if count < 0:
                 return subject, 0
             matched = subject.count(self._literal_split)
             if matched == 0:
