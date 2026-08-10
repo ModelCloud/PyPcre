@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import re
 import statistics
 import sys
 import time
@@ -46,6 +47,7 @@ def main() -> int:
     captured = pattern.match(short_subject)
     named_captured = pcre.compile("(?P<word>x)").match(short_subject)
     multi_captured = pcre.compile("(?P<a>x)(?P<b>x)").match(short_subject)
+    stdlib_flags = re.I | re.M | re.S | re.X
     if captured is None:
         raise AssertionError("benchmark pattern failed to produce a match")
     if named_captured is None:
@@ -74,6 +76,7 @@ def main() -> int:
         ("module.escape.text", lambda: pcre.escape("identifier_123")),
         ("module.escape.bytes", lambda: pcre.escape(b"identifier123")),
         ("module.escape.special", lambda: pcre.escape("a+b [c]")),
+        ("module.compile.reflags", lambda: pcre.compile("(x)", stdlib_flags)),
         ("match.expand.numeric", lambda: captured.expand(r"[\1]")),
         ("match.expand.explicit", lambda: captured.expand(r"[\g<1>]")),
         ("match.expand.named", lambda: named_captured.expand(r"[\g<word>]")),

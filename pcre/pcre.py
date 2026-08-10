@@ -174,9 +174,15 @@ _STD_RE_FLAG_MAP: dict[_std_re.RegexFlag, int] = {
     _std_re.RegexFlag.VERBOSE: _pcre2.PCRE2_EXTENDED,
 }
 
+# Keep the hot coercion loop on plain integers.  ``RegexFlag.__and__`` creates
+# a new IntFlag object for every probe, which dominates cached compile calls.
+_STD_RE_FLAG_PAIRS: tuple[tuple[int, int], ...] = tuple(
+    (int(flag), native_value) for flag, native_value in _STD_RE_FLAG_MAP.items()
+)
+
 _STD_RE_FLAG_MASK = 0
-for _flag in _STD_RE_FLAG_MAP:
-    _STD_RE_FLAG_MASK |= int(_flag)
+for _flag_value, _native_value in _STD_RE_FLAG_PAIRS:
+    _STD_RE_FLAG_MASK |= _flag_value
 
 
 def _convert_regex_compat(pattern: str) -> str:
@@ -205,7 +211,8 @@ def _apply_default_unicode_flags(pattern: Any, flags: int) -> int:
 
 
 def _coerce_stdlib_regexflag(flag: _std_re.RegexFlag) -> int:
-    unsupported_bits = int(flag) & ~(
+    flag_value = int(flag)
+    unsupported_bits = flag_value & ~(
         _STD_RE_FLAG_MASK | RE_TEMPLATE_FLAG | RE_UNICODE_FLAG
     )
     if unsupported_bits:
@@ -215,8 +222,8 @@ def _coerce_stdlib_regexflag(flag: _std_re.RegexFlag) -> int:
         )
 
     resolved = 0
-    for std_flag, native_value in _STD_RE_FLAG_MAP.items():
-        if flag & std_flag:
+    for std_flag_value, native_value in _STD_RE_FLAG_PAIRS:
+        if flag_value & std_flag_value:
             resolved |= native_value
     return resolved
 
@@ -1161,6 +1168,27 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
         )
         return _policy_wrapper(compiled, thread_mode)
+
+    # Exact built-in patterns with stdlib RegexFlag values have no PyPcre-only
+    # thread/JIT markers.  Translate their small finite bitset once and go
+    # directly to the existing bounded, thread-local flagged cache.  Other
+    # inputs keep the fully dynamic normalization path below.
+    if (
+        isinstance(flags, _std_re.RegexFlag)
+        and type(pattern) in (str, bytes)
+        and cached_compile is _ORIGINAL_CACHED_COMPILE
+    ):
+        resolved_stdlib_flags = _coerce_stdlib_regexflag(flags)
+        thread_mode = (
+            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+        )
+        return _compile_flagged_builtin(
+            pattern,
+            resolved_stdlib_flags,
+            bool(_DEFAULT_JIT),
+            bool(_DEFAULT_COMPAT_REGEX),
+            thread_mode,
+        )
 
     resolved_flags = _normalise_flags(flags)
     threads_requested = bool(resolved_flags & THREADS)
