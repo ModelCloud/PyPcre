@@ -158,6 +158,17 @@ def test_parallel_map_empty_subjects() -> None:
     assert pcre.parallel_map(pattern, []) == []
 
 
+def test_parallel_map_single_subject_avoids_executor(monkeypatch: pytest.MonkeyPatch) -> None:
+    pattern = pcre.compile(r"\d+", flags=pcre.Flag.THREADS)
+    monkeypatch.setattr(
+        pcre_mod,
+        "ensure_thread_pool",
+        lambda *_args, **_kwargs: pytest.fail("single-item map must not create a pool"),
+    )
+    results = pcre.parallel_map(pattern, ["123"], method="findall")
+    assert results == [["123"]]
+
+
 def test_parallel_map_invalid_method() -> None:
     pattern = pcre.compile(r"\d+", flags=pcre.Flag.THREADS)
     with pytest.raises(ValueError, match="parallel_map"):

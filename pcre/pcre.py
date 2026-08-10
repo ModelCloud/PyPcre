@@ -1203,6 +1203,14 @@ def parallel_map(
             "threading defaults."
         )
 
+    # A one-item map cannot benefit from worker fan-out.  Keep the documented
+    # list-shaped result but avoid executor creation, queueing, and a Future;
+    # this is also the safest path for explicit ``Flag.THREADS`` on tiny jobs.
+    if len(materials) == 1:
+        if mode == _THREAD_MODE_AUTO:
+            _should_use_auto_threads(materials)
+        return [bound_method(materials[0], pos=pos, endpos=endpos, options=options)]
+
     if mode == _THREAD_MODE_AUTO and not _should_use_auto_threads(materials):
         return [
             bound_method(subject, pos=pos, endpos=endpos, options=options)
