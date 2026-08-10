@@ -674,8 +674,8 @@ class Pattern:
     def subn(self, repl: Any, subject: Any, count: Any = 0) -> tuple[Any, int]:
         # Plain literal patterns with literal replacements can use the built-in
         # immutable replace/count primitives.  This is safe only for canonical
-        # exact text/bytes values and preserves Python's unlimited-count mapping
-        # (Pattern.subn uses zero or negative counts for unlimited replacement).
+        # exact text/bytes values and preserves Python's count mapping (zero
+        # means unlimited replacement while negative counts perform none).
         if (
             self._is_c_pattern
             and type(self) is Pattern
