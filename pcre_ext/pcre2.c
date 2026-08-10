@@ -4764,6 +4764,102 @@ Pattern_split_literal_capture_fast(PatternObject *self,
 }
 
 static PyObject *
+Pattern_split_literal_captures_fast(PatternObject *self,
+                                    PyObject *const *args,
+                                    Py_ssize_t nargs)
+{
+    (void)self;
+    if (nargs != 4) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "_split_literal_captures_fast() takes exactly 4 positional arguments (%zd given)",
+            nargs
+        );
+        return NULL;
+    }
+
+    int subject_is_bytes = PyBytes_CheckExact(args[0]);
+    if ((!subject_is_bytes && !PyUnicode_CheckExact(args[0])) ||
+        (subject_is_bytes
+            ? !PyBytes_CheckExact(args[1])
+            : !PyUnicode_CheckExact(args[1])) ||
+        !PyTuple_CheckExact(args[2])) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+
+    Py_ssize_t group_count = PyTuple_GET_SIZE(args[2]);
+    if (group_count < 2 || group_count > 8) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    for (Py_ssize_t index = 0; index < group_count; ++index) {
+        PyObject *group = PyTuple_GET_ITEM(args[2], index);
+        if (subject_is_bytes
+                ? !PyBytes_CheckExact(group)
+                : !PyUnicode_CheckExact(group)) {
+            Py_RETURN_NOTIMPLEMENTED;
+        }
+    }
+
+    Py_ssize_t maxsplit = PyLong_AsSsize_t(args[3]);
+    if (maxsplit == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    Py_ssize_t split_limit = maxsplit == 0
+        ? -1
+        : (maxsplit < 0 ? 0 : maxsplit);
+
+    PyObject *pieces = subject_is_bytes
+        ? PyObject_CallMethod(args[0], "split", "On", args[1], split_limit)
+        : PyUnicode_Split(args[0], args[1], split_limit);
+    if (pieces == NULL) {
+        return NULL;
+    }
+    if (!PyList_CheckExact(pieces)) {
+        Py_DECREF(pieces);
+        PyErr_SetString(PyExc_RuntimeError, "built-in split returned a non-list");
+        return NULL;
+    }
+
+    Py_ssize_t piece_count = PyList_GET_SIZE(pieces);
+    if (piece_count <= 1) {
+        return pieces;
+    }
+    Py_ssize_t match_count = piece_count - 1;
+    if (match_count > (PY_SSIZE_T_MAX - piece_count) / group_count) {
+        Py_DECREF(pieces);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    Py_ssize_t result_count = piece_count + match_count * group_count;
+    PyObject *result = PyList_New(result_count);
+    if (result == NULL) {
+        Py_DECREF(pieces);
+        return NULL;
+    }
+    Py_ssize_t output_index = 0;
+    for (Py_ssize_t piece_index = 0;
+         piece_index < piece_count;
+         ++piece_index) {
+        PyObject *piece = PyList_GET_ITEM(pieces, piece_index);
+        Py_INCREF(Py_None);
+        PyList_SET_ITEM(pieces, piece_index, Py_None);
+        PyList_SET_ITEM(result, output_index++, piece);
+        if (piece_index + 1 < piece_count) {
+            for (Py_ssize_t group_index = 0;
+                 group_index < group_count;
+                 ++group_index) {
+                PyObject *group = PyTuple_GET_ITEM(args[2], group_index);
+                Py_INCREF(group);
+                PyList_SET_ITEM(result, output_index++, group);
+            }
+        }
+    }
+    Py_DECREF(pieces);
+    return result;
+}
+
+static PyObject *
 Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
     if (nargs != 2 && nargs != 3) {
@@ -5143,6 +5239,7 @@ static PyMethodDef Pattern_methods[] = {
     {"fullmatch", (PyCFunction)Pattern_fullmatch_method, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Require the pattern to match the entire subject." )},
     {"_findall_fast", (PyCFunction)(void(*)(void))Pattern_findall_fast, METH_FASTCALL, NULL},
     {"_split_literal_capture_fast", (PyCFunction)(void(*)(void))Pattern_split_literal_capture_fast, METH_FASTCALL, NULL},
+    {"_split_literal_captures_fast", (PyCFunction)(void(*)(void))Pattern_split_literal_captures_fast, METH_FASTCALL, NULL},
     {"_substitute_fast", (PyCFunction)(void(*)(void))Pattern_substitute_fast, METH_FASTCALL, NULL},
     {"_substitute_python_fast", (PyCFunction)(void(*)(void))Pattern_substitute_python_fast, METH_FASTCALL, NULL},
     {"_match_fast", (PyCFunction)(void(*)(void))Pattern_match_fast, METH_FASTCALL, NULL},
@@ -5243,11 +5340,13 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     /* Python text is guaranteed to encode as valid UTF-8, but arbitrary
      * bytes are not.  PCRE2_NO_UTF_CHECK makes validity a hard caller
      * precondition; forwarding malformed bytes invokes undefined behavior in
-     * the compiler.  Validate bytes patterns in PCRE2 while retaining the
-     * requested option in Pattern.flags after a successful compile. */
+     * the compiler.  An inline option such as (?u) can enable UTF after the
+     * outer options have been parsed, so checking only compile_options & UTF
+     * is not sufficient.  Validate every bytes pattern that asks us to skip
+     * checks, while retaining the requested option in Pattern.flags after a
+     * successful compile. */
     uint32_t engine_compile_options = compile_options;
     int validate_bytes_utf = is_bytes &&
-        (compile_options & PCRE2_UTF) != 0 &&
         (compile_options & PCRE2_NO_UTF_CHECK) != 0;
     if (validate_bytes_utf) {
         engine_compile_options &= ~PCRE2_NO_UTF_CHECK;

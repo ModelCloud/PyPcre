@@ -725,6 +725,19 @@ class Pattern:
                 subject, literal_capture, maxsplit
             )
 
+        literal_multi = self._literal_findall_multi
+        if (
+            self._is_c_pattern
+            and type(self) is Pattern
+            and literal_multi is not None
+            and type(subject) is type(literal_multi[0])
+            and type(maxsplit) is int
+        ):
+            needle, groups = literal_multi
+            return self._pattern._split_literal_captures_fast(
+                subject, needle, groups, maxsplit
+            )
+
         # The common immutable/default shape can go straight to the C splitter.
         # Keep subclasses, buffer exporters, and non-default limits on the
         # compatibility path so their coercion and override semantics remain
