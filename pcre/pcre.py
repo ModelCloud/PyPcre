@@ -1211,6 +1211,22 @@ def parallel_map(
             _should_use_auto_threads(materials)
         return [bound_method(materials[0], pos=pos, endpos=endpos, options=options)]
 
+    # Explicit threading enables safe fan-out, but tiny canonical C jobs are
+    # dominated by queue/executor overhead. Keep auto-threshold semantics
+    # untouched and process at most three short built-in subjects inline.
+    if (
+        mode == _THREAD_MODE_ENABLED
+        and pattern_obj._is_c_pattern
+        and type(pattern_obj) is Pattern
+        and 1 < len(materials) <= 3
+        and all(type(subject) in (str, bytes) for subject in materials)
+        and max(len(subject) for subject in materials) <= 4096
+    ):
+        return [
+            bound_method(subject, pos=pos, endpos=endpos, options=options)
+            for subject in materials
+        ]
+
     if mode == _THREAD_MODE_AUTO and not _should_use_auto_threads(materials):
         return [
             bound_method(subject, pos=pos, endpos=endpos, options=options)

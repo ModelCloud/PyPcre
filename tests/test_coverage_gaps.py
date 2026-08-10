@@ -167,6 +167,8 @@ def test_parallel_map_single_subject_avoids_executor(monkeypatch: pytest.MonkeyP
     )
     results = pcre.parallel_map(pattern, ["123"], method="findall")
     assert results == [["123"]]
+    small_batch = pcre.parallel_map(pattern, ["1", "22", "333"], method="findall")
+    assert small_batch == [["1"], ["22"], ["333"]]
 
 
 def test_parallel_map_invalid_method() -> None:
