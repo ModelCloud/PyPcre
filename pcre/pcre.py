@@ -1179,6 +1179,9 @@ def split(
         and type(maxsplit) is int
         and compiled._is_c_pattern
     ):
+        literal_split = getattr(compiled, "_literal_split", None)
+        if literal_split is not None and type(string) is type(literal_split):
+            return compiled.split(string, maxsplit)
         fast = getattr(compiled._pattern, "_split_fast", None)
         if fast is not None:
             return fast(string, maxsplit)
@@ -1214,6 +1217,9 @@ def subn(
             or (type(repl) is bytes and b"\\" not in repl and b"$" not in repl)
         )
     ):
+        literal_split = getattr(compiled, "_literal_split", None)
+        if literal_split is not None and type(string) is type(literal_split):
+            return compiled.subn(repl, string, count=count)
         fast = getattr(compiled._pattern, "_substitute_fast", None)
         if fast is not None:
             return fast(string, repl)
