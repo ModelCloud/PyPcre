@@ -69,7 +69,7 @@ class TestThreadedBackend(unittest.TestCase):
 
     def test_parallel_map_batches_work_without_changing_order(self):
         pattern = pcre.compile(r"\w+", Flag.THREADS)
-        subjects = ["alpha", "beta", "gamma", "delta", "epsilon"]
+        subjects = [word * 2_000 for word in ("alpha", "beta", "gamma", "delta", "epsilon")]
         executor = thread_utils.ensure_thread_pool(2)
         with (
             mock.patch("pcre.pcre.ensure_thread_pool", return_value=executor),
@@ -84,9 +84,12 @@ class TestThreadedBackend(unittest.TestCase):
 
     def test_pattern_parallel_map(self):
         pattern = pcre.compile(r"\d+", Flag.THREADS)
-        subjects = ["1", "22", "nope", "4444"]
+        subjects = ["1", "22", "nope", "4444", "5", "66", "nope", "7777", "8"]
         results = pattern.parallel_map(subjects, method="findall")
-        self.assertEqual(results, [["1"], ["22"], [], ["4444"]])
+        self.assertEqual(
+            results,
+            [["1"], ["22"], [], ["4444"], ["5"], ["66"], [], ["7777"], ["8"]],
+        )
 
     def test_compile_existing_pattern_toggle(self):
         pattern = pcre.compile(r"foo")
