@@ -109,6 +109,9 @@ _CONFLICTING_FLAGS: tuple[tuple[str, str], ...] = (
 
 
 def _system_seed() -> int:
+    configured = os.getenv("PYPCRE_CLOBBER_SEED")
+    if configured is not None:
+        return int(configured, 0)
     return int.from_bytes(os.urandom(16), "little")
 
 
@@ -299,7 +302,7 @@ def _exercise_pattern(
 
 def test_randomized_clobbering_ci_fuzz() -> None:
     seed = _system_seed()
-    print(f'[test_clobber] seed={seed}')
+    print(f"[test_clobber] seed={seed}", flush=True)
     rng = random.Random(seed)
     deadline = time.monotonic() + _RUN_DURATION_SECONDS
     iterations = 0

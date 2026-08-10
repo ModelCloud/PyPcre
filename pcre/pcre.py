@@ -771,7 +771,7 @@ class Pattern:
             and type(subject) in (str, bytes)
             and type(repl) is type(subject)
             and type(count) is int
-            and count in (0, 1)
+            and 0 <= count <= 8
             and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
             and ("$" not in repl if type(repl) is str else b"$" not in repl)
         ):
@@ -790,7 +790,7 @@ class Pattern:
             and type(subject) in (str, bytes)
             and type(repl) is type(subject)
             and type(count) is int
-            and count in (0, 1)
+            and 0 <= count <= 8
         ):
             fast_substitute = getattr(self._pattern, "_substitute_python_fast", None)
             if fast_substitute is not None:
@@ -1430,7 +1430,7 @@ def subn(
         and type(string) in (str, bytes)
         and type(repl) is type(string)
         and type(count) is int
-        and count in (0, 1)
+        and 0 <= count <= 8
         and compiled._is_c_pattern
         and (
             (type(repl) is str and "\\" not in repl and "$" not in repl)

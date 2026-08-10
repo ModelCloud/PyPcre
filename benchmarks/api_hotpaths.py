@@ -61,8 +61,10 @@ def main() -> int:
         ("bound.split", lambda: pattern.split("x " * 8)),
         ("bound.sub.literal", lambda: pattern.sub("[X]", short_subject)),
         ("bound.sub.literal1", lambda: pattern.sub("[X]", short_subject, count=1)),
+        ("bound.sub.literal4", lambda: pattern.sub("[X]", short_subject, count=4)),
         ("bound.sub.backref", lambda: pattern.sub(r"[\1]", short_subject)),
         ("bound.sub.backref1", lambda: pattern.sub(r"[\1]", short_subject, count=1)),
+        ("bound.sub.backref4", lambda: pattern.sub(r"[\1]", short_subject, count=4)),
         ("bound.sub.explicit", lambda: pattern.sub(r"[\g<1>]", short_subject)),
         (
             "bound.sub.named",

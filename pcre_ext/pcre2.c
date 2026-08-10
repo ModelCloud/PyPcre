@@ -3943,11 +3943,34 @@ Pattern_findall_method(PatternObject *self, PyObject *args, PyObject *kwargs)
     return Pattern_findall(self, subject, pos, endpos, options);
 }
 
+typedef struct {
+    uint32_t limit;
+    int stopped;
+} SubstituteLimitState;
+
+enum {
+    SUBSTITUTE_REPLACEMENT_GENERAL = 0,
+    SUBSTITUTE_REPLACEMENT_LITERAL = 1,
+    SUBSTITUTE_REPLACEMENT_SINGLE_REFERENCE = 2,
+};
+
+static int PCRE2_CALL_CONVENTION
+bounded_substitute_callout(pcre2_substitute_callout_block *block, void *data)
+{
+    SubstituteLimitState *state = (SubstituteLimitState *)data;
+    if (block->subscount > state->limit) {
+        state->stopped = 1;
+        return -1;
+    }
+    return 0;
+}
+
 static PyObject *
 Pattern_substitute(PatternObject *self,
                    PyObject *subject_obj,
                    PyObject *repl_obj,
-                   Py_ssize_t count)
+                   Py_ssize_t count,
+                   int replacement_shape)
 {
     PyObject *result = NULL;
     PyObject *result_tuple = NULL;
@@ -3965,8 +3988,10 @@ Pattern_substitute(PatternObject *self,
     pcre2_jit_stack *jit_stack = NULL;
     int match_data_from_pattern = 0;
     int match_context_from_pattern = 0;
+    int substitute_callout_installed = 0;
 
-    if (count != 0 && count != 1) {
+    if (count < 0 || count > 8 ||
+        (count > 1 && replacement_shape == SUBSTITUTE_REPLACEMENT_GENERAL)) {
         Py_RETURN_NOTIMPLEMENTED;
     }
 
@@ -4058,12 +4083,30 @@ Pattern_substitute(PatternObject *self,
         goto error;
     }
 
-    if (pattern_jit_get(self)) {
+    if (pattern_jit_get(self) || count > 1) {
         match_context = pattern_match_context_acquire(self, 0, &match_context_from_pattern);
         if (match_context == NULL) {
             PyErr_NoMemory();
             goto error;
         }
+    }
+
+    SubstituteLimitState limit_state = {(uint32_t)count, 0};
+
+    if (count > 1) {
+        int callout_rc = pcre2_set_substitute_callout(
+            match_context,
+            bounded_substitute_callout,
+            &limit_state
+        );
+        if (callout_rc < 0) {
+            raise_pcre_error("set_substitute_callout", callout_rc, 0);
+            goto error;
+        }
+        substitute_callout_installed = 1;
+    }
+
+    if (pattern_jit_get(self)) {
         jit_stack = jit_stack_cache_acquire();
         if (jit_stack == NULL) {
             PyErr_NoMemory();
@@ -4075,7 +4118,7 @@ Pattern_substitute(PatternObject *self,
     uint32_t sub_options = PCRE2_SUBSTITUTE_EXTENDED
                          | PCRE2_SUBSTITUTE_UNSET_EMPTY
                          | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
-    if (count == 0) {
+    if (count != 1) {
         sub_options |= PCRE2_SUBSTITUTE_GLOBAL;
     }
     if (!subject_is_bytes) {
@@ -4088,7 +4131,44 @@ Pattern_substitute(PatternObject *self,
         goto error;
     }
     PCRE2_SIZE initial_outlen = (PCRE2_SIZE)(subject_length + repl_length + 16);
+    PCRE2_SIZE bounded_max_outlen = 0;
+    if (count > 1) {
+        if (repl_length > (PY_SSIZE_T_MAX - subject_length - 16) / count) {
+            PyErr_NoMemory();
+            goto error;
+        }
+        initial_outlen = (PCRE2_SIZE)(
+            subject_length + count * repl_length + 16
+        );
+
+        if (replacement_shape == SUBSTITUTE_REPLACEMENT_LITERAL) {
+            bounded_max_outlen = initial_outlen;
+        } else {
+            /* Exactly one capture can contribute at most one whole subject
+             * per accepted replacement. The first allocation uses the usual
+             * compact bound; only a genuine expansion overflow grows
+             * geometrically toward this strict linear ceiling. */
+            if (subject_length > PY_SSIZE_T_MAX - repl_length) {
+                PyErr_NoMemory();
+                goto error;
+            }
+            Py_ssize_t per_replacement = subject_length + repl_length;
+            if (per_replacement >
+                (PY_SSIZE_T_MAX - subject_length - 16) / count) {
+                PyErr_NoMemory();
+                goto error;
+            }
+            bounded_max_outlen = (PCRE2_SIZE)(
+                subject_length + count * per_replacement + 16
+            );
+        }
+        if (bounded_max_outlen < initial_outlen) {
+            PyErr_NoMemory();
+            goto error;
+        }
+    }
     PCRE2_SIZE outlen = initial_outlen;
+    PCRE2_SIZE out_capacity = initial_outlen;
     PCRE2_UCHAR *out = (PCRE2_UCHAR *)PyMem_Malloc(outlen);
     if (out == NULL) {
         PyErr_NoMemory();
@@ -4096,6 +4176,7 @@ Pattern_substitute(PatternObject *self,
     }
 
     for (int attempts = 0; attempts < 5; ++attempts) {
+        limit_state.stopped = 0;
         int rc = pcre2_substitute(self->code,
                                   (PCRE2_SPTR)subject_data,
                                   (PCRE2_SIZE)subject_length,
@@ -4109,7 +4190,16 @@ Pattern_substitute(PatternObject *self,
                                   &outlen);
         if (rc == PCRE2_ERROR_NOMEMORY) {
             PCRE2_SIZE required = outlen;
-            if (required == (PCRE2_SIZE)-1) {
+            if (count > 1) {
+                if (out_capacity >= bounded_max_outlen) {
+                    PyMem_Free(out);
+                    PyErr_NoMemory();
+                    goto error;
+                }
+                required = out_capacity <= bounded_max_outlen / 2
+                    ? out_capacity * 2
+                    : bounded_max_outlen;
+            } else if (required == (PCRE2_SIZE)-1) {
                 if ((PCRE2_SIZE)subject_length > (PCRE2_SIZE)PY_SSIZE_T_MAX - initial_outlen) {
                     PyMem_Free(out);
                     PyErr_NoMemory();
@@ -4132,6 +4222,7 @@ Pattern_substitute(PatternObject *self,
                 goto error;
             }
             out = (PCRE2_UCHAR *)new_out;
+            out_capacity = required;
             outlen = required;
             continue;
         }
@@ -4140,6 +4231,11 @@ Pattern_substitute(PatternObject *self,
             PyMem_Free(out);
             raise_pcre_error("substitute", rc, error_offset);
             goto error;
+        }
+        if (count > 1 && limit_state.stopped && rc > 0) {
+            /* PCRE2 includes the rejected stopping match in its return value;
+             * public subn() counts accepted replacements only. */
+            rc -= 1;
         }
 
         PyObject *out_obj = NULL;
@@ -4184,6 +4280,16 @@ error:
     result = NULL;
 
 cleanup:
+    if (substitute_callout_installed && match_context != NULL) {
+        int clear_rc = pcre2_set_substitute_callout(match_context, NULL, NULL);
+        if (clear_rc < 0) {
+            /* Never publish a context that could retain a pointer to the
+             * stack-local limit state, even if a future PCRE2 build reports a
+             * failure while clearing the callout. */
+            pcre2_match_context_free(match_context);
+            match_context = NULL;
+        }
+    }
     if (jit_stack != NULL) {
         if (match_context != NULL) {
             pcre2_jit_stack_assign(match_context, NULL, NULL);
@@ -4213,7 +4319,13 @@ Pattern_substitute_method(PatternObject *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    return Pattern_substitute(self, subject, replacement, count);
+    return Pattern_substitute(
+        self,
+        subject,
+        replacement,
+        count,
+        SUBSTITUTE_REPLACEMENT_GENERAL
+    );
 }
 
 static PyObject *
@@ -4551,7 +4663,28 @@ Pattern_substitute_fast(PatternObject *self, PyObject *const *args, Py_ssize_t n
             return NULL;
         }
     }
-    return Pattern_substitute(self, args[0], args[1], count);
+    int replacement_shape = SUBSTITUTE_REPLACEMENT_GENERAL;
+    if (count > 1) {
+        if (PyBytes_CheckExact(args[1])) {
+            const char *data = PyBytes_AS_STRING(args[1]);
+            Py_ssize_t length = PyBytes_GET_SIZE(args[1]);
+            if (memchr(data, '\\', (size_t)length) == NULL &&
+                memchr(data, '$', (size_t)length) == NULL) {
+                replacement_shape = SUBSTITUTE_REPLACEMENT_LITERAL;
+            }
+        } else if (PyUnicode_CheckExact(args[1]) &&
+                   PyUnicode_FindChar(
+                       args[1], '\\', 0, PyUnicode_GET_LENGTH(args[1]), 1
+                   ) < 0 &&
+                   PyUnicode_FindChar(
+                       args[1], '$', 0, PyUnicode_GET_LENGTH(args[1]), 1
+                   ) < 0) {
+            replacement_shape = SUBSTITUTE_REPLACEMENT_LITERAL;
+        }
+    }
+    return Pattern_substitute(
+        self, args[0], args[1], count, replacement_shape
+    );
 }
 
 static int
@@ -4792,7 +4925,13 @@ Pattern_substitute_python_fast(PatternObject *self,
         }
         Py_RETURN_NOTIMPLEMENTED;
     }
-    PyObject *result = Pattern_substitute(self, args[0], replacement, count);
+    PyObject *result = Pattern_substitute(
+        self,
+        args[0],
+        replacement,
+        count,
+        SUBSTITUTE_REPLACEMENT_SINGLE_REFERENCE
+    );
     Py_DECREF(replacement);
     return result;
 }
