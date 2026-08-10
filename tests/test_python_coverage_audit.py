@@ -183,6 +183,18 @@ def test_compile_legacy_default_fallback_and_subject_length(
     monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: False)
     compiled = pcre_mod.compile(bytearray(b"x"))
     assert compiled.thread_mode == pcre_mod._THREAD_MODE_DISABLED
+    assert (
+        pcre_mod.compile(bytearray(b"x"), flags=int(pcre.Flag.THREADS)).thread_mode
+        == pcre_mod._THREAD_MODE_ENABLED
+    )
+    assert (
+        pcre_mod.compile(bytearray(b"x"), flags=int(pcre.Flag.NO_THREADS)).thread_mode
+        == pcre_mod._THREAD_MODE_DISABLED
+    )
+    assert (
+        pcre_mod.compile(bytearray(b"x"), flags=int(pcre.Flag.CASELESS)).thread_mode
+        == pcre_mod._THREAD_MODE_DISABLED
+    )
     assert pcre_mod._subject_length(bytearray(b"x")) == 1
 
 
@@ -196,6 +208,8 @@ def test_flagged_builtin_compile_cache_tracks_mode_and_limits(
     first = pcre.compile("flag-cache", flags=flags)
     assert pcre.compile("flag-cache", flags=flags) is first
     assert first.thread_mode == pcre_mod._THREAD_MODE_AUTO
+    enum_first = pcre.compile("enum-cache", flags=pcre.Flag.CASELESS)
+    assert pcre.compile("enum-cache", flags=pcre.Flag.CASELESS) is enum_first
 
     monkeypatch.setattr(pcre_mod, "get_thread_default", lambda: False)
     assert pcre.compile("flag-cache", flags=flags) is first
@@ -218,6 +232,13 @@ def test_flagged_builtin_compile_cache_tracks_mode_and_limits(
     finally:
         cache_mod.set_cache_limit(original_limit)
         pcre.clear_cache()
+
+
+def test_module_helpers_accept_project_flag_enum_zero() -> None:
+    assert pcre.match("x", "x", pcre.Flag(0)) is not None
+    assert pcre.findall("x", "xx", pcre.Flag(0)) == ["x", "x"]
+    assert pcre.split("x", "xx", flags=pcre.Flag(0)) == ["", "", ""]
+    assert pcre.sub("x", "y", "xx", flags=pcre.Flag(0)) == "yy"
 
 
 def test_replacement_fallbacks_cover_subclasses_and_bounded_templates() -> None:

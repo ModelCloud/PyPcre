@@ -972,7 +972,7 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
                 wrapper.disable_threads()
         return wrapper
 
-    if type(pattern) in (str, bytes) and type(flags) is int:
+    if type(pattern) in (str, bytes) and type(flags) in (int, Flag):
         if cached_compile is _ORIGINAL_CACHED_COMPILE:
             return _compile_flagged_builtin(
                 pattern,
@@ -1018,7 +1018,7 @@ def _cached_module_pattern(
 
 
 def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
-    if type(pattern) in (str, bytes) and type(flags) is int and flags == 0:
+    if type(pattern) in (str, bytes) and type(flags) in (int, Flag) and flags == 0:
         return _cached_module_pattern(pattern, _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX)
     return compile(pattern, flags=flags)
 
@@ -1027,7 +1027,7 @@ def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: str) -> 
     compiled = _module_compile(pattern, flags)
     if (
         type(pattern) in (str, bytes)
-        and type(flags) is int
+        and type(flags) in (int, Flag)
         and flags == 0
         and type(string) in (str, bytes)
         and compiled._is_c_pattern
@@ -1071,7 +1071,7 @@ def split(
     compiled = _module_compile(pattern, flags)
     if (
         type(pattern) in (str, bytes)
-        and type(flags) is int
+        and type(flags) in (int, Flag)
         and flags == 0
         and type(string) in (str, bytes)
         and type(maxsplit) is int
@@ -1100,7 +1100,7 @@ def subn(
     compiled = _module_compile(pattern, flags)
     if (
         type(pattern) in (str, bytes)
-        and type(flags) is int
+        and type(flags) in (int, Flag)
         and flags == 0
         and type(string) in (str, bytes)
         and type(repl) is type(string)
