@@ -22,7 +22,6 @@ from collections.abc import Callable
 
 import pcre
 
-
 RUNS = int(os.getenv("PYPCRE_BENCH_RUNS", "50000"))
 
 
@@ -50,6 +49,8 @@ def main() -> int:
         ("bound.sub.literal", lambda: pattern.sub("[X]", short_subject)),
         ("bound.sub.backref", lambda: pattern.sub(r"[\1]", short_subject)),
         ("match.groups", captured.groups),
+        ("match.expand.numeric", lambda: captured.expand(r"[\1]")),
+        ("match.expand.named", lambda: captured.expand(r"[\g<1>]")),
         ("module.match", lambda: pcre.match("(x)", subject)),
         ("module.search", lambda: pcre.search("(x)", subject)),
         ("module.fullmatch", lambda: pcre.fullmatch("(x)", subject)),

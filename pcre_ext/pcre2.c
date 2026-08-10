@@ -1065,6 +1065,169 @@ Match_get_regs(MatchObject *self, void *closure)
 }
 
 static PyObject *
+match_expand_simple_numeric(MatchObject *self,
+                            PyObject *template_obj,
+                            Py_ssize_t slash_index,
+                            Py_ssize_t template_length,
+                            int *handled)
+{
+    *handled = 0;
+    if (slash_index < 0 || slash_index + 1 >= template_length) {
+        return NULL;
+    }
+
+    int digit = -1;
+    if (!self->subject_is_bytes && PyUnicode_CheckExact(template_obj)) {
+        Py_UCS4 character = PyUnicode_ReadChar(template_obj, slash_index + 1);
+        if (character == (Py_UCS4)-1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        if (character < '1' || character > '9') {
+            return NULL;
+        }
+        if (slash_index + 2 < template_length) {
+            Py_UCS4 following = PyUnicode_ReadChar(template_obj, slash_index + 2);
+            if (following == (Py_UCS4)-1 && PyErr_Occurred()) {
+                return NULL;
+            }
+            if (following >= '0' && following <= '9') {
+                return NULL;
+            }
+            Py_ssize_t next_slash = PyUnicode_FindChar(
+                template_obj,
+                '\\',
+                slash_index + 2,
+                template_length,
+                1
+            );
+            if (next_slash >= 0) {
+                return NULL;
+            }
+            if (PyErr_Occurred()) {
+                return NULL;
+            }
+        }
+        digit = (int)(character - '0');
+    } else if (self->subject_is_bytes && PyBytes_CheckExact(template_obj)) {
+        const unsigned char *template_data = (const unsigned char *)PyBytes_AS_STRING(template_obj);
+        unsigned char character = template_data[slash_index + 1];
+        if (character < '1' || character > '9') {
+            return NULL;
+        }
+        if (slash_index + 2 < template_length) {
+            unsigned char following = template_data[slash_index + 2];
+            if (following >= '0' && following <= '9') {
+                return NULL;
+            }
+            if (memchr(template_data + slash_index + 2,
+                       '\\',
+                       (size_t)(template_length - slash_index - 2)) != NULL) {
+                return NULL;
+            }
+        }
+        digit = (int)(character - '0');
+    } else {
+        return NULL;
+    }
+
+    if (digit <= 0 || (size_t)digit >= self->ovec_count) {
+        return NULL;
+    }
+
+    PyObject *group = match_get_group_value(self, (Py_ssize_t)digit);
+    if (group == NULL) {
+        return NULL;
+    }
+    *handled = 1;
+
+    if (group == Py_None) {
+        Py_DECREF(group);
+        group = NULL;
+    }
+
+    Py_ssize_t suffix_start = slash_index + 2;
+    Py_ssize_t suffix_length = template_length - suffix_start;
+    if (slash_index == 0 && suffix_length == 0) {
+        if (group != NULL) {
+            return group;
+        }
+        return self->subject_is_bytes
+            ? PyBytes_FromStringAndSize("", 0)
+            : PyUnicode_New(0, 127);
+    }
+
+    Py_ssize_t group_length = group == NULL ? 0 : PyObject_Length(group);
+    if (group_length < 0) {
+        Py_XDECREF(group);
+        return NULL;
+    }
+    if (group_length > PY_SSIZE_T_MAX - slash_index - suffix_length) {
+        Py_XDECREF(group);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    Py_ssize_t result_length = slash_index + group_length + suffix_length;
+
+    if (self->subject_is_bytes) {
+        PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
+        if (result == NULL) {
+            Py_XDECREF(group);
+            return NULL;
+        }
+        char *output = PyBytes_AS_STRING(result);
+        const char *template_data = PyBytes_AS_STRING(template_obj);
+        memcpy(output, template_data, (size_t)slash_index);
+        if (group != NULL && group_length > 0) {
+            memcpy(output + slash_index,
+                   PyBytes_AS_STRING(group),
+                   (size_t)group_length);
+        }
+        memcpy(output + slash_index + group_length,
+               template_data + suffix_start,
+               (size_t)suffix_length);
+        Py_XDECREF(group);
+        return result;
+    }
+
+    Py_UCS4 max_character = PyUnicode_MAX_CHAR_VALUE(template_obj);
+    if (group != NULL) {
+        Py_UCS4 group_max = PyUnicode_MAX_CHAR_VALUE(group);
+        if (group_max > max_character) {
+            max_character = group_max;
+        }
+    }
+    PyObject *result = PyUnicode_New(result_length, max_character);
+    if (result == NULL) {
+        Py_XDECREF(group);
+        return NULL;
+    }
+    if (slash_index > 0 &&
+        PyUnicode_CopyCharacters(result, 0, template_obj, 0, slash_index) < 0) {
+        Py_DECREF(result);
+        Py_XDECREF(group);
+        return NULL;
+    }
+    if (group != NULL && group_length > 0 &&
+        PyUnicode_CopyCharacters(result, slash_index, group, 0, group_length) < 0) {
+        Py_DECREF(result);
+        Py_DECREF(group);
+        return NULL;
+    }
+    if (suffix_length > 0 &&
+        PyUnicode_CopyCharacters(result,
+                                 slash_index + group_length,
+                                 template_obj,
+                                 suffix_start,
+                                 suffix_length) < 0) {
+        Py_DECREF(result);
+        Py_XDECREF(group);
+        return NULL;
+    }
+    Py_XDECREF(group);
+    return result;
+}
+
+static PyObject *
 Match_expand(MatchObject *self, PyObject *template_obj)
 {
     /* A template without a backslash has no group references or escapes.
@@ -1074,9 +1237,20 @@ Match_expand(MatchObject *self, PyObject *template_obj)
        in PyUnicode_FromObject. */
     if (!self->subject_is_bytes && PyUnicode_Check(template_obj)) {
         Py_ssize_t template_length = PyUnicode_GET_LENGTH(template_obj);
-        if (PyUnicode_FindChar(template_obj, '\\', 0, template_length, 1) < 0 &&
-            !PyErr_Occurred()) {
+        Py_ssize_t slash_index = PyUnicode_FindChar(
+            template_obj, '\\', 0, template_length, 1
+        );
+        if (slash_index < 0 && !PyErr_Occurred()) {
             return PyUnicode_FromObject(template_obj);
+        }
+        if (slash_index >= 0 && PyUnicode_CheckExact(template_obj)) {
+            int handled = 0;
+            PyObject *result = match_expand_simple_numeric(
+                self, template_obj, slash_index, template_length, &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
         }
         PyErr_Clear();
     }
@@ -1088,8 +1262,22 @@ Match_expand(MatchObject *self, PyObject *template_obj)
         Py_ssize_t template_length = PyBytes_Check(template_obj)
             ? PyBytes_GET_SIZE(template_obj)
             : PyByteArray_GET_SIZE(template_obj);
-        if (memchr(template_data, '\\', (size_t)template_length) == NULL) {
+        const char *slash = memchr(template_data, '\\', (size_t)template_length);
+        if (slash == NULL) {
             return PyBytes_FromObject(template_obj);
+        }
+        if (PyBytes_CheckExact(template_obj)) {
+            int handled = 0;
+            PyObject *result = match_expand_simple_numeric(
+                self,
+                template_obj,
+                (Py_ssize_t)(slash - template_data),
+                template_length,
+                &handled
+            );
+            if (handled || result != NULL || PyErr_Occurred()) {
+                return result;
+            }
         }
     }
 
