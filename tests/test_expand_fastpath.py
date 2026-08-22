@@ -219,6 +219,35 @@ def test_nine_references_stay_on_compatibility_parser(
 
 
 @pytest.mark.parametrize(
+    ("pattern", "subject", "template"),
+    [
+        (r"(a)", "a", r"\g<"),
+        (r"(a)", "a", r"\g<>"),
+        (r"(a)", "a", r"\g<missing>"),
+        (b"(a)", b"a", rb"\g<"),
+        (b"(a)", b"a", rb"\g<>"),
+        (b"(a)", b"a", rb"\g<missing>"),
+    ],
+)
+def test_malformed_replacement_tokens_fail_without_native_state_corruption(
+    pattern, subject, template
+) -> None:
+    actual = pcre.compile(pattern).fullmatch(subject)
+    expected = re.fullmatch(pattern, subject)
+    assert actual is not None and expected is not None
+
+    with pytest.raises((re.error, IndexError)) as expected_error:
+        expected.expand(template)
+    with pytest.raises(type(expected_error.value)):
+        actual.expand(template)
+
+    # A failed bounded/native parse must leave the match usable for a later
+    # valid expansion, including on the free-threaded extension build.
+    valid_template = template[:0] + (r"\1" if isinstance(template, str) else rb"\1")
+    assert actual.expand(valid_template) == subject
+
+
+@pytest.mark.parametrize(
     ("pattern", "subject"),
     [
         (r"(?P<first>a)?(?P<second>b)?", "a"),

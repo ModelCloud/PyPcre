@@ -683,16 +683,27 @@ Match_groupdict(MatchObject *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
-    PyObject *key, *value;
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(self->pattern->groupindex, &pos, &key, &value)) {
+    /* ``groupindex`` is exposed as a read-only mapping, but taking a list
+       snapshot avoids relying on PyDict_Next borrowed-entry traversal when
+       this extension runs on a free-threaded interpreter. */
+    PyObject *items = PyDict_Items(self->pattern->groupindex);
+    if (items == NULL) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    Py_ssize_t item_count = PyList_GET_SIZE(items);
+    for (Py_ssize_t item_pos = 0; item_pos < item_count; ++item_pos) {
+        PyObject *item = PyList_GET_ITEM(items, item_pos);
+        PyObject *key = PyTuple_GET_ITEM(item, 0);
         Py_ssize_t index = 0;
         if (resolve_group_key(self, key, &index) < 0) {
+            Py_DECREF(items);
             Py_DECREF(result);
             return NULL;
         }
         PyObject *group_value = match_get_group_value(self, index);
         if (group_value == NULL) {
+            Py_DECREF(items);
             Py_DECREF(result);
             return NULL;
         }
@@ -703,11 +714,13 @@ Match_groupdict(MatchObject *self, PyObject *args, PyObject *kwargs)
         }
         if (PyDict_SetItem(result, key, group_value) < 0) {
             Py_DECREF(group_value);
+            Py_DECREF(items);
             Py_DECREF(result);
             return NULL;
         }
         Py_DECREF(group_value);
     }
+    Py_DECREF(items);
 
     return result;
 }
@@ -1647,7 +1660,7 @@ match_expand_multiple_tokens(MatchObject *self,
                              int *handled)
 {
     *handled = 0;
-    MatchExpandToken references[MATCH_EXPAND_MAX_TOKENS];
+    MatchExpandToken references[MATCH_EXPAND_MAX_TOKENS] = {{0}};
     PyObject *groups[MATCH_EXPAND_MAX_TOKENS] = {NULL};
     Py_ssize_t group_offsets[MATCH_EXPAND_MAX_TOKENS] = {0};
     Py_ssize_t group_lengths[MATCH_EXPAND_MAX_TOKENS] = {0};
