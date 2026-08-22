@@ -74,6 +74,12 @@ FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 
 _DEFAULT_JIT = True
 _DEFAULT_COMPAT_REGEX = False
+# Compile defaults are published as one immutable tuple.  A module-global
+# reference load is the hot-path read; configure() serializes writers and
+# publishes the tuple after updating the legacy globals.  The legacy globals
+# remain as a compatibility seam for tests and existing internal users that
+# monkeypatch them directly.
+_DEFAULT_CONFIG: tuple[bool, bool] = (True, False)
 _DEFAULT_CONFIG_LOCK = RLock()
 _DEFAULT_COMPILE_LOCAL = local()
 _LOCAL_CACHE_NAMES = ("cache", "flagged_cache")
@@ -150,16 +156,14 @@ def _can_attach_match(raw: Any) -> bool:
 
 def _resolve_jit_setting(jit: bool | None) -> bool:
     if jit is None:
-        with _DEFAULT_CONFIG_LOCK:
-            return bool(_DEFAULT_JIT)
+        return _default_config_snapshot()[0]
     return bool(jit)
 
 
 def _default_config_snapshot() -> tuple[bool, bool]:
-    """Read global compile defaults as one immutable configuration snapshot."""
+    """Read the atomically published compile-default snapshot."""
 
-    with _DEFAULT_CONFIG_LOCK:
-        return bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX)
+    return _DEFAULT_CONFIG
 
 
 def _extract_jit_override(flags: int) -> bool | None:
@@ -177,6 +181,7 @@ try:  # pragma: no cover - defensive fallback if backend lacks configure
     _DEFAULT_JIT = bool(_pcre2.configure())
 except AttributeError:  # pragma: no cover - legacy backend without configure helper
     _DEFAULT_JIT = True
+_DEFAULT_CONFIG = (bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX))
 
 _STD_RE_FLAG_MAP: dict[_std_re.RegexFlag, int] = {
     _std_re.RegexFlag.IGNORECASE: _pcre2.PCRE2_CASELESS,
@@ -406,12 +411,15 @@ class Pattern:
 
     @property
     def thread_mode(self) -> str:
-        with self._thread_mode_lock:
-            return self._thread_mode
+        # ``_thread_mode`` is always one of the immutable module constants.
+        # Free-threaded CPython publishes this single object reference without
+        # torn reads; writers still serialize transitions for last-writer
+        # semantics without putting a lock on every match/search call.
+        return self._thread_mode
 
     @property
     def use_threads(self) -> bool:
-        return self.thread_mode == _THREAD_MODE_ENABLED
+        return self._thread_mode == _THREAD_MODE_ENABLED
 
     def enable_threads(self) -> None:
         with self._thread_mode_lock:
@@ -1774,7 +1782,7 @@ def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> b
     ``compat_regex`` to change the default behaviour for :data:`Flag.COMPAT_UNICODE_ESCAPE`.
     """
 
-    global _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX
+    global _DEFAULT_CONFIG, _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX
 
     with _DEFAULT_CONFIG_LOCK:
         if compat_regex is not None:
@@ -1785,6 +1793,7 @@ def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> b
                 _DEFAULT_JIT = bool(_pcre2.configure())
             except AttributeError:  # pragma: no cover - legacy backend without helper
                 pass
+            _DEFAULT_CONFIG = (bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX))
             return bool(_DEFAULT_JIT)
 
         new_value = bool(jit)
@@ -1792,6 +1801,7 @@ def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> b
             _DEFAULT_JIT = bool(_pcre2.configure(jit=new_value))
         except AttributeError:  # pragma: no cover - legacy backend without helper
             _DEFAULT_JIT = new_value
+        _DEFAULT_CONFIG = (bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX))
         return bool(_DEFAULT_JIT)
 
 

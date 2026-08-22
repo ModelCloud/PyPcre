@@ -3,11 +3,11 @@
 
 import types
 
-import pcre
 import pytest
+
+import pcre
 from pcre import Flag
 from pcre import pcre as core
-
 
 _BAD_OPTION_SENTINEL = 0xFFFFFFFF
 
@@ -40,6 +40,7 @@ def test_flag_jit_forces_enable(monkeypatch):
 
     monkeypatch.setattr(core, "cached_compile", fake_cached)
     monkeypatch.setattr(core, "_DEFAULT_JIT", False)
+    monkeypatch.setattr(core, "_DEFAULT_CONFIG", (False, core._DEFAULT_COMPAT_REGEX))
 
     compiled = pcre.compile("expr", flags=Flag.JIT)
 
@@ -57,6 +58,7 @@ def test_flag_no_jit_disables_when_default_enabled(monkeypatch):
 
     monkeypatch.setattr(core, "cached_compile", fake_cached)
     monkeypatch.setattr(core, "_DEFAULT_JIT", True)
+    monkeypatch.setattr(core, "_DEFAULT_CONFIG", (True, core._DEFAULT_COMPAT_REGEX))
 
     compiled = pcre.compile("expr", flags=Flag.NO_JIT)
 
@@ -81,6 +83,7 @@ def test_configure_updates_default(monkeypatch):
 
     monkeypatch.setattr(core._pcre2, "configure", fake_configure)
     monkeypatch.setattr(core, "_DEFAULT_JIT", True)
+    monkeypatch.setattr(core, "_DEFAULT_CONFIG", (True, core._DEFAULT_COMPAT_REGEX))
 
     assert pcre.configure(jit=False) is False
     assert core._DEFAULT_JIT is False
@@ -107,6 +110,7 @@ def test_default_follows_configure(monkeypatch):
 
     monkeypatch.setattr(core, "cached_compile", fake_cached)
     monkeypatch.setattr(core, "_DEFAULT_JIT", True)
+    monkeypatch.setattr(core, "_DEFAULT_CONFIG", (True, core._DEFAULT_COMPAT_REGEX))
     monkeypatch.setattr(core._pcre2, "configure", fake_configure)
 
     pcre.configure(jit=False)
@@ -146,6 +150,7 @@ def test_flag_no_jit_does_not_change_global_default(monkeypatch):
 
     monkeypatch.setattr(core, "cached_compile", fake_cached)
     monkeypatch.setattr(core, "_DEFAULT_JIT", True)
+    monkeypatch.setattr(core, "_DEFAULT_CONFIG", (True, core._DEFAULT_COMPAT_REGEX))
 
     first = pcre.compile("expr")
     second = pcre.compile("expr", flags=Flag.NO_JIT)

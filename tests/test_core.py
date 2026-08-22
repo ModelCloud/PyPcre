@@ -3,6 +3,7 @@ import types
 from collections import OrderedDict
 
 import pytest
+
 from pcre import Flag
 from pcre import cache as cache_mod
 from pcre import pcre as core
@@ -253,6 +254,7 @@ def test_compile_uses_global_regex_compat(monkeypatch):
 
     monkeypatch.setattr(core, "cached_compile", fake_cached)
     monkeypatch.setattr(core, "_DEFAULT_COMPAT_REGEX", True)
+    monkeypatch.setattr(core, "_DEFAULT_CONFIG", (core._DEFAULT_JIT, True))
 
     compiled = core.compile("\\u0041")
 
