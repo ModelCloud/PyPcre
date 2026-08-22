@@ -11,7 +11,7 @@ import re as _std_re
 import warnings as _warnings
 from collections.abc import Iterable, Iterator, Mapping
 from functools import lru_cache
-from threading import local
+from threading import RLock, local
 from typing import Any, List
 
 import pcre_ext_c as _pcre2
@@ -59,6 +59,7 @@ from .threads import (
     get_auto_threshold,
     get_thread_default,
     get_thread_pool_size,
+    submit_thread_pool_tasks,
     threading_supported,
 )
 
@@ -73,6 +74,7 @@ FlagInput = int | _std_re.RegexFlag | Iterable[int | _std_re.RegexFlag]
 
 _DEFAULT_JIT = True
 _DEFAULT_COMPAT_REGEX = False
+_DEFAULT_CONFIG_LOCK = RLock()
 _DEFAULT_COMPILE_LOCAL = local()
 _LOCAL_CACHE_NAMES = ("cache", "flagged_cache")
 
@@ -148,8 +150,16 @@ def _can_attach_match(raw: Any) -> bool:
 
 def _resolve_jit_setting(jit: bool | None) -> bool:
     if jit is None:
-        return _DEFAULT_JIT
+        with _DEFAULT_CONFIG_LOCK:
+            return bool(_DEFAULT_JIT)
     return bool(jit)
+
+
+def _default_config_snapshot() -> tuple[bool, bool]:
+    """Read global compile defaults as one immutable configuration snapshot."""
+
+    with _DEFAULT_CONFIG_LOCK:
+        return bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX)
 
 
 def _extract_jit_override(flags: int) -> bool | None:
@@ -302,19 +312,21 @@ class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
     __slots__ = (
-        "_pattern",
         "_groups_hint",
-        "_thread_mode",
         "_is_c_pattern",
         "_literal_findall",
         "_literal_findall_multi",
         "_literal_split",
+        "_pattern",
+        "_thread_mode",
+        "_thread_mode_lock",
     )
 
     def __init__(self, pattern: _CPattern) -> None:
         self._pattern = pattern
         self._is_c_pattern = isinstance(pattern, _CPattern)
         self._thread_mode = _THREAD_MODE_DISABLED
+        self._thread_mode_lock = RLock()
         try:
             self._groups_hint = pattern.capture_count
         except AttributeError:  # pragma: no cover - older extension fallback
@@ -394,20 +406,24 @@ class Pattern:
 
     @property
     def thread_mode(self) -> str:
-        return self._thread_mode
+        with self._thread_mode_lock:
+            return self._thread_mode
 
     @property
     def use_threads(self) -> bool:
-        return self._thread_mode == _THREAD_MODE_ENABLED
+        return self.thread_mode == _THREAD_MODE_ENABLED
 
     def enable_threads(self) -> None:
-        self._thread_mode = _THREAD_MODE_ENABLED
+        with self._thread_mode_lock:
+            self._thread_mode = _THREAD_MODE_ENABLED
 
     def disable_threads(self) -> None:
-        self._thread_mode = _THREAD_MODE_DISABLED
+        with self._thread_mode_lock:
+            self._thread_mode = _THREAD_MODE_DISABLED
 
     def enable_auto_threads(self) -> None:
-        self._thread_mode = _THREAD_MODE_AUTO
+        with self._thread_mode_lock:
+            self._thread_mode = _THREAD_MODE_AUTO
 
     def _update_group_hint(self, match: Match) -> None:
         if self._groups_hint is not None:
@@ -1054,7 +1070,7 @@ class Pattern:
         options: int = 0,
         max_workers: int | None = None,
     ) -> List[Any]:
-        if self._thread_mode == _THREAD_MODE_DISABLED:
+        if self.thread_mode == _THREAD_MODE_DISABLED:
             raise RuntimeError(
                 "Pattern not enabled for threaded execution; compile with Flag.THREADS "
                 "or configure threading defaults."
@@ -1145,11 +1161,12 @@ def _policy_wrapper(compiled: Pattern, thread_mode: str) -> Pattern:
 
 def _compile_default_builtin(pattern: str | bytes) -> Pattern:
     """Compile an exact built-in pattern through a per-thread direct cache."""
+    default_jit, default_compat = _default_config_snapshot()
     thread_mode = _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
     return _compile_default_snapshot(
         pattern,
-        bool(_DEFAULT_JIT),
-        bool(_DEFAULT_COMPAT_REGEX),
+        default_jit,
+        default_compat,
         thread_mode,
     )
 
@@ -1223,6 +1240,8 @@ def _compile_flagged_builtin(
 
 
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
+    default_jit, default_compat = _default_config_snapshot()
+
     # Fast path for the dominant shape: compile(pattern) with default flags.
     if flags == 0:
         if isinstance(pattern, Pattern):
@@ -1239,13 +1258,13 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
         if type(pattern) in (str, bytes) and cached_compile is _ORIGINAL_CACHED_COMPILE:
             return _compile_default_builtin(pattern)
 
-        adjusted_pattern = _apply_regex_compat(pattern, bool(_DEFAULT_COMPAT_REGEX))
+        adjusted_pattern = _apply_regex_compat(pattern, default_compat)
         if isinstance(adjusted_pattern, str):
             native_flags = _pcre2.PCRE2_UTF | _pcre2.PCRE2_UCP
         else:
             native_flags = 0
         compiled = cached_compile(
-            adjusted_pattern, native_flags, Pattern, jit=_DEFAULT_JIT
+            adjusted_pattern, native_flags, Pattern, jit=default_jit
         )
         thread_mode = (
             _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
@@ -1268,8 +1287,8 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
         return _compile_flagged_builtin(
             pattern,
             resolved_stdlib_flags,
-            bool(_DEFAULT_JIT),
-            bool(_DEFAULT_COMPAT_REGEX),
+            default_jit,
+            default_compat,
             thread_mode,
         )
 
@@ -1285,7 +1304,7 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
     )
     jit_override = _extract_jit_override(resolved_flags_no_thread_markers)
     resolved_jit = _resolve_jit_setting(jit_override)
-    compat_enabled = bool(_DEFAULT_COMPAT_REGEX or compat_requested)
+    compat_enabled = bool(default_compat or compat_requested)
 
     if threads_requested:
         thread_mode = _THREAD_MODE_ENABLED
@@ -1411,10 +1430,11 @@ _cached_module_pattern.cache_clear = _clear_module_cache  # type: ignore[attr-de
 
 def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
     if type(pattern) in (str, bytes) and type(flags) in (int, Flag) and flags == 0:
+        default_jit, default_compat = _default_config_snapshot()
         thread_mode = (
             _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
         )
-        key = (pattern, bool(_DEFAULT_JIT), bool(_DEFAULT_COMPAT_REGEX), thread_mode)
+        key = (pattern, default_jit, default_compat, thread_mode)
         if (
             getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) == get_cache_epoch()
             and getattr(_DEFAULT_COMPILE_LOCAL, "module_hot_key", None) == key
@@ -1422,8 +1442,8 @@ def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
             return _DEFAULT_COMPILE_LOCAL.module_hot_value
         compiled = _cached_module_pattern(
             pattern,
-            _DEFAULT_JIT,
-            _DEFAULT_COMPAT_REGEX,
+            default_jit,
+            default_compat,
             thread_mode,
         )
         if _DEFAULT_COMPILE_LOCAL.effective_limit > 0 and cache_input_allowed(pattern):
@@ -1678,7 +1698,10 @@ def parallel_map(
             for subject in materials
         ]
 
-    executor = ensure_thread_pool(max_workers)
+    # Preserve eager pool creation and the established instrumentation seam;
+    # the submission helper below still revalidates the live pool while holding
+    # the lifecycle lock, so this return value is never used after the lease.
+    ensure_thread_pool(max_workers)
 
     # For the common default lookup shape, the C backend can execute directly
     # without rebuilding the Python wrapper's keyword arguments for every
@@ -1710,6 +1733,9 @@ def parallel_map(
     # calls are already independent and release the interpreter lock for long
     # subjects.  Batches preserve input order and retain the same exception
     # propagation behavior as the one-Future implementation.
+    # Pool acquisition and all submissions are one lock-scoped operation.  A
+    # concurrent configure_thread_pool() may replace the pool only after this
+    # batch has been accepted by the executor.
     worker_count = max(1, get_thread_pool_size())
     task_count = min(len(materials), worker_count * 2)
     chunk_size = (len(materials) + task_count - 1) // task_count
@@ -1727,10 +1753,14 @@ def parallel_map(
             for index in range(start, stop)
         ]
 
-    futures = [
-        executor.submit(_run_chunk, start, min(start + chunk_size, len(materials)))
+    def _make_task(start: int, stop: int) -> Any:
+        return lambda: _run_chunk(start, stop)
+
+    tasks = [
+        _make_task(start, min(start + chunk_size, len(materials)))
         for start in range(0, len(materials), chunk_size)
     ]
+    futures, _ = submit_thread_pool_tasks(tasks, max_workers=max_workers)
     results: List[Any] = []
     for future in futures:
         results.extend(future.result())
@@ -1746,22 +1776,23 @@ def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> b
 
     global _DEFAULT_JIT, _DEFAULT_COMPAT_REGEX
 
-    if compat_regex is not None:
-        _DEFAULT_COMPAT_REGEX = bool(compat_regex)
+    with _DEFAULT_CONFIG_LOCK:
+        if compat_regex is not None:
+            _DEFAULT_COMPAT_REGEX = bool(compat_regex)
 
-    if jit is None:
+        if jit is None:
+            try:
+                _DEFAULT_JIT = bool(_pcre2.configure())
+            except AttributeError:  # pragma: no cover - legacy backend without helper
+                pass
+            return bool(_DEFAULT_JIT)
+
+        new_value = bool(jit)
         try:
-            _DEFAULT_JIT = bool(_pcre2.configure())
+            _DEFAULT_JIT = bool(_pcre2.configure(jit=new_value))
         except AttributeError:  # pragma: no cover - legacy backend without helper
-            pass
-        return _DEFAULT_JIT
-
-    new_value = bool(jit)
-    try:
-        _DEFAULT_JIT = bool(_pcre2.configure(jit=new_value))
-    except AttributeError:  # pragma: no cover - legacy backend without helper
-        _DEFAULT_JIT = new_value
-    return _DEFAULT_JIT
+            _DEFAULT_JIT = new_value
+        return bool(_DEFAULT_JIT)
 
 
 def clear_cache() -> None:

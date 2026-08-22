@@ -7,8 +7,11 @@
 
 from __future__ import annotations
 
-import pcre.threads as threads_mod
+import threading
+
 import pytest
+
+import pcre.threads as threads_mod
 
 
 def test_threading_supported_false_on_low_core_count(
@@ -184,6 +187,62 @@ def test_ensure_thread_pool_resizes_existing_pool() -> None:
         second_pool = threads_mod.ensure_thread_pool(max_workers=2)
         assert second_pool is not first_pool
     finally:
+        threads_mod.shutdown_thread_pool(wait=True)
+        threads_mod._THREAD_POOL = original_pool
+        threads_mod._THREAD_POOL_WORKERS = original_workers
+
+
+def test_pool_submission_cannot_race_executor_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconfiguration waits until a leased executor accepts its batch."""
+
+    original_pool = threads_mod._THREAD_POOL
+    original_workers = threads_mod._THREAD_POOL_WORKERS
+    entered_submit = threading.Event()
+    release_submit = threading.Event()
+    configured = threading.Event()
+    original_submit = threads_mod.ThreadPoolExecutor.submit
+
+    def gated_submit(executor, fn, *args, **kwargs):
+        entered_submit.set()
+        assert release_submit.wait(timeout=5)
+        return original_submit(executor, fn, *args, **kwargs)
+
+    monkeypatch.setattr(threads_mod.ThreadPoolExecutor, "submit", gated_submit)
+    try:
+        threads_mod.shutdown_thread_pool(wait=True)
+        threads_mod.configure_thread_pool(max_workers=1, preload=True)
+
+        submitted: list[object] = []
+
+        def submitter() -> None:
+            futures, _ = threads_mod.submit_thread_pool_tasks(
+                [lambda: "accepted"], max_workers=1
+            )
+            submitted.extend(futures)
+
+        def reconfigure() -> None:
+            threads_mod.configure_thread_pool(max_workers=2, preload=False)
+            configured.set()
+
+        submit_thread = threading.Thread(target=submitter)
+        submit_thread.start()
+        assert entered_submit.wait(timeout=5)
+
+        configure_thread = threading.Thread(target=reconfigure)
+        configure_thread.start()
+        assert not configured.wait(timeout=0.05)
+
+        release_submit.set()
+        submit_thread.join(timeout=5)
+        configure_thread.join(timeout=5)
+        assert not submit_thread.is_alive()
+        assert not configure_thread.is_alive()
+        assert configured.is_set()
+        assert submitted[0].result(timeout=5) == "accepted"  # type: ignore[attr-defined]
+    finally:
+        release_submit.set()
         threads_mod.shutdown_thread_pool(wait=True)
         threads_mod._THREAD_POOL = original_pool
         threads_mod._THREAD_POOL_WORKERS = original_workers
