@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 [build-system]
-requires = ["setuptools>=77.0.1,<83", "wheel", "cmake>=3.27", "ninja"]
+requires = ["setuptools>=77.0.1,<85", "wheel", "cmake>=3.27", "ninja"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -12,7 +12,7 @@ name = "PyPcre"
 version = "0.6.0"
 description = "Modern, GIL-friendly, Fast Python bindings for PCRE2 with auto caching and JIT of compiled patterns."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
@@ -32,7 +32,7 @@ classifiers = [
 keywords = ["regex", "pcre2", "bindings"]
 
 [project.urls]
-Homepage = "https://github.com/ModelCloud/pcre"
+Homepage = "https://github.com/ModelCloud/PyPcre"
 
 [tool.setuptools]
 packages = ["pcre"]

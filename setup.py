@@ -308,4 +308,10 @@ EXTENSION = Extension(
     **collect_build_config(),
 )
 
-setup(ext_modules=[EXTENSION], cmdclass={"build_ext": build_ext})
+setup(
+    name="PyPcre",
+    version="0.6.0",
+    packages=["pcre"],
+    ext_modules=[EXTENSION],
+    cmdclass={"build_ext": build_ext},
+)
