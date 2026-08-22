@@ -66,70 +66,48 @@ PyPcre pairs Python's familiar `re`-compatible API with the real `PCRE2` engine.
 
 ### Benchmark Highlights 🏁
 
-#### API hot paths and 12-core fan-out
+#### Controlled API hot-path A/B
 
-Pinned A/B measurements on an Apple M4 Max use the same `taskpolicy -t 1 -l 1`
-scheduler policy for both interpreters. The host reports 12 performance logical
-CPUs and 4 efficiency logical CPUs; macOS does not provide an unprivileged hard
-per-process CPU mask, so the benchmark records the topology rather than claiming
-hard CPU affinity.
+The current comparison is origin/main `03f4d10c379babcc9208e45705d774cb93bcebb8`
+versus the follow-up code commit
+`59d742fd5dc66cd9e50cbdaeee76384737aa1220`. It was measured on an Apple M4 Max
+with 12 performance and 4 efficiency logical CPUs, macOS 26.6, PCRE2 10.47,
+and Apple clang 21. Python 3.10.19 is GIL-enabled; Python 3.14.0rc2 is the
+resolved Apple arm64 free-threaded build at
+`/Users/diego/.local/share/uv/python/cpython-3.14.0rc2+freethreaded-macos-aarch64-none/bin/python3.14t`
+and reports `sys._is_gil_enabled() == False`.
 
-| Workload | Python 3.10 | Python 3.14t/GIL=0 |
-| --- | ---: | ---: |
-| `parallel_map(search)`, 16 × 1 MiB subjects, 12 workers | **8.57x** | **7.85x** |
-| `parallel_map(findall)`, 48 × 1 MiB subjects, 12 workers | **11.51x** | **11.25x** |
-| No-op `escape("literal")` | **5.0x** | **3.6x** |
-| No-op `escape(b"literal")` | **6.9x** | **6.5x** |
-| Bound literal `sub(..., count=1)` | **4.7x** | **4.3x** |
-| Bound numeric-reference `sub(..., count=1)` | **4.3x** | **4.1x** |
-| Bound explicit-reference `sub(..., count=1)` | **4.6x** | **4.3x** |
-| Bound named-reference `sub(..., count=1)` | **4.2x** | **4.3x** |
-| Bound numeric-reference `sub(..., count=2)` | **4.6x** | **4.2x** |
-| Bound numeric-reference `sub(..., count=4)` | **6.0x** | **5.1x** |
-| Bound numeric-reference `sub(..., count=8)` | **8.6x** | **6.1x** |
-| Cached compile with `re.I` | **6.7x** | **6.9x** |
-| Cached compile with `re.I|re.M|re.S|re.X` | **6.2x** | **6.4x** |
-| First-read `lastindex` cost, sole capture | **11.8x** | **8.2x** |
-| Deprecated `template()` compatibility call | **6.2x** | **1.1x** |
-| Literal-capture `findall`, 100 matches | **5.0x** | **6.2x** |
-| Literal-capture `findall`, 500 matches | **7.0x** | **8.4x** |
-| Two literal captures `findall`, 100 matches | **7.5x** | **10.8x** |
-| Two literal captures `findall`, 500 matches | **13.5x** | **18.3x** |
-| Eight literal captures `findall`, 500 matches | **24.5x** | **29.4x** |
-| Three literal captures `split`, 500 captures | **4.5x** | **6.5x** |
-| Eight literal captures `split`, 500 captures | **6.6x** | **9.0x** |
-| Literal-capture `split`, 100 captures | **2.6x** | **3.5x** |
-| Literal-capture `split`, 2,000 captures | **3.1x** | **3.8x** |
-| Bound one-character literal `Pattern.split` | **2.1x** | **1.7x** |
-| Bound backreference `sub` hot path | **1.38 μs** | **1.14 μs** |
-| One-match numeric-reference `Pattern.sub` | **0.45 μs** | **0.34 μs** |
-| One-match explicit-reference `Pattern.sub` | **0.45 μs** | **0.31 μs** |
-| One-match named-reference `Pattern.sub` | **0.46 μs** | **0.33 μs** |
-| Repeated call-local `Match.groups()` | **~0.05 μs** | **~0.05 μs** |
-| Call-local `Match.expand(r"[\\1]")` | **0.07 μs** | **0.07 μs** |
-| Call-local `Match.expand(r"[\\g<1>]")` | **0.11 μs** | **0.08 μs** |
-| Call-local `Match.expand(r"[\\g<word>]")` | **0.13 μs** | **0.11 μs** |
-| Call-local two-name `Match.expand` | **0.18 μs** | **0.15 μs** |
-| Call-local three-name `Match.expand` | **0.23 μs** | **0.20 μs** |
-| Call-local eight-name `Match.expand` | **0.44 μs** | **0.39 μs** |
-| Literal-backslash + named `Match.expand` | **0.12 μs** | **0.10 μs** |
-| Named + backslash-suffix `Match.expand` | **0.16 μs** | **0.13 μs** |
-| Repeated default `compile("(x)")` | **0.49 μs** | **0.38 μs** |
-| Repeated integer-flagged `compile("x", CASELESS)` | **1.16 μs** | **0.81 μs** |
+Each API value is the median of 9 repetitions of 10,000 calls. Cold compile is
+the median of 9 repetitions of 1,000 unique compiles. Lower is better.
 
-The parallel figures are serial-to-parallel speedups and preserve input order and
-exception behavior. Large `findall` scans release the GIL only around the PCRE2
-call; match data, context, and subject ownership remain worker-local. Reproduce
-the fan-out benchmark with:
+| Workload | 3.10 origin | 3.10 follow-up | Δ | 3.14t origin | 3.14t follow-up | Δ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Cached `compile(..., re.I|re.M|re.S|re.X)` | 0.672 μs | 0.700 μs | +4.2% | 0.413 μs | 0.422 μs | +2.2% |
+| Module `search` | 0.592 μs | 0.645 μs | +9.0% | 0.473 μs | 0.479 μs | +1.3% |
+| Cold compile | 6.849 μs | 7.191 μs | +5.0% | 4.747 μs | 5.099 μs | +7.4% |
+
+The earlier lock-heavy PR measurement for `a1946c5f6e1cee2dbac714d6a98e8eac47a19161`
+reported cached-compile regressions of +83.6% (3.10) and +65.1% (3.14t), and
+module-search regressions of +30.6% and +25.9%. The follow-up removes the
+avoidable per-call configuration/thread-state locks and materially reduces those
+regressions; it does not claim a speedup over origin.
+
+Reproduce the API comparison with the same scheduler-tier hint for both builds:
 
 ```bash
-taskpolicy -t 1 -l 1 env PYTHONPATH=. \
-  PYPCRE_PARALLEL_WORKERS=12 PYPCRE_PARALLEL_RUNS=3 \
-  python3 benchmarks/parallel_map_hotpath.py
+cd /Users/diego/tmp-omni-workspace/pypcre/.worktrees/gil0-fixes
+PYPCRE_BENCH_RUNS=10000 PYPCRE_BENCH_REPEATS=9 \
+  taskpolicy -t 1 -l 1 env PYTHONPATH=. \
+  ./.venv-gil0/bin/python benchmarks/api_hotpaths.py
 ```
 
-The same script runs under Python 3.14t. The API microbenchmarks are available in
-[`benchmarks/api_hotpaths.py`](benchmarks/api_hotpaths.py).
+Run the same command from the origin checkout with its Python 3.10.19 or
+3.14.0rc2t environment for the A/B side.
+
+`taskpolicy -t 1 -l 1` is not hard P-core affinity on this unprivileged macOS
+host; no P-core-only speedup is claimed. The API microbenchmarks are available in
+[`benchmarks/api_hotpaths.py`](benchmarks/api_hotpaths.py), and the free-threaded
+results should not be generalized to GIL-enabled interpreters.
 
 Measured on a `Python 3.14.6` free-threaded build on x86_64 Linux with compiled-pattern reuse and JIT enabled. Times are the best of several runs; lower is better. Only workloads where PyPcre is decisively faster than both `stdlib.re` and `regex` are shown.
 
