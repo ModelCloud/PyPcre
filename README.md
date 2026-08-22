@@ -118,6 +118,76 @@ The complete comparison also ran `finditer_bench.py`, `sub_bench.py`,
 both revisions; all 96 invocations completed successfully. Raw logs are in
 `/tmp/pypcre-bench-20260822/logs/runs2` on the benchmark host.
 
+#### Fan-out and call-local speedups
+
+Both interpreter runs used the same scheduler policy. The host reports 12
+performance logical CPUs and 4 efficiency logical CPUs; macOS does not provide
+an unprivileged hard per-process CPU mask, so these measurements record the
+topology rather than claiming hard CPU affinity.
+
+| Workload | Python 3.10 | Python 3.14t/GIL=0 |
+| --- | ---: | ---: |
+| `parallel_map(search)`, 16 × 1 MiB subjects, 12 workers | **8.57x** | **7.85x** |
+| `parallel_map(findall)`, 48 × 1 MiB subjects, 12 workers | **11.51x** | **11.25x** |
+| No-op `escape("literal")` | **5.0x** | **3.6x** |
+| No-op `escape(b"literal")` | **6.9x** | **6.5x** |
+| Bound literal `sub(..., count=1)` | **4.7x** | **4.3x** |
+| Bound numeric-reference `sub(..., count=1)` | **4.3x** | **4.1x** |
+| Bound explicit-reference `sub(..., count=1)` | **4.6x** | **4.3x** |
+| Bound named-reference `sub(..., count=1)` | **4.2x** | **4.3x** |
+| Bound numeric-reference `sub(..., count=2)` | **4.6x** | **4.2x** |
+| Bound numeric-reference `sub(..., count=4)` | **6.0x** | **5.1x** |
+| Bound numeric-reference `sub(..., count=8)` | **8.6x** | **6.1x** |
+| Cached compile with `re.I` | **6.7x** | **6.9x** |
+| Cached compile with `re.I|re.M|re.S|re.X` | **6.2x** | **6.4x** |
+| First-read `lastindex` cost, sole capture | **11.8x** | **8.2x** |
+| Deprecated `template()` compatibility call | **6.2x** | **1.1x** |
+| Literal-capture `findall`, 100 matches | **5.0x** | **6.2x** |
+| Literal-capture `findall`, 500 matches | **7.0x** | **8.4x** |
+| Two literal captures `findall`, 100 matches | **7.5x** | **10.8x** |
+| Two literal captures `findall`, 500 matches | **13.5x** | **18.3x** |
+| Eight literal captures `findall`, 500 matches | **24.5x** | **29.4x** |
+| Three literal captures `split`, 500 captures | **4.5x** | **6.5x** |
+| Eight literal captures `split`, 500 captures | **6.6x** | **9.0x** |
+| Literal-capture `split`, 100 captures | **2.6x** | **3.5x** |
+| Literal-capture `split`, 2,000 captures | **3.1x** | **3.8x** |
+| Bound one-character literal `Pattern.split` | **2.1x** | **1.7x** |
+| Bound backreference `sub` hot path | **1.38 μs** | **1.14 μs** |
+| One-match numeric-reference `Pattern.sub` | **0.45 μs** | **0.34 μs** |
+| One-match explicit-reference `Pattern.sub` | **0.45 μs** | **0.31 μs** |
+| One-match named-reference `Pattern.sub` | **0.46 μs** | **0.33 μs** |
+| Repeated call-local `Match.groups()` | **~0.05 μs** | **~0.05 μs** |
+| Call-local `Match.expand(r"[\\1]")` | **0.07 μs** | **0.07 μs** |
+| Call-local `Match.expand(r"[\\g<1>]")` | **0.11 μs** | **0.08 μs** |
+| Call-local `Match.expand(r"[\\g<word>]")` | **0.13 μs** | **0.11 μs** |
+| Call-local two-name `Match.expand` | **0.18 μs** | **0.15 μs** |
+| Call-local three-name `Match.expand` | **0.23 μs** | **0.20 μs** |
+| Call-local eight-name `Match.expand` | **0.44 μs** | **0.39 μs** |
+| Literal-backslash + named `Match.expand` | **0.12 μs** | **0.10 μs** |
+| Named + backslash-suffix `Match.expand` | **0.16 μs** | **0.13 μs** |
+| Repeated default `compile("(x)")` | **0.49 μs** | **0.38 μs** |
+| Repeated integer-flagged `compile("x", CASELESS)` | **1.16 μs** | **0.81 μs** |
+
+The parallel figures are serial-to-parallel speedups and preserve input order
+and exception behavior. Large `findall` scans release the GIL only around the
+PCRE2 call; match data, context, and subject ownership remain worker-local.
+Reproduce the fan-out benchmark with the same scheduler policy for both
+interpreters:
+
+```bash
+taskpolicy -t 1 -l 1 env \
+  PYPCRE_PARALLEL_WORKERS=12 \
+  PYPCRE_PARALLEL_RUNS=9 \
+  PYTHONPATH=. \
+  ./.venv310/bin/python benchmarks/parallel_map_hotpath.py
+
+taskpolicy -t 1 -l 1 env \
+  PYPCRE_PARALLEL_WORKERS=12 \
+  PYPCRE_PARALLEL_RUNS=9 \
+  PYTHONPATH=. \
+  ./.venv-gil0/bin/python benchmarks/parallel_map_hotpath.py
+```
+
 #### `findall` — large multiline and lookaround workloads
 
 | Workload | PyPcre (ms) | `re` (ms) | `regex` (ms) | PyPcre edge |
