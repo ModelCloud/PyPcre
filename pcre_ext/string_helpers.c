@@ -528,13 +528,18 @@ module_translate_unicode_escapes(PyObject *Py_UNUSED(module), PyObject *arg)
                     }
                     if (valid) {
                         if (codepoint > 0x10FFFFu) {
+                            /* PyErr_Format does not support the dynamic
+                             * `%.*s` precision specifier (it raises
+                             * SystemError), so copy the digits out first. */
+                            char hex_digits[9];
+                            memcpy(hex_digits, run_end + 1, (size_t)hex_len);
+                            hex_digits[hex_len] = '\0';
                             PyMem_Free(buffer);
                             PyErr_Format(
                                 PcreError,
-                                "Unicode escape \\%c%.*s exceeds 0x10FFFF",
+                                "Unicode escape \\%c%s exceeds 0x10FFFF",
                                 *run_end,
-                                hex_len,
-                                run_end + 1
+                                hex_digits
                             );
                             return NULL;
                         }

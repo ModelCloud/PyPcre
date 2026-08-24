@@ -130,6 +130,10 @@ def _pool_for_target_locked(
 def ensure_thread_pool(max_workers: int | None = None) -> ThreadPoolExecutor:
     """Return the shared executor, creating or resizing it if required."""
 
+    # Resolve the (possibly subprocess-backed) CPU probe before taking the
+    # process-wide pool lock; probing under the lock would stall every other
+    # thread touching the pool behind a fork/exec.
+    _performance_cpu_total()
     with _THREAD_POOL_LOCK:
         target = _determine_worker_count(
             max_workers if max_workers is not None else _THREAD_POOL_WORKERS
@@ -158,6 +162,7 @@ def _thread_pool_submission(
     """
 
     old_pool: ThreadPoolExecutor | None = None
+    _performance_cpu_total()  # probe outside the lock (see ensure_thread_pool)
     try:
         with _THREAD_POOL_LOCK:
             target = _determine_worker_count(
@@ -230,6 +235,7 @@ def get_thread_pool_size() -> int:
     if snapshot is not None and snapshot == _THREAD_POOL_WORKERS:
         return snapshot
 
+    _performance_cpu_total()  # probe outside the lock (see ensure_thread_pool)
     with _THREAD_POOL_LOCK:
         if _THREAD_POOL_WORKERS is None:
             _THREAD_POOL_WORKERS = _determine_worker_count(None)

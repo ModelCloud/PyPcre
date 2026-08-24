@@ -277,16 +277,21 @@ utf8_index_to_offset(PyObject *unicode_obj, Py_ssize_t index, Py_ssize_t *offset
         break;
     }
 
-    if (remaining > 0) {
-        while (offset < utf8_length) {
-            if ((u[offset] & 0xC0) != 0x80) {
-                if (remaining == 0) {
-                    break;
-                }
-                remaining -= 1;
+    /* Run the tail scan even when remaining == 0: the chunked loop can stop
+     * with `offset` pointing at the continuation bytes of a character whose
+     * starter was counted in the previous chunk (chunk boundary inside a
+     * multi-byte character at the string tail).  Returning that offset would
+     * hand PCRE2 a mid-codepoint position under PCRE2_NO_UTF_CHECK, which is
+     * documented undefined behavior; the loop below skips to the next
+     * starter before returning. */
+    while (offset < utf8_length) {
+        if ((u[offset] & 0xC0) != 0x80) {
+            if (remaining == 0) {
+                break;
             }
-            offset += 1;
+            remaining -= 1;
         }
+        offset += 1;
     }
 
     *offset_out = offset;
