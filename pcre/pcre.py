@@ -1725,6 +1725,14 @@ def _should_use_auto_threads(subjects: list[Any]) -> bool:
     return False
 
 
+# Marks threads that are currently executing a parallel_map chunk on the
+# shared pool.  A nested parallel_map on such a thread must not submit to the
+# same pool and block on the results: if every worker does that, all of them
+# wait for chunks that can only run on those same workers — a permanent
+# deadlock.  Nested calls run inline instead.
+_PARALLEL_TLS = local()
+
+
 def parallel_map(
     pattern: Any,
     subjects: Iterable[Any],
@@ -1766,6 +1774,12 @@ def parallel_map(
             "Pattern not enabled for threaded execution; use Flag.THREADS or configure "
             "threading defaults."
         )
+
+    if getattr(_PARALLEL_TLS, "in_worker", False):
+        return [
+            bound_method(subject, pos=pos, endpos=endpos, options=options)
+            for subject in materials
+        ]
 
     # A one-item map cannot benefit from worker fan-out.  Keep the documented
     # list-shaped result but avoid executor creation, queueing, and a Future;
@@ -1846,17 +1860,21 @@ def parallel_map(
     chunk_size = (len(materials) + task_count - 1) // task_count
 
     def _run_chunk(start: int, stop: int) -> list[Any]:
-        if fast_method is not None:
-            if fast_method_takes_owner:
-                return [
-                    fast_method(materials[index], pattern_obj)
-                    for index in range(start, stop)
-                ]
-            return [fast_method(materials[index]) for index in range(start, stop)]
-        return [
-            bound_method(materials[index], pos=pos, endpos=endpos, options=options)
-            for index in range(start, stop)
-        ]
+        _PARALLEL_TLS.in_worker = True
+        try:
+            if fast_method is not None:
+                if fast_method_takes_owner:
+                    return [
+                        fast_method(materials[index], pattern_obj)
+                        for index in range(start, stop)
+                    ]
+                return [fast_method(materials[index]) for index in range(start, stop)]
+            return [
+                bound_method(materials[index], pos=pos, endpos=endpos, options=options)
+                for index in range(start, stop)
+            ]
+        finally:
+            _PARALLEL_TLS.in_worker = False
 
     def _make_task(start: int, stop: int) -> Any:
         return lambda: _run_chunk(start, stop)

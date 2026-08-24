@@ -100,13 +100,12 @@ pcre_memory_initialize(void)
         return 0;
     }
 
+    /* Spin until we own the flag.  Waiters must never clear the flag: only
+     * the owner releases it, otherwise two threads can run the initializer
+     * concurrently and tear the current_alloc/current_free pair. */
     while (atomic_flag_test_and_set_explicit(&allocator_init_lock, memory_order_acq_rel)) {
-        if (atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
-            atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
-            return 0;
-        }
+        /* busy-wait */
     }
-
     if (atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
         atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
         return 0;
@@ -185,18 +184,12 @@ pcre_memory_initialize(void)
 void
 pcre_memory_teardown(void)
 {
-#if !defined(_WIN32)
-    void *handle_to_close = current_handle;
-    current_handle = NULL;
-    if (handle_to_close != NULL) {
-        dlclose(handle_to_close);
-    }
-#endif
-    current_alloc = (alloc_fn)PyMem_Malloc;
-    current_free = (free_fn)PyMem_Free;
-    current_name = "pymem";
-    atomic_store_explicit(&allocator_initialized, 0, memory_order_release);
-    atomic_flag_clear_explicit(&allocator_init_lock, memory_order_release);
+    /* Allocator selection is irreversible for the lifetime of the process.
+     * Blocks obtained from pcre_malloc() (Match ovectors, error-name buffers)
+     * can outlive any teardown point, so resetting current_free or dlclosing
+     * the backing library would pair a live allocation with the wrong
+     * deallocator (heap corruption) or call into unmapped code.  The dlopen
+     * handle is intentionally retained. */
 }
 
 void *
@@ -216,9 +209,10 @@ pcre_free(void *ptr)
     if (ptr == NULL) {
         return;
     }
-    if (!atomic_load_explicit(&allocator_initialized, memory_order_acquire)) {
-        (void)pcre_memory_initialize();
-    }
+    /* Any pointer passed here came from pcre_malloc(), which initialized the
+     * allocator; the statically-initialized PyMem pair covers the impossible
+     * uninitialized case.  Re-running initialization here could select a
+     * different allocator than the one that produced `ptr`. */
     current_free(ptr);
 }
 

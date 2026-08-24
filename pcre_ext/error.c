@@ -1249,6 +1249,11 @@ static PyObject *
 get_error_type_for_code(int error_code)
 {
     if (PcreErrorByCode == NULL) {
+        if (PcreError == NULL) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "pcre error types are not initialized");
+            return NULL;
+        }
         Py_INCREF(PcreError);
         return PcreError;
     }
@@ -1258,6 +1263,21 @@ get_error_type_for_code(int error_code)
         return NULL;
     }
 
+#if PY_VERSION_HEX >= 0x030D0000
+    /* Returns an owned reference under the dict's internal lock, so the entry
+     * cannot be deallocated between lookup and INCREF on free-threaded builds. */
+    PyObject *exc_type = NULL;
+    int lookup_rc = PyDict_GetItemRef(PcreErrorByCode, code_obj, &exc_type);
+    Py_DECREF(code_obj);
+    if (lookup_rc < 0) {
+        return NULL;
+    }
+    if (exc_type == NULL) {
+        Py_INCREF(PcreError);
+        return PcreError;
+    }
+    return exc_type;
+#else
     PyObject *exc_type = PyDict_GetItemWithError(PcreErrorByCode, code_obj);
     Py_DECREF(code_obj);
     if (exc_type == NULL) {
@@ -1270,6 +1290,7 @@ get_error_type_for_code(int error_code)
 
     Py_INCREF(exc_type);
     return exc_type;
+#endif
 }
 
 void

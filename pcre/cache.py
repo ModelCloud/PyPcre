@@ -170,7 +170,12 @@ def _cached_compile_thread_local(
     except KeyError:
         compiled = wrapper(_pcre2.compile(pattern, flags=flags, jit=jit))
         active_limit = _bounded_cache_limit(_THREAD_LOCAL.cache_limit)
-        if _THREAD_LOCAL.epoch != current_epoch or active_limit == 0:
+        # Re-read the *global* epoch: another thread may have run clear_cache()
+        # while we compiled, and caching the result stamped with the old epoch
+        # would let a stale pattern survive a process-wide cache clear.
+        # (_THREAD_LOCAL.epoch is only ever written by this thread, so
+        # comparing against it could never detect the race.)
+        if get_cache_epoch() != current_epoch or active_limit == 0:
             return compiled
         if len(cache) >= active_limit:
             cache.pop(next(iter(cache)))

@@ -522,9 +522,17 @@ global_jit_stack_cache_release(pcre2_jit_stack *jit_stack)
     pcre2_jit_stack_free(jit_stack);
 }
 
+/* Set once the cache subsystem has fully initialized.  A repeated
+ * module_exec (importlib.reload) must not reset strategies, toggles, or
+ * cached objects that other threads may be using concurrently. */
+static int cache_initialized = 0;
+
 int
 cache_initialize(int global_mode)
 {
+    if (cache_initialized) {
+        return 0;
+    }
     if (global_cache_lock == NULL) {
         global_cache_lock = PyThread_allocate_lock();
         if (global_cache_lock == NULL) {
@@ -562,12 +570,14 @@ cache_initialize(int global_mode)
     atomic_store_explicit(&global_jit_capacity, 1, memory_order_release);
     atomic_store_explicit(&global_jit_start_size, 32 * 1024, memory_order_release);
     atomic_store_explicit(&global_jit_max_size, 1024 * 1024, memory_order_release);
+    cache_initialized = 1;
     return 0;
 }
 
 void
 cache_teardown(void)
 {
+    cache_initialized = 0;
     thread_cache_teardown();
     global_cache_teardown();
     if (global_cache_lock != NULL) {
@@ -605,6 +615,13 @@ match_data_cache_release(pcre2_match_data *match_data)
     }
 }
 
+/*
+ * Match contexts are handed out with exclusive ownership: acquire detaches the
+ * context from the thread-local slot and release re-stores (or frees) it.
+ * Returning a pointer that stays resident in the slot would let thread-exit
+ * cleanup, reentrant acquires (GC finalizers), or a context-cache toggle free
+ * or mutate a context that is still in use.
+ */
 pcre2_match_context *
 match_context_cache_acquire(int use_offset_limit)
 {
@@ -626,15 +643,18 @@ match_context_cache_acquire(int use_offset_limit)
         &state->offset_match_context :
         &state->match_context;
 
-    if (*slot == NULL) {
-        *slot = pcre2_match_context_create(NULL);
-        if (*slot == NULL) {
-            PyErr_NoMemory();
-            return NULL;
-        }
+    if (*slot != NULL) {
+        pcre2_match_context *context = *slot;
+        *slot = NULL;
+        return context;
     }
 
-    return *slot;
+    pcre2_match_context *context = pcre2_match_context_create(NULL);
+    if (context == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    return context;
 }
 
 void
@@ -655,6 +675,28 @@ match_context_cache_release(pcre2_match_context *context, int had_offset_limit)
 #endif
 
     if (!atomic_load_explicit(&context_cache_enabled, memory_order_acquire)) {
+        pcre2_match_context_free(context);
+        return;
+    }
+
+    ThreadCacheState *state = thread_cache_state_get();
+    if (state == NULL) {
+        pcre2_match_context_free(context);
+        return;
+    }
+
+    pcre2_match_context **preferred = had_offset_limit ?
+        &state->offset_match_context :
+        &state->match_context;
+    pcre2_match_context **fallback = had_offset_limit ?
+        &state->match_context :
+        &state->offset_match_context;
+
+    if (*preferred == NULL) {
+        *preferred = context;
+    } else if (*fallback == NULL) {
+        *fallback = context;
+    } else {
         pcre2_match_context_free(context);
     }
 }
