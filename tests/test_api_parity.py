@@ -370,6 +370,91 @@ def test_match_attributes_bytes():
     assert match.expand(br"[\1\2]") == b"[ab]"
 
 
+def test_pattern_methods_accept_positional_pos_like_re():
+    text = "abcabc"
+    expected_pattern = re.compile("b")
+
+    search = pcre.compile("b").search(text, 2)
+    expected_search = expected_pattern.search(text, 2)
+    assert (search.span(), search.pos) == (expected_search.span(), expected_search.pos)
+
+    match = pcre.compile("c").match(text, 2)
+    expected_match = re.compile("c").match(text, 2)
+    assert (match.span(), match.pos) == (expected_match.span(), expected_match.pos)
+
+    fullmatch = pcre.compile("a+").fullmatch("xaax", 1, 3)
+    expected_fullmatch = re.compile("a+").fullmatch("xaax", 1, 3)
+    assert fullmatch.span() == expected_fullmatch.span()
+
+    finditer = [m.span() for m in pcre.compile("b").finditer(text, 1)]
+    assert finditer == [m.span() for m in re.compile("b").finditer(text, 1)]
+
+    findall = pcre.compile("(b)").findall(text, 4)
+    assert findall == re.compile("(b)").findall(text, 4)
+
+    endpos_search = pcre.compile("b").search(text, 0, 3)
+    assert endpos_search.span() == re.compile("b").search(text, 0, 3).span()
+
+
+def test_search_falls_back_to_slice_with_offset_tracking():
+    class _MinimalRawMatch:
+        def __init__(self, span):
+            self._span = span
+
+        def group(self, *indices):
+            if not indices or indices == (0,):
+                return "b"
+            raise IndexError(indices)
+
+        def groups(self, default=None):
+            return ()
+
+        def groupdict(self, default=None):
+            return {}
+
+        def start(self, group=0):
+            return self._span[0] if group == 0 else -1
+
+        def end(self, group=0):
+            return self._span[1] if group == 0 else -1
+
+        def span(self, group=0):
+            return (self.start(group), self.end(group))
+
+        def expand(self, template):
+            return "b"
+
+    class _MinimalBackend:
+        # Deliberately lacks re-style pos/endpos/options support.
+        pattern = "b"
+        groupindex = {}
+        flags = 0
+        capture_count = 0
+        jit = False
+
+        @staticmethod
+        def search(subject):
+            index = subject.find("b")
+            if index < 0:
+                return None
+            return _MinimalRawMatch((index, index + 1))
+
+    pattern = pcre.Pattern(_MinimalBackend())
+    no_hit = pattern.search("acac", 1)
+    assert no_hit is None
+
+    hit = pattern.search("acacbx", 2)
+    assert hit is not None
+    assert hit.span() == (4, 5)
+    assert hit.start() == 4
+    assert hit.end() == 5
+    assert hit.group() == "b"
+    assert hit.regs == ((4, 5),)
+    assert hit.pos == 2
+    assert hit.string == "acacbx"
+    assert hit.re is pattern
+
+
 def _signature_fingerprint(func):
     signature = inspect.signature(func)
     return tuple((param.name, param.kind, param.default) for param in signature.parameters.values())
