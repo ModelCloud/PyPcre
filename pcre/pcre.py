@@ -313,6 +313,83 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
     return "".join(parts)
 
 
+class _OffsetMatch:
+    """Present a match found inside ``subject[offset:]`` with absolute offsets."""
+
+    __slots__ = ("_match", "_offset")
+
+    def __init__(self, match: Match, offset: int) -> None:
+        self._match = match
+        self._offset = offset
+
+    def __getitem__(self, item: Any) -> Any:
+        return self._match[item]
+
+    def __repr__(self) -> str:  # pragma: no cover - delegated repr
+        return repr(self._match)
+
+    def group(self, *indices: Any) -> Any:
+        return self._match.group(*indices)
+
+    def groups(self, default: Any = None) -> tuple[Any, ...]:
+        return self._match.groups(default)
+
+    def groupdict(self, default: Any = None) -> dict[str, Any]:
+        return self._match.groupdict(default)
+
+    def expand(self, template: Any) -> Any:
+        return self._match.expand(template)
+
+    def start(self, group: Any = 0) -> int:
+        value = self._match.start(group)
+        if value == -1:
+            return -1
+        return value + self._offset
+
+    def end(self, group: Any = 0) -> int:
+        value = self._match.end(group)
+        if value == -1:
+            return -1
+        return value + self._offset
+
+    def span(self, group: Any = 0) -> tuple[int, int]:
+        start = self._match.start(group)
+        if start == -1:
+            return (-1, -1)
+        return (start + self._offset, self._match.end(group) + self._offset)
+
+    @property
+    def re(self) -> Any:
+        return self._match.re
+
+    @property
+    def string(self) -> Any:
+        return self._match.string
+
+    @property
+    def pos(self) -> int:
+        return self._match.pos
+
+    @property
+    def endpos(self) -> int:
+        return self._match.endpos
+
+    @property
+    def lastindex(self) -> int | None:
+        return self._match.lastindex
+
+    @property
+    def lastgroup(self) -> str | None:
+        return self._match.lastgroup
+
+    @property
+    def regs(self) -> tuple[tuple[int, int], ...]:
+        return tuple(
+            (-1, -1) if span[0] == -1 else (span[0] + self._offset, span[1] + self._offset)
+            for span in self._match.regs
+        )
+
+
 class Pattern:
     """High-level wrapper around the C-backed :class:`pcre_ext_c.Pattern`."""
 
@@ -458,9 +535,9 @@ class Pattern:
     def match(
         self,
         subject: Any,
-        *,
         pos: int = 0,
         endpos: int | None = None,
+        *,
         options: int = 0,
     ) -> Match | None:
         if type(subject) is memoryview:
@@ -485,9 +562,9 @@ class Pattern:
     def search(
         self,
         subject: Any,
-        *,
         pos: int = 0,
         endpos: int | None = None,
+        *,
         options: int = 0,
     ) -> Match | None:
         if type(subject) is memoryview:
@@ -497,22 +574,42 @@ class Pattern:
             return self._pattern.search(subject, pos, compiled_end, options, self)
         if endpos is None:
             resolved_end = len(subject)
-            raw = self._pattern.search(subject, pos=pos, options=options)
+            try:
+                raw = self._pattern.search(subject, pos=pos, options=options)
+            except TypeError:
+                return self._search_via_slice(subject, pos, resolved_end)
         else:
             resolved_end = resolve_endpos(subject, endpos)
-            raw = self._pattern.search(
-                subject, pos=pos, endpos=resolved_end, options=options
-            )
+            try:
+                raw = self._pattern.search(
+                    subject, pos=pos, endpos=resolved_end, options=options
+                )
+            except TypeError:
+                return self._search_via_slice(subject, pos, resolved_end)
         if raw is None:
             return None
         return self._wrap_match(raw, subject, pos, resolved_end)
 
+    def _search_via_slice(self, subject: Any, pos: int, end_boundary: int) -> Match | None:
+        """Search a minimal backend that lacks re-style ``pos`` support.
+
+        The subject is sliced to ``subject[pos:end]`` and every offset of the
+        resulting match is shifted back by ``pos`` so spans stay absolute in
+        the original subject.
+        """
+
+        raw = self._pattern.search(subject[pos:end_boundary])
+        if raw is None:
+            return None
+        wrapped = self._wrap_match(raw, subject, pos, end_boundary)
+        return _OffsetMatch(wrapped, pos)
+
     def fullmatch(
         self,
         subject: Any,
-        *,
         pos: int = 0,
         endpos: int | None = None,
+        *,
         options: int = 0,
     ) -> Match | None:
         if type(subject) is memoryview:
@@ -535,9 +632,9 @@ class Pattern:
     def finditer(
         self,
         subject: Any,
-        *,
         pos: int = 0,
         endpos: int | None = None,
+        *,
         options: int = 0,
     ) -> Iterator[Match]:
         if type(subject) is memoryview:
@@ -621,9 +718,9 @@ class Pattern:
     def findall(
         self,
         subject: Any,
-        *,
         pos: int = 0,
         endpos: int | None = None,
+        *,
         options: int = 0,
     ) -> List[Any]:
         if type(subject) is memoryview:
