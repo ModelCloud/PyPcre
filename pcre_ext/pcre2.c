@@ -38,9 +38,13 @@ static ATOMIC_VAR(int) offset_limit_support = ATOMIC_VAR_INIT(-1);
 #endif
 /* -1 unknown, 0 compliant, 1 JIT ignores ANCHORED/ENDANCHORED match-time options. */
 static ATOMIC_VAR(int) jit_anchor_fixup_needed_state = ATOMIC_VAR_INIT(-1);
+/* -1 unknown, 0 compliant, 1 the JIT's start-of-match optimization loses
+ * matches (observed on PCRE2 10.46 and 10.47; fixed upstream after 10.47). */
+static ATOMIC_VAR(int) jit_start_optimize_broken_state = ATOMIC_VAR_INIT(-1);
 
 static void detect_offset_limit_support(void);
 static int jit_anchor_fixup_needed(void);
+static int jit_start_optimize_broken(void);
 
 static int
 coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
@@ -5545,6 +5549,18 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
         engine_compile_options &= ~PCRE2_NO_UTF_CHECK;
     }
 
+    /* On runtimes whose JIT start-of-match optimization loses matches
+     * (PCRE2 10.46/10.47, see jit_start_optimize_broken), compile
+     * JIT-bound patterns without start optimizations.  The injected bit is
+     * masked back out of the pattern's public flags below — it is a
+     * workaround detail, not a caller-requested option. */
+    int start_optimize_workaround = 0;
+    if (jit && (compile_options & PCRE2_NO_START_OPTIMIZE) == 0 &&
+        jit_start_optimize_broken()) {
+        engine_compile_options |= PCRE2_NO_START_OPTIMIZE;
+        start_optimize_workaround = 1;
+    }
+
     int error_code;
     PCRE2_SIZE error_offset;
     pcre2_code *code = pcre2_compile((PCRE2_SPTR)PyBytes_AS_STRING(pattern_bytes),
@@ -5605,6 +5621,9 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     uint32_t effective_options = compile_options;
     if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &effective_options) == 0) {
         pattern->compile_options = effective_options;
+    }
+    if (start_optimize_workaround) {
+        pattern->compile_options &= ~(uint32_t)PCRE2_NO_START_OPTIMIZE;
     }
     if (validate_bytes_utf) {
         pattern->compile_options |= PCRE2_NO_UTF_CHECK;
@@ -5949,6 +5968,7 @@ module_attach_match(PyObject *Py_UNUSED(module), PyObject *args)
 static PyObject *module_memory_allocator(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static PyObject *module_get_pcre2_version(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static PyObject *module_jit_anchor_fixup_needed(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
+static PyObject *module_jit_start_optimize_broken(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args));
 static void initialize_pcre2_version(void);
 
 
@@ -5975,6 +5995,7 @@ static PyMethodDef module_methods[] = {
     {"set_jit_stack_limits", (PyCFunction)module_set_jit_stack_limits, METH_VARARGS, PyDoc_STR("Set the (start, max) sizes for newly created JIT stacks." )},
     {"get_library_version", (PyCFunction)module_get_pcre2_version, METH_NOARGS, PyDoc_STR("Return the PCRE2 library version string." )},
     {"_jit_anchor_fixup_needed", (PyCFunction)module_jit_anchor_fixup_needed, METH_NOARGS, PyDoc_STR("Return 1 if the JIT anchoring workaround is active for this PCRE2 build." )},
+    {"_jit_start_optimize_broken", (PyCFunction)module_jit_start_optimize_broken, METH_NOARGS, PyDoc_STR("Return 1 if JIT patterns are compiled with start optimizations disabled to work around a broken PCRE2 JIT." )},
     {"get_allocator", (PyCFunction)module_memory_allocator, METH_NOARGS, PyDoc_STR("Return the name of the active heap allocator (tcmalloc/jemalloc/malloc)." )},
     {"_cpu_ascii_vector_mode", (PyCFunction)module_cpu_ascii_vector_mode, METH_NOARGS, PyDoc_STR("Return the active ASCII vector width (0=scalar,1=SSE2,2=AVX2,3=AVX512)." )},
     {"_debug_thread_cache_count", (PyCFunction)module_debug_thread_cache_count, METH_NOARGS, PyDoc_STR("Return the number of live thread cache states (requires PYPCRE_DEBUG=1)." )},
@@ -6149,6 +6170,87 @@ jit_anchor_fixup_needed(void)
     return needed;
 }
 
+static int
+jit_start_optimize_broken(void)
+{
+    int current = atomic_load_explicit(&jit_start_optimize_broken_state, memory_order_acquire);
+    if (current != -1) {
+        return current;
+    }
+
+    /*
+     * PCRE2 10.46/10.47 JIT fast-forward (start-of-match optimization) can
+     * skip valid start positions when the pattern begins with an optional
+     * atom followed by a literal and a bounded class: for 0?a[b ]{0,2} on
+     * " ab ", pcre2_jit_match returns NOMATCH while pcre2_match returns
+     * (1, 4).  Compiling with PCRE2_NO_START_OPTIMIZE restores correctness.
+     * Probe the loaded runtime once; when broken, Pattern_create injects
+     * PCRE2_NO_START_OPTIMIZE into JIT-compiled patterns.
+     */
+    int broken = 0;
+    int error_code = 0;
+    PCRE2_SIZE error_offset = 0;
+    static const char probe_pattern[] = "0?a[b ]{0,2}";
+    static const char probe_subject[] = " ab ";
+
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)probe_pattern,
+                                     sizeof(probe_pattern) - 1,
+                                     0,
+                                     &error_code,
+                                     &error_offset,
+                                     NULL);
+    if (code != NULL) {
+        jit_guard_acquire();
+        int jit_rc = pcre2_jit_compile(code, PCRE2_JIT_COMPLETE);
+        jit_guard_release();
+        if (jit_rc >= 0) {
+            pcre2_match_data *match_data = pcre2_match_data_create(2, NULL);
+            if (match_data != NULL) {
+                jit_guard_acquire();
+                int rc_jit = pcre2_jit_match(code,
+                                             (PCRE2_SPTR)probe_subject,
+                                             sizeof(probe_subject) - 1,
+                                             0,
+                                             0,
+                                             match_data,
+                                             NULL);
+                jit_guard_release();
+                PCRE2_SIZE jit_start = 0;
+                PCRE2_SIZE jit_end = 0;
+                if (rc_jit >= 0) {
+                    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
+                    if (ovector != NULL) {
+                        jit_start = ovector[0];
+                        jit_end = ovector[1];
+                    }
+                }
+                /* PCRE2_NO_JIT forces the interpreter even on JIT-compiled
+                 * code, giving the reference result from the same pattern. */
+                int rc_int = pcre2_match(code,
+                                         (PCRE2_SPTR)probe_subject,
+                                         sizeof(probe_subject) - 1,
+                                         0,
+                                         PCRE2_NO_JIT,
+                                         match_data,
+                                         NULL);
+                if (rc_int >= 0) {
+                    PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
+                    if (rc_jit < 0 ||
+                        (ovector != NULL &&
+                         (jit_start != ovector[0] || jit_end != ovector[1]))) {
+                        broken = 1;
+                    }
+                }
+                pcre2_match_data_free(match_data);
+            }
+        }
+        pcre2_code_free(code);
+    }
+
+    atomic_store_explicit(&jit_start_optimize_broken_state, broken, memory_order_release);
+    return broken;
+}
+
 /* Set after the first fully successful module_exec.  The teardown helpers
  * destroy process-global state (locks, TSS keys, exception types, caches)
  * that live threads from a previous successful import may be using, so a
@@ -6244,6 +6346,7 @@ module_exec(PyObject *module)
 
     detect_offset_limit_support();
     (void)jit_anchor_fixup_needed();
+    (void)jit_start_optimize_broken();
 
     Py_INCREF(&PatternType);
     if (PyModule_AddObject(module, "Pattern", (PyObject *)&PatternType) < 0) {
@@ -6330,6 +6433,12 @@ static PyObject *
 module_jit_anchor_fixup_needed(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
 {
     return PyLong_FromLong(jit_anchor_fixup_needed());
+}
+
+static PyObject *
+module_jit_start_optimize_broken(PyObject *Py_UNUSED(module), PyObject *Py_UNUSED(args))
+{
+    return PyLong_FromLong(jit_start_optimize_broken());
 }
 
 static void
