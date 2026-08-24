@@ -46,8 +46,9 @@ def test_stdlib_parser_exported_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_flat_replacement_conversion_paths() -> None:
-    assert pcre_mod._pcre2_replacement_from_parsed([1, b"$"], True) == b"\\g<1>$$"
-    assert pcre_mod._pcre2_replacement_from_parsed([1, "$"], False) == r"\g<1>$$"
+    # ${n} rather than \g<n>: PCRE2 only accepts \g<n> replacements from 10.44.
+    assert pcre_mod._pcre2_replacement_from_parsed([1, b"$"], True) == b"${1}$$"
+    assert pcre_mod._pcre2_replacement_from_parsed([1, "$"], False) == "${1}$$"
 
 
 def test_replacement_template_cache_reuses_and_clears(

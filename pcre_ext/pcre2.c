@@ -5188,12 +5188,17 @@ pattern_translate_single_replacement(PatternObject *self,
             ) >= 0) {
             return NULL;
         }
-        if (length > PY_SSIZE_T_MAX - 3) {
+        /* Emit PCRE2's ${n} form: \g<n> in replacement strings is only
+         * understood by PCRE2 >= 10.44 and raises BADREPESCAPE on older
+         * runtimes (Ubuntu 24.04 ships 10.42).  ${n} has been valid since
+         * 10.00 and the surrounding literal text is guaranteed to contain
+         * no '$' by the checks above. */
+        if (length > PY_SSIZE_T_MAX - 2) {
             PyErr_NoMemory();
             return NULL;
         }
         *handled = 1;
-        Py_ssize_t result_length = length + 3;
+        Py_ssize_t result_length = length + 2;
         if (replacement_is_bytes) {
             PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
             if (result == NULL) {
@@ -5202,12 +5207,11 @@ pattern_translate_single_replacement(PatternObject *self,
             char *output = PyBytes_AS_STRING(result);
             const char *input = PyBytes_AS_STRING(replacement);
             memcpy(output, input, (size_t)slash_index);
-            output[slash_index] = '\\';
-            output[slash_index + 1] = 'g';
-            output[slash_index + 2] = '<';
-            output[slash_index + 3] = (char)following;
-            output[slash_index + 4] = '>';
-            memcpy(output + slash_index + 5,
+            output[slash_index] = '$';
+            output[slash_index + 1] = '{';
+            output[slash_index + 2] = (char)following;
+            output[slash_index + 3] = '}';
+            memcpy(output + slash_index + 4,
                    input + slash_index + 2,
                    (size_t)(length - slash_index - 2));
             return result;
@@ -5223,14 +5227,13 @@ pattern_translate_single_replacement(PatternObject *self,
              PyUnicode_CopyCharacters(
                  result, 0, replacement, 0, slash_index
              ) < 0) ||
-            PyUnicode_WriteChar(result, slash_index, '\\') < 0 ||
-            PyUnicode_WriteChar(result, slash_index + 1, 'g') < 0 ||
-            PyUnicode_WriteChar(result, slash_index + 2, '<') < 0 ||
-            PyUnicode_WriteChar(result, slash_index + 3, following) < 0 ||
-            PyUnicode_WriteChar(result, slash_index + 4, '>') < 0 ||
+            PyUnicode_WriteChar(result, slash_index, '$') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 1, '{') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 2, following) < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 3, '}') < 0 ||
             (slash_index + 2 < length &&
              PyUnicode_CopyCharacters(result,
-                                      slash_index + 5,
+                                      slash_index + 4,
                                       replacement,
                                       slash_index + 2,
                                       length - slash_index - 2) < 0)) {
@@ -5287,8 +5290,62 @@ pattern_translate_single_replacement(PatternObject *self,
         return NULL;
     }
     *handled = 1;
-    Py_INCREF(replacement);
-    return replacement;
+    /* Rewrite \g<name> as ${name} (same runtime-compatibility reason as
+     * above): "\\g<" + name + ">" (4 + n chars) becomes "${" + name + "}"
+     * (3 + n chars), so the result is exactly one character shorter. */
+    {
+        Py_ssize_t result_length = length - 1;
+        Py_ssize_t tail_start = cursor + 1;
+        Py_ssize_t tail_length = length - tail_start;
+        if (replacement_is_bytes) {
+            PyObject *result = PyBytes_FromStringAndSize(NULL, result_length);
+            if (result == NULL) {
+                return NULL;
+            }
+            char *output = PyBytes_AS_STRING(result);
+            const char *input = PyBytes_AS_STRING(replacement);
+            memcpy(output, input, (size_t)slash_index);
+            output[slash_index] = '$';
+            output[slash_index + 1] = '{';
+            memcpy(output + slash_index + 2, name, (size_t)name_length);
+            output[slash_index + 2 + name_length] = '}';
+            memcpy(output + slash_index + 3 + name_length,
+                   input + tail_start,
+                   (size_t)tail_length);
+            return result;
+        }
+        PyObject *result = PyUnicode_New(
+            result_length, PyUnicode_MAX_CHAR_VALUE(replacement)
+        );
+        if (result == NULL) {
+            return NULL;
+        }
+        if ((slash_index > 0 &&
+             PyUnicode_CopyCharacters(result, 0, replacement, 0, slash_index) < 0) ||
+            PyUnicode_WriteChar(result, slash_index, '$') < 0 ||
+            PyUnicode_WriteChar(result, slash_index + 1, '{') < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        for (Py_ssize_t i = 0; i < name_length; ++i) {
+            if (PyUnicode_WriteChar(result, slash_index + 2 + i,
+                                    (Py_UCS4)(unsigned char)name[i]) < 0) {
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+        if (PyUnicode_WriteChar(result, slash_index + 2 + name_length, '}') < 0 ||
+            (tail_length > 0 &&
+             PyUnicode_CopyCharacters(result,
+                                      slash_index + 3 + name_length,
+                                      replacement,
+                                      tail_start,
+                                      tail_length) < 0)) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        return result;
+    }
 }
 
 static PyObject *
@@ -5671,6 +5728,13 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
         } else if (!jit_explicit && jit_rc == PCRE2_ERROR_JIT_UNSUPPORTED) {
             pattern_jit_set(pattern, 0);
 #endif
+        } else if (!jit_explicit && jit_rc == PCRE2_ERROR_NOMEMORY) {
+            /* PCRE2 < 10.43 has no JIT_UNSUPPORTED code and reports every
+             * construct the JIT cannot compile (e.g. \C in UTF mode) as
+             * NOMEMORY.  For implicit JIT requests fall back to the
+             * interpreter exactly as newer runtimes do; an explicit jit=True
+             * still surfaces the error. */
+            pattern_jit_set(pattern, 0);
         } else {
             Py_DECREF(pattern);
             raise_pcre_error("jit_compile", jit_rc, 0);

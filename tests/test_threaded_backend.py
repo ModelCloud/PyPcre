@@ -68,6 +68,7 @@ class TestThreadedBackend(unittest.TestCase):
         self.assertTrue(pattern.use_threads)
 
     def test_parallel_map_batches_work_without_changing_order(self):
+        self._skip_if_thread_barred()
         pattern = pcre.compile(r"\w+", Flag.THREADS)
         subjects = [word * 2_000 for word in ("alpha", "beta", "gamma", "delta", "epsilon")]
         executor = thread_utils.ensure_thread_pool(2)
