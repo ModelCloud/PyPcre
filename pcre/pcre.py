@@ -268,7 +268,12 @@ def _normalise_flags(flags: FlagInput) -> int:
 
 
 def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
-    """Convert a parsed Python replacement template to a PCRE2 replacement string."""
+    """Convert a parsed Python replacement template to a PCRE2 replacement string.
+
+    Group references are emitted as ``${n}``: PCRE2 only accepts ``\\g<n>`` in
+    replacement strings from 10.44 onwards, while ``${n}`` works on every
+    supported runtime.  Literal text is escaped so ``$`` and ``\\`` stay literal.
+    """
 
     if (
         isinstance(parsed, tuple)
@@ -282,7 +287,7 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
             parts = []
             for i, lit in enumerate(literals):
                 if i in slot_to_group:
-                    parts.append(("\\g<" + str(slot_to_group[i]) + ">").encode("ascii"))
+                    parts.append(("${" + str(slot_to_group[i]) + "}").encode("ascii"))
                 if lit is not None:
                     parts.append(lit.replace(b"\\", b"\\\\").replace(b"$", b"$$"))
             return b"".join(parts)
@@ -290,7 +295,7 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
         parts = []
         for i, lit in enumerate(literals):
             if i in slot_to_group:
-                parts.append("\\g<" + str(slot_to_group[i]) + ">")
+                parts.append("${" + str(slot_to_group[i]) + "}")
             if lit is not None:
                 parts.append(lit.replace("\\", "\\\\").replace("$", "$$"))
         return "".join(parts)
@@ -299,7 +304,7 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
         parts = []
         for item in parsed:
             if isinstance(item, int):
-                parts.append(("\\g<" + str(item) + ">").encode("ascii"))
+                parts.append(("${" + str(item) + "}").encode("ascii"))
             else:
                 parts.append(item.replace(b"\\", b"\\\\").replace(b"$", b"$$"))
         return b"".join(parts)
@@ -307,7 +312,7 @@ def _pcre2_replacement_from_parsed(parsed: Any, is_bytes: bool) -> Any:
     parts = []
     for item in parsed:
         if isinstance(item, int):
-            parts.append("\\g<" + str(item) + ">")
+            parts.append("${" + str(item) + "}")
         else:
             parts.append(item.replace("\\", "\\\\").replace("$", "$$"))
     return "".join(parts)

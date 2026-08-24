@@ -14,6 +14,12 @@ import pytest
 import pcre.threads as threads_mod
 
 
+_requires_thread_backend = pytest.mark.skipif(
+    not threads_mod.threading_supported(),
+    reason="threaded backend requires >=8 CPU cores",
+)
+
+
 def test_threading_supported_false_on_low_core_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -51,6 +57,7 @@ def test_configure_threads_threshold_validation(
         threads_mod.configure_threads(threshold=original)
 
 
+@_requires_thread_backend
 def test_configure_thread_pool_clamps_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     original_workers = getattr(threads_mod, "_THREAD_POOL_WORKERS", None)
     original_pool = getattr(threads_mod, "_THREAD_POOL", None)
@@ -71,6 +78,7 @@ def test_configure_thread_pool_clamps_workers(monkeypatch: pytest.MonkeyPatch) -
         threads_mod._THREAD_POOL_WORKERS = original_workers
 
 
+@_requires_thread_backend
 def test_configure_thread_pool_rejects_invalid_worker_count() -> None:
     with pytest.raises(TypeError):
         threads_mod.configure_thread_pool(max_workers="x")
@@ -78,6 +86,7 @@ def test_configure_thread_pool_rejects_invalid_worker_count() -> None:
         threads_mod.configure_thread_pool(max_workers=0)
 
 
+@_requires_thread_backend
 def test_get_thread_pool_size_initializes_once(monkeypatch: pytest.MonkeyPatch) -> None:
     original_workers = threads_mod._THREAD_POOL_WORKERS
     original_pool = threads_mod._THREAD_POOL
@@ -159,6 +168,7 @@ def test_determine_worker_count_requires_supported_backend(
         threads_mod._determine_worker_count(None)
 
 
+@_requires_thread_backend
 def test_configure_thread_pool_shuts_down_existing_pool() -> None:
     original_pool = threads_mod._THREAD_POOL
     original_workers = threads_mod._THREAD_POOL_WORKERS
@@ -176,6 +186,7 @@ def test_configure_thread_pool_shuts_down_existing_pool() -> None:
         threads_mod._THREAD_POOL_WORKERS = original_workers
 
 
+@_requires_thread_backend
 def test_ensure_thread_pool_resizes_existing_pool() -> None:
     original_pool = threads_mod._THREAD_POOL
     original_workers = threads_mod._THREAD_POOL_WORKERS
@@ -192,6 +203,7 @@ def test_ensure_thread_pool_resizes_existing_pool() -> None:
         threads_mod._THREAD_POOL_WORKERS = original_workers
 
 
+@_requires_thread_backend
 def test_pool_submission_cannot_race_executor_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

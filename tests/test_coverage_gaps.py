@@ -358,10 +358,10 @@ def test_pcre2_replacement_conversion_tuple_format() -> None:
     parsed_text = ([(1, 1)], ["$\\", None, "tail"])
     parsed_bytes = ([(1, 1)], [b"$\\", None, b"tail"])
     assert pcre_mod._pcre2_replacement_from_parsed(parsed_text, False) == (
-        "$$" + "\\" * 3 + "g<1>tail"
+        "$$" + "\\" * 2 + "${1}tail"
     )
     assert pcre_mod._pcre2_replacement_from_parsed(parsed_bytes, True) == (
-        b"$$" + b"\\" * 3 + b"g<1>tail"
+        b"$$" + b"\\" * 2 + b"${1}tail"
     )
 
 
