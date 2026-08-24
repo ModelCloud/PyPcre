@@ -74,19 +74,21 @@ coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
 #define PCRE2_GIL_RELEASE_THRESHOLD 262144ULL
 #define PCRE_PATTERN_CACHE_INPUT_LIMIT (64 * 1024)
 
-#if defined(Py_GIL_DISABLED)
-#define PCRE2_CALL_RELEASE_GIL(call) \
-    do {                             \
-        rc = (call);                 \
-    } while (0)
-#else
+/*
+ * Detach the thread state on both GIL and free-threaded builds.  On GIL
+ * builds this releases the GIL; on free-threaded builds it marks the thread
+ * as safe for a stop-the-world pause — without it, a thread inside a long
+ * pcre2_match (huge subject, catastrophic backtracking) blocks every
+ * gc.collect() in the process for the duration of the match.  The wrapped
+ * calls are pure PCRE2 with exclusively-owned arguments, so running them
+ * detached is safe.
+ */
 #define PCRE2_CALL_RELEASE_GIL(call)          \
     do {                                      \
         PyThreadState *_save = PyEval_SaveThread(); \
         rc = (call);                          \
         PyEval_RestoreThread(_save);          \
     } while (0)
-#endif
 
 #define PCRE2_CALL_MAYBE_RELEASE_GIL(call, length)     \
     do {                                               \
@@ -97,15 +99,6 @@ coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
         }                                              \
     } while (0)
 
-#if defined(Py_GIL_DISABLED)
-#define PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(call, length) \
-    do {                                                \
-        (void)(length);                                 \
-        jit_guard_acquire();                            \
-        rc = (call);                                    \
-        jit_guard_release();                            \
-    } while (0)
-#else
 #define PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(call, length)       \
     do {                                                     \
         if ((length) > PCRE2_GIL_RELEASE_THRESHOLD) {       \
@@ -120,7 +113,6 @@ coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
             jit_guard_release();                            \
         }                                                    \
     } while (0)
-#endif
 
 static inline pcre2_match_data *
 pattern_match_data_acquire(PatternObject *pattern, int *from_pattern_cache)
@@ -2020,14 +2012,10 @@ Match_expand(MatchObject *self, PyObject *template_obj)
         return NULL;
     }
 
-    /* The helper is a module function, so a direct dictionary lookup avoids
-       attribute lookup machinery on every expand() call while retaining the
-       module's normal import/refcount lifetime. */
-    PyObject *helper = PyDict_GetItemString(
-        PyModule_GetDict(module),
-        "expand_match_template"
-    );
-    Py_XINCREF(helper);
+    /* GetAttr returns a strong reference.  A borrowed dict lookup here could
+       be freed by a concurrent rebind of the module attribute (monkeypatch,
+       reload) before the INCREF on free-threaded builds. */
+    PyObject *helper = PyObject_GetAttrString(module, "expand_match_template");
     Py_DECREF(module);
     if (helper == NULL) {
         return NULL;
@@ -2452,6 +2440,13 @@ retry:
     }
 
     int use_jit = pattern_jit_get(self->pattern) && !self->retry_nonempty;
+    if (use_jit && self->subject_is_bytes &&
+        (self->pattern->compile_options & PCRE2_UTF) != 0 &&
+        !(self->base_options & PCRE2_NO_UTF_CHECK)) {
+        /* Partial range of a UTF bytes subject: only the interpreter path
+         * validates pos/endpos character boundaries (see Pattern_execute). */
+        use_jit = 0;
+    }
     if (use_jit) {
         if (self->match_context == NULL) {
             self->match_context = pcre2_match_context_create(NULL);
@@ -2765,7 +2760,10 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->resolved_end = 0;
     iter->resolved_end_byte = 0;
     iter->has_endpos = 0;
-    iter->base_options = options;
+    /* Strip caller-supplied PCRE2_NO_UTF_CHECK; it is re-added below only
+     * for ranges this module has validated (mid-character offsets under the
+     * flag are undefined behavior in PCRE2). */
+    iter->base_options = options & ~(uint32_t)PCRE2_NO_UTF_CHECK;
     iter->exhausted = 0;
     iter->match_data = NULL;
     iter->match_context = NULL;
@@ -3272,6 +3270,16 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         return NULL;
     }
 
+    /*
+     * The first-literal prescan must stay conservative for ASCII letters:
+     * PCRE2 reports a first code unit for patterns whose first character is
+     * caseless via a scoped inline group — (?i:a)b, ((?i)a)b — and exposes no
+     * pattern_info for its internal FIRSTCASELESS bit, so `first_literal_
+     * caseless` cannot see those.  Accepting either case of a letter keeps
+     * the filter sound (a false pass just falls through to pcre2_match).
+     * Non-ASCII lead bytes are safe as-is: PCRE2 only reports a single first
+     * code unit when every case variant shares it.
+     */
     if (mode == EXEC_MODE_SEARCH && self->has_first_literal) {
         if (byte_start >= byte_end) {
             Py_DECREF(utf8_owner);
@@ -3279,7 +3287,15 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         }
         const unsigned char *scan_start = (const unsigned char *)(buffer + byte_start);
         size_t span = (size_t)(byte_end - byte_start);
-        if (memchr(scan_start, (unsigned char)self->first_literal, span) == NULL) {
+        unsigned char lit = (unsigned char)self->first_literal;
+        unsigned char folded = (unsigned char)(lit | 0x20u);
+        if (folded >= 'a' && folded <= 'z') {
+            if (memchr(scan_start, folded, span) == NULL &&
+                memchr(scan_start, (unsigned char)(folded ^ 0x20u), span) == NULL) {
+                Py_DECREF(utf8_owner);
+                Py_RETURN_NONE;
+            }
+        } else if (memchr(scan_start, lit, span) == NULL) {
             Py_DECREF(utf8_owner);
             Py_RETURN_NONE;
         }
@@ -3292,7 +3308,15 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             Py_RETURN_NONE;
         }
         unsigned char leading = (unsigned char)buffer[byte_start];
-        if (leading != (unsigned char)self->first_literal) {
+        unsigned char lit = (unsigned char)self->first_literal;
+        unsigned char folded = (unsigned char)(lit | 0x20u);
+        int mismatch;
+        if (folded >= 'a' && folded <= 'z') {
+            mismatch = ((unsigned char)(leading | 0x20u) != folded);
+        } else {
+            mismatch = (leading != lit);
+        }
+        if (mismatch) {
             Py_DECREF(utf8_owner);
             Py_RETURN_NONE;
         }
@@ -3300,7 +3324,10 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 
     PCRE2_SIZE offset_limit = (PCRE2_SIZE)byte_end;
 
-    uint32_t match_options = options;
+    /* Never trust a caller-supplied PCRE2_NO_UTF_CHECK: with a mid-character
+     * pos/endpos it makes pcre2_match undefined behavior.  The flag is
+     * re-added below exactly when this module has validated the range. */
+    uint32_t match_options = options & ~(uint32_t)PCRE2_NO_UTF_CHECK;
     if (mode == EXEC_MODE_MATCH) {
         match_options |= PCRE2_ANCHORED;
     } else if (mode == EXEC_MODE_FULLMATCH) {
@@ -3327,7 +3354,24 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 
     int rc = 0;
     int attempt_jit = pattern_jit_get(self);
+    /* pcre2_jit_match skips every UTF validity check that pcre2_match
+     * performs.  For a partial range of a UTF bytes subject we deliberately
+     * leave PCRE2_NO_UTF_CHECK unset so PCRE2 rejects mid-character
+     * pos/endpos; that contract only holds on the interpreter path, so take
+     * it for those calls (a mid-character offset into JIT-compiled code is
+     * undefined behavior and returns silently wrong results). */
+    if (attempt_jit && subject_is_bytes &&
+        (self->compile_options & PCRE2_UTF) != 0 &&
+        !(match_options & PCRE2_NO_UTF_CHECK)) {
+        attempt_jit = 0;
+    }
     int jit_endanchor_uncertain = 0;
+    /* Whether the JIT call above delivered a definitive result for THIS call.
+     * The interpreter fallback must not consult the pattern-global jit flag:
+     * when this call skips JIT (or JIT reports BADOPTION) while the global
+     * flag is still set, neither engine would run and the uninitialized
+     * match_data (rc == 0) would be turned into a garbage Match. */
+    int jit_produced_result = 0;
     pcre2_match_context *match_context = NULL;
     int match_context_from_pattern = 0;
     int match_context_used_offset_limit = 0;
@@ -3426,7 +3470,10 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             Py_DECREF(utf8_owner);
             raise_pcre_error("jit_match", rc, error_offset);
             return NULL;
-        } else if (jit_anchor_fixup_needed() && rc >= 0 &&
+        } else {
+            jit_produced_result = 1;
+        }
+        if (jit_produced_result && jit_anchor_fixup_needed() && rc >= 0 &&
                    (mode == EXEC_MODE_MATCH || mode == EXEC_MODE_FULLMATCH)) {
             /*
              * Some PCRE2 builds' pcre2_jit_match() silently ignore
@@ -3443,7 +3490,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         }
     }
 
-    if (!pattern_jit_get(self) || jit_endanchor_uncertain) {
+    if (!jit_produced_result || jit_endanchor_uncertain) {
         /*
          * For the fullmatch JIT fallback, truncate the interpreter re-run
          * to the requested endpos (offset_limit). This guarantees that
@@ -3847,9 +3894,17 @@ Pattern_findall(PatternObject *self,
         pcre2_jit_stack_assign(match_context, NULL, jit_stack);
     }
 
-    uint32_t match_options = options;
+    /* Strip caller-supplied PCRE2_NO_UTF_CHECK (re-added below only for
+     * module-validated ranges); the internal PCRE2_USE_OFFSET_LIMIT bit
+     * OR'd in above survives the mask. */
+    uint32_t match_options = options & ~(uint32_t)PCRE2_NO_UTF_CHECK;
     if (!subject_is_bytes || (byte_start == 0 && byte_end == subject_length_bytes)) {
         match_options |= PCRE2_NO_UTF_CHECK;
+    } else if (attempt_jit && (self->compile_options & PCRE2_UTF) != 0) {
+        /* Partial range of a UTF bytes subject: only the interpreter
+         * validates pos/endpos boundaries, so do not run JIT-compiled code
+         * on a potentially mid-character offset (documented UB). */
+        attempt_jit = 0;
     }
 
     result = PyList_New(0);
@@ -4323,13 +4378,18 @@ Pattern_substitute(PatternObject *self,
         goto error;
     }
 
+    /* pcre2_substitute executes JIT-compiled code whenever the pattern's
+     * code block carries a JIT translation — even after this module's
+     * jit_enabled flag was cleared by a JIT_BADOPTION fallback — so key the
+     * serialization guard (PYPCRE_FORCE_JIT_LOCK platforms) on the compiled
+     * code itself, not just on whether we assigned a jit stack. */
+    size_t code_jit_size = 0;
+    (void)pcre2_pattern_info(self->code, PCRE2_INFO_JITSIZE, &code_jit_size);
+    int guard_jit = (jit_stack != NULL) || code_jit_size != 0;
+
     for (int attempts = 0; attempts < 5; ++attempts) {
         limit_state.stopped = 0;
         int rc;
-        /* pcre2_substitute executes JIT-compiled code when the pattern is
-         * JIT-enabled, so it needs the same serialization guard as every
-         * other JIT execution site (PYPCRE_FORCE_JIT_LOCK platforms). */
-        int guard_jit = (jit_stack != NULL);
         if (guard_jit) {
             jit_guard_acquire();
         }
@@ -6121,13 +6181,19 @@ module_exec(PyObject *module)
     int force_jit_lock = 0;
     int first_init = !atomic_load_explicit(&module_fully_initialized, memory_order_acquire);
 
-    force_lock_env = Py_GETENV("PYPCRE_FORCE_JIT_LOCK");
-    if (force_lock_env == NULL) {
-        force_lock_env = Py_GETENV("PCRE2_FORCE_JIT_LOCK");
-    }
-    force_jit_lock = env_flag_is_true(force_lock_env);
-    if (jit_support_initialize(force_jit_lock) < 0) {
-        goto error_jit_support;
+    if (first_init) {
+        /* The jit serial lock must not materialize (or change) after threads
+         * have observed its absence: jit_guard_release would release a lock
+         * that jit_guard_acquire never took. Latch the decision at first
+         * init; a re-exec keeps the existing configuration. */
+        force_lock_env = Py_GETENV("PYPCRE_FORCE_JIT_LOCK");
+        if (force_lock_env == NULL) {
+            force_lock_env = Py_GETENV("PCRE2_FORCE_JIT_LOCK");
+        }
+        force_jit_lock = env_flag_is_true(force_lock_env);
+        if (jit_support_initialize(force_jit_lock) < 0) {
+            goto error_jit_support;
+        }
     }
 
     if (first_init) {
@@ -6145,8 +6211,13 @@ module_exec(PyObject *module)
         pattern_cache_env = Py_GETENV("PCRE2_CACHE_PATTERN_GLOBAL");
     }
     pattern_cache_global = env_flag_is_true(pattern_cache_env);
-    if (pattern_cache_initialize(pattern_cache_global) < 0) {
-        goto error_pattern_cache;
+    if (first_init) {
+        /* A re-exec with a changed env var must not flip the pattern-cache
+         * mode: threads may hold references into the published global map,
+         * and cache.c's strategy (latched above) would disagree with it. */
+        if (pattern_cache_initialize(pattern_cache_global) < 0) {
+            goto error_pattern_cache;
+        }
     }
 
     if (PyType_Ready(&PatternType) < 0) {

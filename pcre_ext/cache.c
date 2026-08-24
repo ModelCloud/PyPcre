@@ -562,7 +562,9 @@ cache_initialize(int global_mode)
 
     cache_strategy_set(global_mode ? CACHE_STRATEGY_GLOBAL : CACHE_STRATEGY_THREAD_LOCAL);
     cache_strategy_set_locked(0);
-    atomic_store_explicit(&context_cache_enabled, 1, memory_order_release);
+    /* context_cache_enabled is NOT reset here: module_exec has already
+     * applied the PYPCRE_DISABLE_CONTEXT_CACHE environment toggle, and
+     * storing 1 unconditionally would silently clobber it. */
 
     global_match_cache_clear();
     global_jit_cache_clear();

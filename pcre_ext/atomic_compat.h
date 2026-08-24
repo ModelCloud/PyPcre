@@ -221,6 +221,11 @@ static __forceinline int   ac_cas_ptr  (void * volatile *p, void **e, void *d) {
 /*    These work on *plain* volatile T* (no _Atomic required).           */
 /* --------------------------------------------------------------------- */
 
+/* On 32-bit Windows size_t IS unsigned int (== uint32_t): listing both in
+ * one _Generic is a duplicate-association constraint violation, so the
+ * size_t branches exist only where size_t is a distinct 64-bit type. */
+#if SIZE_MAX > 0xFFFFFFFFu
+
 /* Load */
 #define atomic_compat_load(ptr) \
     _Generic((ptr), \
@@ -244,6 +249,30 @@ static __forceinline int   ac_cas_ptr  (void * volatile *p, void **e, void *d) {
                       size_t *:              ac_store_size((volatile size_t*)(ptr),  (size_t)(value)), \
         /* pointer */ default:               ac_store_ptr((void * volatile *)(ptr), (void*)(value)) \
     )
+
+#else /* 32-bit size_t: the uint32_t associations already cover it */
+
+/* Load */
+#define atomic_compat_load(ptr) \
+    _Generic((ptr), \
+        /* signed */   volatile int32_t *:  ac_load_i32((volatile int32_t*)(ptr)), \
+                      int32_t *:            ac_load_i32((volatile int32_t*)(ptr)), \
+        /* unsigned */ volatile uint32_t *: ac_load_u32((volatile uint32_t*)(ptr)), \
+                      uint32_t *:           ac_load_u32((volatile uint32_t*)(ptr)), \
+        /* pointer */ default:               ac_load_ptr((void * volatile *)(ptr)) \
+    )
+
+/* Store */
+#define atomic_compat_store(ptr, value) \
+    _Generic((ptr), \
+        /* signed */   volatile int32_t *:  ac_store_i32((volatile int32_t*)(ptr),  (int32_t)(value)), \
+                      int32_t *:            ac_store_i32((volatile int32_t*)(ptr),  (int32_t)(value)), \
+        /* unsigned */ volatile uint32_t *: ac_store_u32((volatile uint32_t*)(ptr), (uint32_t)(value)), \
+                      uint32_t *:           ac_store_u32((volatile uint32_t*)(ptr), (uint32_t)(value)), \
+        /* pointer */ default:               ac_store_ptr((void * volatile *)(ptr), (void*)(value)) \
+    )
+
+#endif /* SIZE_MAX > 0xFFFFFFFFu */
 
 /* Exchange */
 #define atomic_compat_exchange(ptr, value) \
