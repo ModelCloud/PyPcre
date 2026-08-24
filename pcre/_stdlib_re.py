@@ -11,9 +11,18 @@ def _load_parser():
     if parser is not None:
         return parser
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        import sre_parse as parser
+    # Python <= 3.10 hides the parser behind the deprecated top-level
+    # ``sre_parse`` module; Python 3.15 removes that alias entirely.
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            import sre_parse as parser
+    except ModuleNotFoundError as exc:  # pragma: no cover - Python >= 3.15
+        raise ImportError(
+            "stdlib re internals unavailable: expected re._parser "
+            "(Python 3.11+) or sre_parse (Python <= 3.10); this interpreter "
+            "provides neither"
+        ) from exc
 
     return parser
 

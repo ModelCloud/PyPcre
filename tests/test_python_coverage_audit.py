@@ -28,10 +28,15 @@ error_mod = importlib.import_module("pcre.error")
 
 def test_stdlib_parser_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     # Python 3.10 does not expose ``re._parser`` at module scope, while newer
-    # releases do.  Either state should exercise our fallback loader.
+    # releases do.  Python 3.15 removes the legacy ``sre_parse`` module, so on
+    # that interpreter the fallback must degrade with a clear ImportError.
     monkeypatch.delattr(re, "_parser", raising=False)
-    parser = stdlib_re._load_parser()
-    assert callable(parser.parse)
+    if importlib.util.find_spec("sre_parse") is not None:
+        parser = stdlib_re._load_parser()
+        assert callable(parser.parse)
+    else:
+        with pytest.raises(ImportError):
+            stdlib_re._load_parser()
 
 
 def test_stdlib_parser_exported_path(monkeypatch: pytest.MonkeyPatch) -> None:
