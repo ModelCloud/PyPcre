@@ -39,22 +39,26 @@ def _performance_cpu_total() -> int:
     """Return macOS performance-tier logical CPUs when the kernel exposes it."""
 
     global _PERFORMANCE_CPU_TOTAL
-    with _THREAD_POOL_LOCK:
-        if _PERFORMANCE_CPU_TOTAL is not None:
-            return _PERFORMANCE_CPU_TOTAL
-        if sys.platform != "darwin":
-            _PERFORMANCE_CPU_TOTAL = 0
-            return 0
+    snapshot = _PERFORMANCE_CPU_TOTAL
+    if snapshot is not None:
+        return snapshot
+    # Probe outside _THREAD_POOL_LOCK: spawning a subprocess under the
+    # process-wide pool lock stalls every other thread touching the pool.
+    # A duplicate concurrent probe is harmless; publication is atomic.
+    if sys.platform != "darwin":
+        result = 0
+    else:
         try:
             value = subprocess.check_output(
                 ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
                 text=True,
                 stderr=subprocess.DEVNULL,
             )
-            _PERFORMANCE_CPU_TOTAL = max(0, int(value.strip()))
+            result = max(0, int(value.strip()))
         except (OSError, ValueError, subprocess.CalledProcessError):
-            _PERFORMANCE_CPU_TOTAL = 0
-        return _PERFORMANCE_CPU_TOTAL
+            result = 0
+    _PERFORMANCE_CPU_TOTAL = result
+    return result
 
 
 _THREADS_DEFAULT: bool = threading_supported() and not (

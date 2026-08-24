@@ -249,6 +249,7 @@ static int match_resolve_span(MatchObject *self,
 static void
 Match_dealloc(MatchObject *self)
 {
+    PyObject_GC_UnTrack(self);
     Py_XDECREF(self->pattern);
     Py_XDECREF(self->public_pattern);
     Py_XDECREF(self->subject);
@@ -256,6 +257,36 @@ Match_dealloc(MatchObject *self)
     Py_XDECREF(self->regs_cache);
     pcre_free(self->ovector);
     Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+/*
+ * Match/FindIter can hold arbitrary user objects (the `owner` argument stored
+ * as public_pattern) and str/bytes subclasses, so the GC must be able to see
+ * through them or reference cycles leak permanently.  tp_clear only drops
+ * public_pattern: breaking any one edge collects the cycle, and keeping
+ * subject/utf8_owner alive until dealloc means utf8_data can never dangle.
+ */
+static int
+Match_traverse(MatchObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->pattern);
+    Py_VISIT(self->public_pattern);
+    Py_VISIT(self->subject);
+    Py_VISIT(self->utf8_owner);
+    Py_VISIT(self->regs_cache);
+    return 0;
+}
+
+static int
+Match_clear(MatchObject *self)
+{
+    PyObject *old = NULL;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    old = self->public_pattern;
+    self->public_pattern = NULL;
+    Py_END_CRITICAL_SECTION();
+    Py_XDECREF(old);
+    return 0;
 }
 
 static PyObject *
@@ -1910,16 +1941,34 @@ Match_expand(MatchObject *self, PyObject *template_obj)
     }
     if (self->subject_is_bytes &&
         (PyBytes_Check(template_obj) || PyByteArray_Check(template_obj))) {
-        const char *template_data = PyBytes_Check(template_obj)
-            ? PyBytes_AS_STRING(template_obj)
-            : (const char *)PyByteArray_AS_STRING(template_obj);
-        Py_ssize_t template_length = PyBytes_Check(template_obj)
-            ? PyBytes_GET_SIZE(template_obj)
-            : PyByteArray_GET_SIZE(template_obj);
+        PyObject *template_snapshot = NULL;
+        if (PyByteArray_Check(template_obj)) {
+            /* A bytearray can be resized or freed by another thread while we
+             * scan its raw buffer, so snapshot it to immutable bytes under
+             * the object's critical section before touching the data. */
+            Py_BEGIN_CRITICAL_SECTION(template_obj);
+            template_snapshot = PyBytes_FromStringAndSize(
+                PyByteArray_AS_STRING(template_obj),
+                PyByteArray_GET_SIZE(template_obj));
+            Py_END_CRITICAL_SECTION();
+            if (template_snapshot == NULL) {
+                return NULL;
+            }
+        }
+        const char *template_data = template_snapshot != NULL
+            ? PyBytes_AS_STRING(template_snapshot)
+            : PyBytes_AS_STRING(template_obj);
+        Py_ssize_t template_length = template_snapshot != NULL
+            ? PyBytes_GET_SIZE(template_snapshot)
+            : PyBytes_GET_SIZE(template_obj);
         const char *slash = memchr(template_data, '\\', (size_t)template_length);
         if (slash == NULL) {
+            if (template_snapshot != NULL) {
+                return template_snapshot;
+            }
             return PyBytes_FromObject(template_obj);
         }
+        Py_XDECREF(template_snapshot);
         if (PyBytes_CheckExact(template_obj)) {
             int handled = 0;
             PyObject *result = match_expand_simple_numeric(
@@ -2066,7 +2115,10 @@ PyTypeObject MatchType = {
     .tp_basicsize = sizeof(MatchObject),
     .tp_dealloc = (destructor)Match_dealloc,
     .tp_repr = (reprfunc)Match_repr,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)Match_traverse,
+    .tp_clear = (inquiry)Match_clear,
+    .tp_free = PyObject_GC_Del,
     .tp_methods = Match_methods,
     .tp_getset = Match_getset,
     .tp_as_mapping = &Match_as_mapping,
@@ -2100,7 +2152,12 @@ typedef struct {
     int utf8_is_ascii;
     PyObject *public_pattern;
     int retry_nonempty;
-#if defined(Py_GIL_DISABLED)
+    /* Serializes iternext on every build: even with the GIL, the match call
+     * can release it (PCRE2_CALL_MAYBE_RELEASE_GIL), letting a second thread
+     * run pcre2_match concurrently on the same match_data. */
+#if PY_VERSION_HEX >= 0x030D0000
+    PyMutex lock;
+#else
     PyThread_type_lock lock;
 #endif
 } FindIterObject;
@@ -2320,6 +2377,7 @@ finditer_index_to_byte(FindIterObject *self, Py_ssize_t target_index)
 static void
 FindIter_dealloc(FindIterObject *self)
 {
+    PyObject_GC_UnTrack(self);
     if (self->match_data != NULL) {
         match_data_cache_release(self->match_data);
         self->match_data = NULL;
@@ -2332,7 +2390,7 @@ FindIter_dealloc(FindIterObject *self)
         jit_stack_cache_release(self->jit_stack);
         self->jit_stack = NULL;
     }
-#if defined(Py_GIL_DISABLED)
+#if PY_VERSION_HEX < 0x030D0000
     if (self->lock != NULL) {
         PyThread_free_lock(self->lock);
         self->lock = NULL;
@@ -2552,14 +2610,42 @@ no_match:
 static PyObject *
 FindIter_iternext(FindIterObject *self)
 {
-#if defined(Py_GIL_DISABLED)
-    PyThread_acquire_lock(self->lock, WAIT_LOCK);
+#if PY_VERSION_HEX >= 0x030D0000
+    /* PyMutex parks GC-safely: a blocked waiter neither holds the GIL nor
+     * stalls a free-threaded stop-the-world pause. */
+    PyMutex_Lock(&self->lock);
+    PyObject *result = FindIter_iternext_unlocked(self);
+    PyMutex_Unlock(&self->lock);
+    return result;
+#else
+    if (!PyThread_acquire_lock(self->lock, NOWAIT_LOCK)) {
+        /* Blocking while holding the GIL would deadlock against the holder,
+         * which needs the GIL to finish iternext and release the lock. */
+        Py_BEGIN_ALLOW_THREADS
+        PyThread_acquire_lock(self->lock, WAIT_LOCK);
+        Py_END_ALLOW_THREADS
+    }
     PyObject *result = FindIter_iternext_unlocked(self);
     PyThread_release_lock(self->lock);
     return result;
-#else
-    return FindIter_iternext_unlocked(self);
 #endif
+}
+
+static int
+FindIter_traverse(FindIterObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->pattern);
+    Py_VISIT(self->subject);
+    Py_VISIT(self->utf8_owner);
+    Py_VISIT(self->public_pattern);
+    return 0;
+}
+
+static int
+FindIter_clear(FindIterObject *self)
+{
+    Py_CLEAR(self->public_pattern);
+    return 0;
 }
 
 static PyTypeObject FindIterType = {
@@ -2567,7 +2653,10 @@ static PyTypeObject FindIterType = {
     .tp_name = "pcre._FindIter",
     .tp_basicsize = sizeof(FindIterObject),
     .tp_dealloc = (destructor)FindIter_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)FindIter_traverse,
+    .tp_clear = (inquiry)FindIter_clear,
+    .tp_free = PyObject_GC_Del,
     .tp_iter = FindIter_iter,
     .tp_iternext = (iternextfunc)FindIter_iternext,
     .tp_doc = "Iterator yielding successive PCRE2 matches.",
@@ -2590,7 +2679,7 @@ create_match_object(PatternObject *pattern,
      * Materialize a standalone match snapshot. The ovector is copied because
      * PCRE2 reuses match-data buffers from caches across calls and threads.
      */
-    MatchObject *match = PyObject_New(MatchObject, &MatchType);
+    MatchObject *match = PyObject_GC_New(MatchObject, &MatchType);
     if (match == NULL) {
         return NULL;
     }
@@ -2601,7 +2690,7 @@ create_match_object(PatternObject *pattern,
 #if SIZE_MAX < UINT64_MAX
     if ((uint64_t)ovec_count > (uint64_t)(SIZE_MAX / sizeof(Py_ssize_t) / 2)) {
         PyErr_NoMemory();
-        PyObject_Del(match);
+        PyObject_GC_Del(match);
         return NULL;
     }
 #endif
@@ -2609,13 +2698,13 @@ create_match_object(PatternObject *pattern,
     match->ovector = pcre_malloc(alloc_pairs * sizeof(Py_ssize_t));
     if (match->ovector == NULL) {
         PyErr_NoMemory();
-        PyObject_Del(match);
+        PyObject_GC_Del(match);
         return NULL;
     }
     if (ovector == NULL) {
         PyErr_NoMemory();
         pcre_free(match->ovector);
-        PyObject_Del(match);
+        PyObject_GC_Del(match);
         return NULL;
     }
 
@@ -2645,6 +2734,7 @@ create_match_object(PatternObject *pattern,
        group values are returned as bytes. */
     match->subject_is_bytes = !PyUnicode_Check(subject_obj);
 
+    PyObject_GC_Track(match);
     return match;
 }
 
@@ -2656,7 +2746,7 @@ Pattern_create_finditer(PatternObject *pattern,
                         uint32_t options,
                         PyObject *public_pattern)
 {
-    FindIterObject *iter = PyObject_New(FindIterObject, &FindIterType);
+    FindIterObject *iter = PyObject_GC_New(FindIterObject, &FindIterType);
     if (iter == NULL) {
         return NULL;
     }
@@ -2689,7 +2779,9 @@ Pattern_create_finditer(PatternObject *pattern,
     iter->utf8_is_ascii = 0;
     iter->public_pattern = NULL;
     iter->retry_nonempty = 0;
-#if defined(Py_GIL_DISABLED)
+#if PY_VERSION_HEX >= 0x030D0000
+    memset(&iter->lock, 0, sizeof(iter->lock));
+#else
     iter->lock = PyThread_allocate_lock();
     if (iter->lock == NULL) {
         PyErr_NoMemory();
@@ -2881,6 +2973,7 @@ Pattern_create_finditer(PatternObject *pattern,
         iter->base_options |= PCRE2_NO_UTF_CHECK;
     }
 
+    PyObject_GC_Track(iter);
     return (PyObject *)iter;
 
 error:
@@ -2901,13 +2994,13 @@ error:
     Py_XDECREF(iter->utf8_owner);
     Py_XDECREF(iter->subject);
     Py_XDECREF(iter->pattern);
-#if defined(Py_GIL_DISABLED)
+#if PY_VERSION_HEX < 0x030D0000
     if (iter->lock != NULL) {
         PyThread_free_lock(iter->lock);
         iter->lock = NULL;
     }
 #endif
-    PyObject_Del(iter);
+    PyObject_GC_Del(iter);
     return NULL;
 }
 
@@ -2921,6 +3014,7 @@ typedef enum {
 static void
 Pattern_dealloc(PatternObject *self)
 {
+    PyObject_GC_UnTrack(self);
 #if !defined(PCRE_EXT_HAVE_ATOMICS)
     if (self->jit_lock != NULL) {
         PyThread_free_lock(self->jit_lock);
@@ -4231,17 +4325,28 @@ Pattern_substitute(PatternObject *self,
 
     for (int attempts = 0; attempts < 5; ++attempts) {
         limit_state.stopped = 0;
-        int rc = pcre2_substitute(self->code,
-                                  (PCRE2_SPTR)subject_data,
-                                  (PCRE2_SIZE)subject_length,
-                                  0,
-                                  sub_options,
-                                  match_data,
-                                  match_context,
-                                  (PCRE2_SPTR)repl_data,
-                                  (PCRE2_SIZE)repl_length,
-                                  out,
-                                  &outlen);
+        int rc;
+        /* pcre2_substitute executes JIT-compiled code when the pattern is
+         * JIT-enabled, so it needs the same serialization guard as every
+         * other JIT execution site (PYPCRE_FORCE_JIT_LOCK platforms). */
+        int guard_jit = (jit_stack != NULL);
+        if (guard_jit) {
+            jit_guard_acquire();
+        }
+        rc = pcre2_substitute(self->code,
+                              (PCRE2_SPTR)subject_data,
+                              (PCRE2_SIZE)subject_length,
+                              0,
+                              sub_options,
+                              match_data,
+                              match_context,
+                              (PCRE2_SPTR)repl_data,
+                              (PCRE2_SIZE)repl_length,
+                              out,
+                              &outlen);
+        if (guard_jit) {
+            jit_guard_release();
+        }
         if (rc == PCRE2_ERROR_NOMEMORY) {
             PCRE2_SIZE required = outlen;
             if (count > 1) {
@@ -5273,13 +5378,28 @@ static PyGetSetDef Pattern_getset[] = {
     {NULL, NULL, NULL, NULL, NULL},
 };
 
+/* Pattern.pattern may be a str/bytes subclass instance whose attributes can
+ * refer back to the Pattern, so the GC needs visibility.  No tp_clear: the
+ * cycle is broken through the subclass instance's clearable __dict__, and the
+ * Pattern's own references stay valid until dealloc. */
+static int
+Pattern_traverse(PatternObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->pattern);
+    Py_VISIT(self->pattern_bytes);
+    Py_VISIT(self->groupindex);
+    return 0;
+}
+
 PyTypeObject PatternType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "pcre.Pattern",
     .tp_basicsize = sizeof(PatternObject),
     .tp_dealloc = (destructor)Pattern_dealloc,
     .tp_repr = (reprfunc)Pattern_repr,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)Pattern_traverse,
+    .tp_free = PyObject_GC_Del,
     .tp_methods = Pattern_methods,
     .tp_getset = Pattern_getset,
     .tp_doc = "Compiled PCRE2 pattern.",
@@ -5379,7 +5499,7 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
         return NULL;
     }
 
-    PatternObject *pattern = PyObject_New(PatternObject, &PatternType);
+    PatternObject *pattern = PyObject_GC_New(PatternObject, &PatternType);
     if (pattern == NULL) {
         pcre2_code_free(code);
         Py_DECREF(pattern_bytes);
@@ -5399,7 +5519,7 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     pattern->jit_lock = PyThread_allocate_lock();
     if (pattern->jit_lock == NULL) {
         PyErr_NoMemory();
-        PyObject_Del(pattern);
+        PyObject_GC_Del(pattern);
         pcre2_code_free(code);
         Py_DECREF(pattern_bytes);
         return NULL;
@@ -5479,6 +5599,7 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
         }
     }
 
+    PyObject_GC_Track(pattern);
     return pattern;
 }
 
@@ -5968,6 +6089,12 @@ jit_anchor_fixup_needed(void)
     return needed;
 }
 
+/* Set after the first fully successful module_exec.  The teardown helpers
+ * destroy process-global state (locks, TSS keys, exception types, caches)
+ * that live threads from a previous successful import may be using, so a
+ * failed re-exec (importlib.reload) must never run them. */
+static ATOMIC_VAR(int) module_fully_initialized = ATOMIC_VAR_INIT(0);
+
 static int
 module_exec(PyObject *module)
 {
@@ -5992,6 +6119,7 @@ module_exec(PyObject *module)
     const char *pattern_cache_env = NULL;
     int pattern_cache_global = 0;
     int force_jit_lock = 0;
+    int first_init = !atomic_load_explicit(&module_fully_initialized, memory_order_acquire);
 
     force_lock_env = Py_GETENV("PYPCRE_FORCE_JIT_LOCK");
     if (force_lock_env == NULL) {
@@ -6002,11 +6130,15 @@ module_exec(PyObject *module)
         goto error_jit_support;
     }
 
-    context_cache_env = Py_GETENV("PYPCRE_DISABLE_CONTEXT_CACHE");
-    if (context_cache_env == NULL) {
-        context_cache_env = Py_GETENV("PCRE2_DISABLE_CONTEXT_CACHE");
+    if (first_init) {
+        /* Flipping the context-cache toggle on a re-exec would change the
+         * ownership rules for contexts that other threads hold in flight. */
+        context_cache_env = Py_GETENV("PYPCRE_DISABLE_CONTEXT_CACHE");
+        if (context_cache_env == NULL) {
+            context_cache_env = Py_GETENV("PCRE2_DISABLE_CONTEXT_CACHE");
+        }
+        cache_set_context_cache_enabled(env_flag_is_true(context_cache_env) ? 0 : 1);
     }
-    cache_set_context_cache_enabled(env_flag_is_true(context_cache_env) ? 0 : 1);
 
     pattern_cache_env = Py_GETENV("PYPCRE_CACHE_PATTERN_GLOBAL");
     if (pattern_cache_env == NULL) {
@@ -6072,18 +6204,33 @@ module_exec(PyObject *module)
         goto error_cache;
     }
 
+    atomic_store_explicit(&module_fully_initialized, 1, memory_order_release);
     return 0;
 
+    /* Teardowns free process-global locks, TSS keys, and exception types.
+     * They are only safe while nothing else can be using that state, i.e.
+     * when the very first initialization fails.  A failed re-exec leaks the
+     * partially-updated state instead of corrupting live users. */
 error_cache:
-    cache_teardown();
+    if (first_init) {
+        cache_teardown();
+    }
 error_errors:
-    pcre_error_teardown();
+    if (first_init) {
+        pcre_error_teardown();
+    }
 error_memory:
-    pcre_memory_teardown();
+    if (first_init) {
+        pcre_memory_teardown();
+    }
 error_pattern_cache:
-    pattern_cache_teardown();
+    if (first_init) {
+        pattern_cache_teardown();
+    }
 error_jit_support:
-    jit_support_teardown();
+    if (first_init) {
+        jit_support_teardown();
+    }
     return -1;
 }
 

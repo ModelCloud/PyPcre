@@ -356,6 +356,13 @@ static __forceinline void atomic_flag_clear_explicit(atomic_flag *obj, memory_or
 #  define ATOMIC_COMPAT_HAVE_ATOMICS 1
 #  define ATOMIC_VAR(type) _Atomic(type)
 
+/* C17 deprecated ATOMIC_VAR_INIT and C23 removed it (gcc 15+/clang 19+ no
+ * longer define it).  Plain initialization of an _Atomic object is valid in
+ * every supported standard revision. */
+#  ifndef ATOMIC_VAR_INIT
+#    define ATOMIC_VAR_INIT(value) (value)
+#  endif
+
 #endif /* _MSC_VER */
 
 #ifdef __cplusplus

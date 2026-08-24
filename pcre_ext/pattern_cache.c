@@ -16,8 +16,12 @@ typedef struct {
 
 static Py_tss_t pattern_cache_tss = Py_tss_NEEDS_INIT;
 static ATOMIC_VAR(int) pattern_cache_tss_ready = ATOMIC_VAR_INIT(0);
+/* In global mode, map/order are created during module_exec before the mode
+ * flag is published and stay alive for the module's lifetime; mutations are
+ * serialized with a critical section on the map object.  A raw PyThread lock
+ * here previously deadlocked free-threaded stop-the-world pauses (attached
+ * waiter) and self-deadlocked when a GC finalizer re-entered pcre.compile. */
 static PatternCacheState global_pattern_cache = {NULL, NULL, NULL, MODULE_COMPILE_CACHE_LIMIT};
-static PyThread_type_lock global_pattern_cache_lock = NULL;
 static ATOMIC_VAR(int) pattern_cache_global_mode = ATOMIC_VAR_INIT(0);
 static PyObject *pattern_cache_cleanup_key = NULL;
 
@@ -179,72 +183,39 @@ pattern_cache_capsule_destructor(PyObject *capsule)
     pattern_cache_thread_state_free(state);
 }
 
-static int
-pattern_cache_acquire_state(PatternCacheState **state_out, int *lock_held)
+static PatternCacheState *
+pattern_cache_thread_state_acquire(void)
 {
-    if (state_out == NULL || lock_held == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "invalid pattern cache request");
-        return -1;
-    }
-
-    if (pattern_cache_is_global()) {
-        if (global_pattern_cache_lock != NULL) {
-            PyThread_acquire_lock(global_pattern_cache_lock, 1);
-            *lock_held = 1;
-        } else {
-            *lock_held = 0;
-        }
-        if (pattern_cache_state_ensure(&global_pattern_cache) < 0) {
-            if (*lock_held) {
-                PyThread_release_lock(global_pattern_cache_lock);
-            }
-            return -1;
-        }
-        *state_out = &global_pattern_cache;
-        return 0;
-    }
-
     PatternCacheState *state = thread_pattern_cache_state_get_or_create();
     if (state == NULL) {
-        return -1;
+        return NULL;
     }
     if (pattern_cache_state_ensure(state) < 0) {
-        return -1;
+        return NULL;
     }
-    *state_out = state;
-    *lock_held = 0;
-    return 0;
-}
-
-static inline void
-pattern_cache_release_state(int lock_held)
-{
-    if (lock_held && global_pattern_cache_lock != NULL) {
-        PyThread_release_lock(global_pattern_cache_lock);
-    }
+    return state;
 }
 
 int
 pattern_cache_initialize(int global_mode)
 {
-    atomic_store_explicit(&pattern_cache_global_mode, global_mode ? 1 : 0, memory_order_release);
     if (global_mode) {
-        if (global_pattern_cache_lock == NULL) {
-            global_pattern_cache_lock = PyThread_allocate_lock();
-            if (global_pattern_cache_lock == NULL) {
-                PyErr_NoMemory();
-                return -1;
-            }
-        }
         global_pattern_cache.limit = MODULE_COMPILE_CACHE_LIMIT;
         if (pattern_cache_state_ensure(&global_pattern_cache) < 0) {
             return -1;
         }
+        /* Publish the mode only after the shared containers fully exist so a
+         * concurrent lookup cannot observe global mode with a NULL map. */
+        atomic_store_explicit(&pattern_cache_global_mode, 1, memory_order_release);
         return 0;
     }
 
-    global_pattern_cache.limit = MODULE_COMPILE_CACHE_LIMIT;
-    pattern_cache_state_clear(&global_pattern_cache);
+    if (!pattern_cache_is_global()) {
+        /* Only reset shared state when not already committed to global mode
+         * (a re-exec must not clear a cache other threads are using). */
+        global_pattern_cache.limit = MODULE_COMPILE_CACHE_LIMIT;
+    }
+    atomic_store_explicit(&pattern_cache_global_mode, 0, memory_order_release);
     if (pattern_cache_tss_initialize() < 0) {
         return -1;
     }
@@ -261,12 +232,11 @@ void
 pattern_cache_teardown(void)
 {
     if (pattern_cache_is_global()) {
-        pattern_cache_state_clear(&global_pattern_cache);
-        if (global_pattern_cache_lock != NULL) {
-            PyThread_free_lock(global_pattern_cache_lock);
-            global_pattern_cache_lock = NULL;
-        }
+        /* Only reached when the very first module initialization fails
+         * (module_exec guards re-exec error paths), so no other thread can
+         * hold references into these containers. */
         atomic_store_explicit(&pattern_cache_global_mode, 0, memory_order_release);
+        pattern_cache_state_clear(&global_pattern_cache);
         Py_CLEAR(pattern_cache_cleanup_key);
         return;
     }
@@ -305,14 +275,37 @@ pattern_cache_lookup(PyObject *cache_key, PatternObject **out_pattern)
     }
     *out_pattern = NULL;
 
-    PatternCacheState *state = NULL;
-    int lock_held = 0;
-    if (pattern_cache_acquire_state(&state, &lock_held) < 0) {
-        return -1;
+    if (pattern_cache_is_global()) {
+        PyObject *map = global_pattern_cache.map;
+        if (map == NULL) {
+            return 0;
+        }
+#if PY_VERSION_HEX >= 0x030D0000
+        /* Owned-reference lookup under the dict's internal lock: safe against
+         * concurrent eviction on free-threaded builds. */
+        PyObject *cached = NULL;
+        if (PyDict_GetItemRef(map, cache_key, &cached) < 0) {
+            return -1;
+        }
+        *out_pattern = (PatternObject *)cached;
+        return 0;
+#else
+        PyObject *cached = PyDict_GetItemWithError(map, cache_key);
+        if (cached != NULL) {
+            Py_INCREF(cached);
+            *out_pattern = (PatternObject *)cached;
+        } else if (PyErr_Occurred()) {
+            return -1;
+        }
+        return 0;
+#endif
     }
 
-    if (state == NULL || state->map == NULL) {
-        pattern_cache_release_state(lock_held);
+    PatternCacheState *state = pattern_cache_thread_state_acquire();
+    if (state == NULL) {
+        return -1;
+    }
+    if (state->map == NULL) {
         return 0;
     }
 
@@ -321,11 +314,8 @@ pattern_cache_lookup(PyObject *cache_key, PatternObject **out_pattern)
         Py_INCREF(cached);
         *out_pattern = (PatternObject *)cached;
     } else if (PyErr_Occurred()) {
-        pattern_cache_release_state(lock_held);
         return -1;
     }
-
-    pattern_cache_release_state(lock_held);
     return 0;
 }
 
@@ -338,36 +328,27 @@ pattern_cache_evict_if_needed(PatternCacheState *state)
     if (state->limit >= 0 && PyList_GET_SIZE(state->order) > state->limit) {
         PyObject *old_key = PyList_GET_ITEM(state->order, 0);
         Py_INCREF(old_key);
-        if (PySequence_DelItem(state->order, 0) < 0) {
+        /* Remove from the map first: if the order-list delete fails the entry
+         * is retried next time, whereas the reverse order could strand an
+         * unevictable entry in the map and let it grow past the limit. */
+        if (PyDict_DelItem(state->map, old_key) < 0) {
             PyErr_Clear();
-        } else if (PyDict_DelItem(state->map, old_key) < 0) {
+        }
+        if (PySequence_DelItem(state->order, 0) < 0) {
             PyErr_Clear();
         }
         Py_DECREF(old_key);
     }
 }
 
-int
-pattern_cache_store(PyObject *cache_key, PatternObject *pattern)
+static int
+pattern_cache_store_locked(PatternCacheState *state, PyObject *cache_key, PatternObject *pattern)
 {
-    PatternCacheState *state = NULL;
-    int lock_held = 0;
-    if (pattern_cache_acquire_state(&state, &lock_held) < 0) {
-        return -1;
-    }
-
-    if (state == NULL || state->map == NULL) {
-        pattern_cache_release_state(lock_held);
-        return 0;
-    }
-
     int already_present = PyDict_Contains(state->map, cache_key);
     if (already_present < 0) {
-        pattern_cache_release_state(lock_held);
         return -1;
     }
     if (PyDict_SetItem(state->map, cache_key, (PyObject *)pattern) < 0) {
-        pattern_cache_release_state(lock_held);
         return -1;
     }
 
@@ -378,22 +359,57 @@ pattern_cache_store(PyObject *cache_key, PatternObject *pattern)
             pattern_cache_evict_if_needed(state);
         }
     }
-
-    pattern_cache_release_state(lock_held);
     return 0;
+}
+
+int
+pattern_cache_store(PyObject *cache_key, PatternObject *pattern)
+{
+    if (pattern_cache_is_global()) {
+        PyObject *map = global_pattern_cache.map;
+        if (map == NULL) {
+            return 0;
+        }
+        int rc = 0;
+        /* Critical sections keep map/order coherent without the deadlocks of
+         * a raw lock: a blocked waiter parks GC-safely, and reentrant entry
+         * from a GC finalizer suspends the outer section instead of hanging. */
+        Py_BEGIN_CRITICAL_SECTION(map);
+        rc = pattern_cache_store_locked(&global_pattern_cache, cache_key, pattern);
+        Py_END_CRITICAL_SECTION();
+        return rc;
+    }
+
+    PatternCacheState *state = pattern_cache_thread_state_acquire();
+    if (state == NULL) {
+        return -1;
+    }
+    if (state->map == NULL) {
+        return 0;
+    }
+    return pattern_cache_store_locked(state, cache_key, pattern);
 }
 
 void
 pattern_cache_clear_current(void)
 {
     if (pattern_cache_is_global()) {
-        if (global_pattern_cache_lock != NULL) {
-            PyThread_acquire_lock(global_pattern_cache_lock, 1);
+        PyObject *map = global_pattern_cache.map;
+        if (map == NULL) {
+            return;
         }
-        pattern_cache_state_clear(&global_pattern_cache);
-        if (global_pattern_cache_lock != NULL) {
-            PyThread_release_lock(global_pattern_cache_lock);
+        /* Empty the containers in place; the container objects themselves
+         * stay alive for the module's lifetime so concurrent lookups and
+         * stores always see valid dicts/lists. */
+        Py_BEGIN_CRITICAL_SECTION(map);
+        PyDict_Clear(map);
+        if (global_pattern_cache.order != NULL) {
+            if (PyList_SetSlice(global_pattern_cache.order, 0,
+                                PyList_GET_SIZE(global_pattern_cache.order), NULL) < 0) {
+                PyErr_Clear();
+            }
         }
+        Py_END_CRITICAL_SECTION();
         return;
     }
 
