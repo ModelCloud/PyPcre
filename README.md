@@ -14,7 +14,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 </p>
 
 <p align="center">
-    <a href="https://github.com/ModelCloud/PyPcre/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/Pcre.svg"></a>
+    <a href="https://github.com/ModelCloud/PyPcre/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/PyPcre.svg"></a>
     <a href="https://pypi.org/project/PyPcre/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/PyPcre"></a>
     <a href="https://pepy.tech/projects/PyPcre" style="text-decoration:none;"><img src="https://static.pepy.tech/badge/PyPcre" alt="PyPI Downloads"></a>
     <a href="https://github.com/ModelCloud/PyPcre/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/PyPcre"></a>
@@ -24,8 +24,9 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
-* 08/09–08/10/2026 **API performance and safety update**: common regex workloads and ordered `parallel_map(search)` workloads were benchmarked across Python 3.10 and free-threaded Python 3.14t/GIL=0. Compatibility fallbacks preserve complex patterns, subclasses, buffers, and callables. Unsafe UTF bytes compilation is also blocked, with differential, randomized, concurrency, subprocess, and memory-safety coverage. 🧵⚡🛡️
-* 08/08/2026 **0.6.0**: `findall`, `finditer`, `sub`/`subn`, `split`, and `match`/`search`/`fullmatch` are now up to **46x faster** than `stdlib.re` and **48x faster** than `regex` on `finditer`/`findall` workloads, **13x** on `split`, and **2–9x** on `sub`/`subn` backref workloads, with full `re` semantics. Free-threaded `findall` reaches **13.8x** vs `re` on 8 threads. 🚀⚡
+* 08/25/2026 **[0.6.2](https://github.com/ModelCloud/PyPcre/releases/tag/v0.6.2)**: Hardened packaging metadata and fixed FreeBSD/WSL CI failures on PCRE2 10.42 runtimes, including legacy replacement-template and JIT-fallback compatibility. 🛠️🐧🪟
+* 08/25/2026 **[0.6.1](https://github.com/ModelCloud/PyPcre/releases/tag/v0.6.1)**: Workaround for PCRE2 10.46/10.47 JIT start-optimization regressions, new verifying clobber suite, second memory/thread-safety sweep, Python 3.15 `sre_parse` removal compatibility, aligned `Pattern` `pos`/`endpos` signatures, and `setuptools` metadata fixes. 🛡️🧵🐍
+* 08/09/2026 **[0.6.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.6.0)**: `findall`, `finditer`, `sub`/`subn`, `split`, and `match`/`search`/`fullmatch` hot-path speedups up to **46x** vs `stdlib.re` and **48x** vs `regex`, with free-threaded `findall` reaching **13.8x** on 8 threads. 🚀⚡
 * 07/27/2026 [0.5.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.5.0): Zero-copy buffer-protocol subject support (`mmap.mmap`, `bytearray`, `array.array`) with UTF-8 validation and GIL=0-safe memory pinning. 🗂️⚡
 * 07/24/2026 [0.4.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.4.0): C extension hardening (memory/pointer safety, bounds checks, atomic allocator init), GIL=0 safety verified, vectorized UTF-8 index/offset conversion, GIL-release threshold for small calls, C `findall` implementation, and README competitor benchmarks. 🛡️⚡
 * 04/13/2026 [0.3.0](https://github.com/ModelCloud/PyPcre/releases/tag/v0.3.0): Lower-overhead public `Match` objects, faster hot-path `match()` / `search()` / `fullmatch()` / `findall()`, and tighter free-threaded execution. ⚡
@@ -60,7 +61,7 @@ PyPcre pairs Python's familiar `re`-compatible API with the real `PCRE2` engine.
 | Syntax power | Very rich ✅ | More limited | Rich, but different from `PCRE2` |
 | JIT execution | `PCRE2` JIT ✅ | No | No |
 | `re`-compatible API surface | Stable and familiar ✅ | Native | Similar, but not the main goal |
-| Free-threaded support | Built and tested for `PYTHON_GIL=0` ✅ | No explicit PyPcre-style layer | Not a project focus here |
+| Free-threaded support | Built and tested for `PYTHON_GIL=0` ✅ | No explicit free-threaded support | No explicit free-threaded fan-out layer |
 | Built-in threaded subject fan-out | `parallel_map()` ✅ | No | No |
 | System library updates | Uses system `libpcre2-8` by default ✅ | N/A | N/A |
 
@@ -229,8 +230,10 @@ numbers = pattern.findall(b"line 1\nline 22")
 ### API Overview 🧭
 
 - Module helpers: `prefixmatch`, `match`, `search`, `fullmatch`, `finditer`,
-  `findall`, `split`, `sub`, `subn`, `compile`, `escape`, `purge`, and
-  `parallel_map`.
+  `findall`, `split`, `sub`, `subn`, `compile`, `escape`, `purge`,
+  `template`, `parallel_map`, `configure`, `configure_threads`,
+  `configure_thread_pool`, `shutdown_thread_pool`, `set_cache_limit`,
+  `get_cache_limit`, and `clear_cache`.
 - `compile()` returns a `Pattern` object with the familiar matching helpers
   plus `split()`, `sub()`, and `subn()`.
 - `Pattern` exposes `.pattern`, `.flags`, `.jit`, `.groupindex`, and `.groups`
@@ -246,7 +249,7 @@ numbers = pattern.findall(b"line 1\nline 22")
 
 ### Common examples 🧪
 
-Compiled patterns:
+🧪 Compiled patterns:
 
 ```python
 from pcre import compile, Flag
@@ -256,7 +259,7 @@ match = pattern.search("User: alice")
 print(match.group("name"))  # alice
 ```
 
-Substitution:
+🔁 Substitution:
 
 ```python
 from pcre import sub
@@ -265,7 +268,7 @@ result = sub(r"\d+", "#", "room 101")
 print(result)  # room #
 ```
 
-Bytes:
+🗂️ Bytes:
 
 ```python
 from pcre import compile
@@ -330,9 +333,9 @@ the conversion without repeating the flag.
 
 ### Optional runtime controls 🎛️
 
-- `pcre.configure(jit=False)` disables JIT globally. `Flag.JIT` and
+- ⚙️ `pcre.configure(jit=False)` disables JIT globally. `Flag.JIT` and
   `Flag.NO_JIT` let you override that per pattern.
-- `pcre.set_cache_limit()`, `pcre.get_cache_limit()`, and `pcre.clear_cache()`
+- 🧹 `pcre.set_cache_limit()`, `pcre.get_cache_limit()`, and `pcre.clear_cache()`
   control every high-level compile/template helper cache in the active context.
   A zero limit disables them, and `None` uses a 256-entry hard safety ceiling
   rather than permitting unbounded growth. High-level cache entries never cross
@@ -340,7 +343,7 @@ the conversion without repeating the flag.
   workers' high-level helper caches on their next cache-backed call. Backend
   scratch buffers remain thread-scoped and are released when that thread exits.
   Oversized patterns and templates are not retained.
-- `pcre.configure_threads()`, `pcre.configure_thread_pool()`,
+- 🧵 `pcre.configure_threads()`, `pcre.configure_thread_pool()`,
   `shutdown_thread_pool()`, `Flag.THREADS`, and `Flag.NO_THREADS` are available
   if you want to opt into or restrict threaded execution.
 
