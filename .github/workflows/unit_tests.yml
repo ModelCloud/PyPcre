@@ -74,13 +74,13 @@ jobs:
 
       - name: install
         run: |
-          pip install pip pytest tabulate regex setuptools build wheel -U
-          pip install -v .
+          python -m pip install pip pytest tabulate regex setuptools build wheel -U
+          python -m pip install -v .
 
       - name: test ${{ matrix.test_script }}
         run: |
           mkdir -p artifacts
-          pytest --durations=0 tests/${{ matrix.test_script }}.py --junitxml=artifacts/${{ runner.os }}-${{ matrix.test_script }}.xml
+          python -m pytest --durations=0 tests/${{ matrix.test_script }}.py --junitxml=artifacts/${{ runner.os }}-${{ matrix.test_script }}.xml
 
 
   freebsd:
@@ -115,7 +115,7 @@ jobs:
             . venv/bin/activate
             python -m pip install pip pytest tabulate regex setuptools build wheel -U
             python -m pip install -v .
-            pytest --durations=0 tests/${{ matrix.test_script }}.py
+            python -m pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   # unable to fix, disabled
   #  solaris:
@@ -186,9 +186,9 @@ jobs:
         run: |
           python3 -m venv venv
           source venv/bin/activate
-          pip install pip pytest tabulate regex setuptools build wheel -U
-          pip install -v .
-          pytest --durations=0 tests/${{ matrix.test_script }}.py
+          python -m pip install pip pytest tabulate regex setuptools build wheel -U
+          python -m pip install -v .
+          python -m pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   prepare-setuptools:
     runs-on: ubuntu-latest
