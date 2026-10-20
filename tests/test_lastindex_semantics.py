@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pcre_ext_c as raw
@@ -113,3 +114,22 @@ def test_lastindex_replay_code_initialization_is_shared_thread_safely() -> None:
     with ThreadPoolExecutor(max_workers=16) as executor:
         observed = list(executor.map(read_distinct_match, matches))
     assert observed == [(1, "outer")] * len(matches)
+
+
+def test_shared_multicapture_replay_is_thread_safe() -> None:
+    pattern = pcre.compile(r"(?P<outer>a(?P<inner>b))", pcre.Flag.NO_JIT)
+    match = pattern.fullmatch("ab")
+    assert match is not None
+    barrier = threading.Barrier(16)
+
+    def read_shared_match(_: int) -> set[tuple[int | None, str | None]]:
+        barrier.wait(timeout=5)
+        observed: set[tuple[int | None, str | None]] = set()
+        for _ in range(512):
+            observed.add((match.lastindex, match.lastgroup))
+            assert match.re is pattern
+        return observed
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        observed = list(executor.map(read_shared_match, range(16)))
+    assert observed == [{(1, "outer")}] * 16

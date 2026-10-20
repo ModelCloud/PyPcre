@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import gc
 import tracemalloc
+import weakref
 
 import pcre
+import pcre_ext_c as raw
 import pytest
 from pcre import Flag
 
@@ -159,3 +161,48 @@ def test_repeated_operation_releases_memory(method: str, flags: Flag) -> None:
 
     leaked = after - before
     assert leaked <= 16384, f"{method} leaked {leaked} bytes over 1000 iterations"
+
+
+class _TextSubject(str):
+    pass
+
+
+class _BufferSubject(bytearray):
+    pass
+
+
+def _assert_collected(ref: weakref.ReferenceType[object]) -> None:
+    for _ in range(5):
+        gc.collect()
+        if ref() is None:
+            return
+    assert ref() is None
+
+
+@pytest.mark.parametrize("subject_factory", [_TextSubject, _BufferSubject])
+@pytest.mark.parametrize("operation", ["match", "finditer"])
+def test_match_and_finditer_ownership_cycles_are_collectable(
+    subject_factory: type[str] | type[bytearray],
+    operation: str,
+) -> None:
+    is_text = subject_factory is _TextSubject
+    subject = subject_factory("abc" if is_text else b"abc")
+    pattern = raw.compile("(a)" if is_text else b"(a)", jit=False)
+    result = getattr(pattern, operation)(subject)
+    subject.owner = result
+    ref = weakref.ref(subject)
+
+    del result, pattern, subject
+    raw.clear_pattern_cache()
+    _assert_collected(ref)
+
+
+def test_pattern_source_ownership_cycle_is_collectable() -> None:
+    subject = _TextSubject("(a)")
+    pattern = raw.compile(subject, jit=False)
+    subject.owner = pattern
+    ref = weakref.ref(subject)
+
+    del pattern, subject
+    raw.clear_pattern_cache()
+    _assert_collected(ref)

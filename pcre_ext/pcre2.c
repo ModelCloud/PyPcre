@@ -30,6 +30,7 @@ resolve_pcre2_prerelease(void)
 /* Process-wide library metadata cached once during module initialization. */
 static char pcre2_library_version[64] = "unknown";
 static ATOMIC_VAR(int) pcre2_version_initialized = 0;
+static atomic_flag pcre2_version_lock = ATOMIC_FLAG_INIT;
 /* Module execution is limited to one interpreter because these are process globals. */
 static ATOMIC_VAR(PyInterpreterState *) primary_interpreter = ATOMIC_VAR_INIT(NULL);
 #if defined(PCRE2_USE_OFFSET_LIMIT)
@@ -1024,24 +1025,34 @@ Match_get_lastindex(MatchObject *self, void *closure)
         return PyLong_FromLong(lastindex);
     }
 
+    /*
+     * Replay compiles/runs PCRE2 and may allocate Python objects, so it must
+     * not run while holding the Match critical section.  Concurrent callers
+     * may replay the same immutable snapshot; the first successful result is
+     * published under the lock and all callers use that cached value.
+     */
     int lastindex = -1;
-    int replay_ok = 0;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (self->lastindex_cache == -2) {
-        int replayed = 0;
-        if (match_replay_lastindex(self, &replayed) == 0) {
-            self->lastindex_cache = replayed == 0 ? -1 : replayed;
-            replay_ok = 1;
+    int replayed = 0;
+    if (match_replay_lastindex(self, &replayed) < 0) {
+        int cached_lastindex = -2;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        cached_lastindex = self->lastindex_cache;
+        Py_END_CRITICAL_SECTION();
+        if (cached_lastindex == -2) {
+            return NULL;
         }
+        /* Another thread completed the replay while this one failed. */
+        PyErr_Clear();
+        lastindex = cached_lastindex;
     } else {
-        replay_ok = 1;
+        Py_BEGIN_CRITICAL_SECTION(self);
+        if (self->lastindex_cache == -2) {
+            self->lastindex_cache = replayed == 0 ? -1 : replayed;
+        }
+        lastindex = self->lastindex_cache;
+        Py_END_CRITICAL_SECTION();
     }
-    lastindex = self->lastindex_cache;
-    Py_END_CRITICAL_SECTION();
 
-    if (!replay_ok) {
-        return NULL;
-    }
     if (lastindex < 0) {
         Py_RETURN_NONE;
     }
@@ -6434,7 +6445,7 @@ module_exec(PyObject *module)
         goto error_cache;
     }
 
-    if (PyModule_AddStringConstant(module, "__version__", "0.6.1") < 0) {
+    if (PyModule_AddStringConstant(module, "__version__", "0.6.3") < 0) {
         goto error_cache;
     }
 
@@ -6512,6 +6523,16 @@ initialize_pcre2_version(void)
         return;
     }
 
+    while (atomic_flag_test_and_set_explicit(
+               &pcre2_version_lock,
+               memory_order_acquire)) {
+        /* Initialization only performs a few PCRE2 queries and string copies. */
+    }
+    if (atomic_load_explicit(&pcre2_version_initialized, memory_order_acquire)) {
+        atomic_flag_clear_explicit(&pcre2_version_lock, memory_order_release);
+        return;
+    }
+
     char buffer[sizeof(pcre2_library_version)] = {0};
     if (pcre2_config(PCRE2_CONFIG_VERSION, buffer) > 0 && buffer[0] != '\0') {
         strncpy(pcre2_library_version, buffer, sizeof(pcre2_library_version) - 1);
@@ -6538,4 +6559,5 @@ initialize_pcre2_version(void)
         }
     }
     atomic_store_explicit(&pcre2_version_initialized, 1, memory_order_release);
+    atomic_flag_clear_explicit(&pcre2_version_lock, memory_order_release);
 }
