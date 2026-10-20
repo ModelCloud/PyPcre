@@ -64,6 +64,26 @@ from .threads import (
 )
 
 _CPattern = _pcre2.Pattern
+_C_PATTERN_TYPE = _CPattern
+# Method descriptors avoid repeated bound-method lookup on the dominant
+# default-argument paths.  The exact-type guards below keep legacy backends,
+# subclasses, and monkeypatched test doubles on the general wrapper path.
+_RAW_MATCH_FAST = getattr(_C_PATTERN_TYPE, "_match_fast", None)
+_RAW_SEARCH_FAST = getattr(_C_PATTERN_TYPE, "_search_fast", None)
+_RAW_FULLMATCH_FAST = getattr(_C_PATTERN_TYPE, "_fullmatch_fast", None)
+_RAW_FINDITER_FAST = getattr(_C_PATTERN_TYPE, "_finditer_fast", None)
+_RAW_FINDALL_FAST = getattr(_C_PATTERN_TYPE, "_findall_fast", None)
+_RAW_SPLIT_FAST = getattr(_C_PATTERN_TYPE, "_split_fast", None)
+_RAW_SPLIT_LITERAL_CAPTURE_FAST = getattr(
+    _C_PATTERN_TYPE, "_split_literal_capture_fast", None
+)
+_RAW_SPLIT_LITERAL_CAPTURES_FAST = getattr(
+    _C_PATTERN_TYPE, "_split_literal_captures_fast", None
+)
+_RAW_SUBSTITUTE_FAST = getattr(_C_PATTERN_TYPE, "_substitute_fast", None)
+_RAW_SUBSTITUTE_PYTHON_FAST = getattr(
+    _C_PATTERN_TYPE, "_substitute_python_fast", None
+)
 _ORIGINAL_CACHED_COMPILE = cached_compile
 PcreError = _pcre2.PcreError
 Match = getattr(_pcre2, "Match", _CompatMatch)
@@ -101,6 +121,10 @@ def _synchronize_local_caches() -> None:
         setattr(_DEFAULT_COMPILE_LOCAL, name, None)
     _DEFAULT_COMPILE_LOCAL.module_hot_key = None
     _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_pattern = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_config = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_thread_default = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_epoch = -1
     _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
     _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
     for name in _LOCAL_CACHE_NAMES:
@@ -138,6 +162,10 @@ def _cache_configuration_changed() -> None:
         setattr(_DEFAULT_COMPILE_LOCAL, name, None)
     _DEFAULT_COMPILE_LOCAL.module_hot_key = None
     _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_pattern = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_config = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_thread_default = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_epoch = -1
     _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
     _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
     _DEFAULT_COMPILE_LOCAL.effective_limit = get_effective_cache_limit()
@@ -548,6 +576,17 @@ class Pattern:
         if type(subject) is memoryview:
             subject = subject.tobytes()
         if self._is_c_pattern:
+            if (
+                _RAW_MATCH_FAST is not None
+                and type(self) is Pattern
+                and type(self._pattern) is _C_PATTERN_TYPE
+                and type(pos) is int
+                and pos == 0
+                and endpos is None
+                and type(options) is int
+                and options == 0
+            ):
+                return _RAW_MATCH_FAST(self._pattern, subject, self)
             compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
             return self._pattern.match(subject, pos, compiled_end, options, self)
         if endpos is None:
@@ -575,6 +614,17 @@ class Pattern:
         if type(subject) is memoryview:
             subject = subject.tobytes()
         if self._is_c_pattern:
+            if (
+                _RAW_SEARCH_FAST is not None
+                and type(self) is Pattern
+                and type(self._pattern) is _C_PATTERN_TYPE
+                and type(pos) is int
+                and pos == 0
+                and endpos is None
+                and type(options) is int
+                and options == 0
+            ):
+                return _RAW_SEARCH_FAST(self._pattern, subject, self)
             compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
             return self._pattern.search(subject, pos, compiled_end, options, self)
         if endpos is None:
@@ -620,6 +670,17 @@ class Pattern:
         if type(subject) is memoryview:
             subject = subject.tobytes()
         if self._is_c_pattern:
+            if (
+                _RAW_FULLMATCH_FAST is not None
+                and type(self) is Pattern
+                and type(self._pattern) is _C_PATTERN_TYPE
+                and type(pos) is int
+                and pos == 0
+                and endpos is None
+                and type(options) is int
+                and options == 0
+            ):
+                return _RAW_FULLMATCH_FAST(self._pattern, subject, self)
             compiled_end = resolve_endpos(subject, endpos) if endpos is not None else -1
             return self._pattern.fullmatch(subject, pos, compiled_end, options, self)
         if endpos is None:
@@ -644,6 +705,27 @@ class Pattern:
     ) -> Iterator[Match]:
         if type(subject) is memoryview:
             subject = subject.tobytes()
+        if (
+            _RAW_FINDITER_FAST is not None
+            and self._is_c_pattern
+            and type(self) is Pattern
+            and type(self._pattern) is _C_PATTERN_TYPE
+            and type(pos) is int
+            and pos == 0
+            and endpos is None
+            and type(options) is int
+            and options == 0
+        ):
+            return _RAW_FINDITER_FAST(self._pattern, subject, 0, -1, 0, self)
+        return self._finditer_general(subject, pos, endpos, options)
+
+    def _finditer_general(
+        self,
+        subject: Any,
+        pos: int,
+        endpos: int | None,
+        options: int,
+    ) -> Iterator[Match]:
         resolved_end = resolve_endpos(subject, endpos)
         backend_iter = getattr(self._pattern, "finditer", None)
         if backend_iter is not None:
@@ -783,6 +865,11 @@ class Pattern:
                 and type(options) is int
                 and options == 0
             ):
+                if (
+                    type(self._pattern) is _C_PATTERN_TYPE
+                    and _RAW_FINDALL_FAST is not None
+                ):
+                    return _RAW_FINDALL_FAST(self._pattern, subject)
                 fast = getattr(self._pattern, "_findall_fast", None)
                 if fast is not None:
                     return fast(subject)
@@ -846,9 +933,11 @@ class Pattern:
             and literal_capture is not None
             and type(subject) is type(literal_capture)
             and type(maxsplit) is int
+            and type(self._pattern) is _C_PATTERN_TYPE
+            and _RAW_SPLIT_LITERAL_CAPTURE_FAST is not None
         ):
-            return self._pattern._split_literal_capture_fast(
-                subject, literal_capture, maxsplit
+            return _RAW_SPLIT_LITERAL_CAPTURE_FAST(
+                self._pattern, subject, literal_capture, maxsplit
             )
 
         literal_multi = self._literal_findall_multi
@@ -858,10 +947,12 @@ class Pattern:
             and literal_multi is not None
             and type(subject) is type(literal_multi[0])
             and type(maxsplit) is int
+            and type(self._pattern) is _C_PATTERN_TYPE
+            and _RAW_SPLIT_LITERAL_CAPTURES_FAST is not None
         ):
             needle, groups = literal_multi
-            return self._pattern._split_literal_captures_fast(
-                subject, needle, groups, maxsplit
+            return _RAW_SPLIT_LITERAL_CAPTURES_FAST(
+                self._pattern, subject, needle, groups, maxsplit
             )
 
         # The common immutable/default shape can go straight to the C splitter.
@@ -875,6 +966,11 @@ class Pattern:
             and type(maxsplit) is int
             and maxsplit == 0
         ):
+            if (
+                type(self._pattern) is _C_PATTERN_TYPE
+                and _RAW_SPLIT_FAST is not None
+            ):
+                return _RAW_SPLIT_FAST(self._pattern, subject, 0)
             fast_split = getattr(self._pattern, "_split_fast", None)
             if fast_split is not None:
                 return fast_split(subject, 0)
@@ -946,6 +1042,42 @@ class Pattern:
         return parts
 
     def sub(self, repl: Any, subject: Any, count: Any = 0) -> Any:
+        if (
+            _RAW_SUBSTITUTE_FAST is not None
+            and self._is_c_pattern
+            and type(self) is Pattern
+            and type(self._pattern) is _C_PATTERN_TYPE
+            and self._literal_split is None
+            and type(subject) in (str, bytes)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and 0 <= count <= 8
+        ):
+            replacement_is_text = type(repl) is str
+            has_escape = (
+                "\\" in repl if replacement_is_text else b"\\" in repl
+            )
+            has_dollar = "$" in repl if replacement_is_text else b"$" in repl
+            if not has_escape and not has_dollar:
+                if count == 0:
+                    return _RAW_SUBSTITUTE_FAST(self._pattern, subject, repl)[0]
+                return _RAW_SUBSTITUTE_FAST(
+                    self._pattern, subject, repl, count
+                )[0]
+            if (
+                has_escape
+                and not has_dollar
+                and _RAW_SUBSTITUTE_PYTHON_FAST is not None
+            ):
+                direct = (
+                    _RAW_SUBSTITUTE_PYTHON_FAST(self._pattern, subject, repl)
+                    if count == 0
+                    else _RAW_SUBSTITUTE_PYTHON_FAST(
+                        self._pattern, subject, repl, count
+                    )
+                )
+                if direct is not NotImplemented:
+                    return direct[0]
         result, _ = self.subn(repl, subject, count)
         return result
 
@@ -1528,6 +1660,10 @@ def _clear_module_cache() -> None:
     _DEFAULT_COMPILE_LOCAL.module_lru = None
     _DEFAULT_COMPILE_LOCAL.module_hot_key = None
     _DEFAULT_COMPILE_LOCAL.module_hot_value = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_pattern = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_config = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_thread_default = None
+    _DEFAULT_COMPILE_LOCAL.module_hot_epoch = -1
 
 
 def _module_cache_size() -> int:
@@ -1539,26 +1675,41 @@ _cached_module_pattern.cache_clear = _clear_module_cache  # type: ignore[attr-de
 
 
 def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
-    if type(pattern) in (str, bytes) and type(flags) in (int, Flag) and flags == 0:
-        default_jit, default_compat = _default_config_snapshot()
+    if (
+        (type(pattern) is str or type(pattern) is bytes)
+        and (type(flags) is int or type(flags) is Flag)
+        and flags == 0
+    ):
+        state = _DEFAULT_COMPILE_LOCAL
+        thread_default = get_thread_default()
+        try:
+            if (
+                state.module_hot_pattern is pattern
+                and state.module_hot_config is _DEFAULT_CONFIG
+                and state.module_hot_thread_default == thread_default
+                and state.module_hot_epoch == get_cache_epoch()
+            ):
+                return state.module_hot_value
+        except AttributeError:
+            pass
+        default_jit, default_compat = _DEFAULT_CONFIG
         thread_mode = (
-            _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
+            _THREAD_MODE_AUTO if thread_default else _THREAD_MODE_DISABLED
         )
         key = (pattern, default_jit, default_compat, thread_mode)
-        if (
-            getattr(_DEFAULT_COMPILE_LOCAL, "epoch", -1) == get_cache_epoch()
-            and getattr(_DEFAULT_COMPILE_LOCAL, "module_hot_key", None) == key
-        ):
-            return _DEFAULT_COMPILE_LOCAL.module_hot_value
         compiled = _cached_module_pattern(
             pattern,
             default_jit,
             default_compat,
             thread_mode,
         )
-        if _DEFAULT_COMPILE_LOCAL.effective_limit > 0 and cache_input_allowed(pattern):
-            _DEFAULT_COMPILE_LOCAL.module_hot_key = key
-            _DEFAULT_COMPILE_LOCAL.module_hot_value = compiled
+        if state.effective_limit > 0 and cache_input_allowed(pattern):
+            state.module_hot_key = key
+            state.module_hot_value = compiled
+            state.module_hot_pattern = pattern
+            state.module_hot_config = _DEFAULT_CONFIG
+            state.module_hot_thread_default = thread_default
+            state.module_hot_epoch = get_cache_epoch()
         return compiled
     return compile(pattern, flags=flags)
 
@@ -1572,13 +1723,42 @@ def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: str) -> 
         and type(string) in (str, bytes)
         and compiled._is_c_pattern
     ):
-        if (
-            method == "findall"
-            and getattr(compiled, "_literal_split", None) is not None
-            and type(string) is type(compiled._literal_split)
-        ):
-            return compiled.findall(string)
-        fast = getattr(compiled._pattern, f"_{method}_fast", None)
+        if method == "findall":
+            literal_capture = getattr(compiled, "_literal_findall", None)
+            if (
+                type(compiled) is Pattern
+                and literal_capture is not None
+                and type(string) is type(literal_capture)
+            ):
+                return [literal_capture] * string.count(literal_capture)
+            literal_multi = getattr(compiled, "_literal_findall_multi", None)
+            if (
+                type(compiled) is Pattern
+                and literal_multi is not None
+                and type(string) is type(literal_multi[0])
+            ):
+                needle, groups = literal_multi
+                return [groups] * string.count(needle)
+            literal_split = getattr(compiled, "_literal_split", None)
+            if (
+                type(compiled) is Pattern
+                and literal_split is not None
+                and type(string) is type(literal_split)
+            ):
+                return [literal_split] * string.count(literal_split)
+        raw_pattern = compiled._pattern
+        if type(raw_pattern) is _C_PATTERN_TYPE:
+            if method == "findall" and _RAW_FINDALL_FAST is not None:
+                return _RAW_FINDALL_FAST(raw_pattern, string)
+            if method == "finditer" and _RAW_FINDITER_FAST is not None:
+                return _RAW_FINDITER_FAST(raw_pattern, string, 0, -1, 0, compiled)
+            if method == "match" and _RAW_MATCH_FAST is not None:
+                return _RAW_MATCH_FAST(raw_pattern, string, compiled)
+            if method == "search" and _RAW_SEARCH_FAST is not None:
+                return _RAW_SEARCH_FAST(raw_pattern, string, compiled)
+            if method == "fullmatch" and _RAW_FULLMATCH_FAST is not None:
+                return _RAW_FULLMATCH_FAST(raw_pattern, string, compiled)
+        fast = getattr(raw_pattern, f"_{method}_fast", None)
         if fast is not None:
             if method == "findall":
                 return fast(string)
@@ -1626,7 +1806,41 @@ def split(
         literal_split = getattr(compiled, "_literal_split", None)
         if literal_split is not None and type(string) is type(literal_split):
             return compiled.split(string, maxsplit)
-        fast = getattr(compiled._pattern, "_split_fast", None)
+        literal_capture = getattr(compiled, "_literal_findall", None)
+        if (
+            type(compiled) is Pattern
+            and literal_capture is not None
+            and type(string) is type(literal_capture)
+        ):
+            raw_pattern = compiled._pattern
+            if (
+                type(raw_pattern) is _C_PATTERN_TYPE
+                and _RAW_SPLIT_LITERAL_CAPTURE_FAST is not None
+            ):
+                return _RAW_SPLIT_LITERAL_CAPTURE_FAST(
+                    raw_pattern, string, literal_capture, maxsplit
+                )
+            return compiled.split(string, maxsplit)
+        literal_multi = getattr(compiled, "_literal_findall_multi", None)
+        if (
+            type(compiled) is Pattern
+            and literal_multi is not None
+            and type(string) is type(literal_multi[0])
+        ):
+            needle, groups = literal_multi
+            raw_pattern = compiled._pattern
+            if (
+                type(raw_pattern) is _C_PATTERN_TYPE
+                and _RAW_SPLIT_LITERAL_CAPTURES_FAST is not None
+            ):
+                return _RAW_SPLIT_LITERAL_CAPTURES_FAST(
+                    raw_pattern, string, needle, groups, maxsplit
+                )
+            return compiled.split(string, maxsplit)
+        raw_pattern = compiled._pattern
+        if type(raw_pattern) is _C_PATTERN_TYPE and _RAW_SPLIT_FAST is not None:
+            return _RAW_SPLIT_FAST(raw_pattern, string, maxsplit)
+        fast = getattr(raw_pattern, "_split_fast", None)
         if fast is not None:
             return fast(string, maxsplit)
     return compiled.split(string, maxsplit=maxsplit)
@@ -1635,7 +1849,13 @@ def split(
 def sub(
     pattern: Any, repl: Any, string: Any, count: Any = 0, flags: FlagInput = 0
 ) -> Any:
-    result = subn(pattern, repl, string, count=count, flags=flags)
+    compiled = _module_compile(pattern, flags)
+    if (
+        type(compiled) is Pattern
+        and type(compiled._pattern) is _C_PATTERN_TYPE
+    ):
+        return compiled.sub(repl, string, count)
+    result = compiled.subn(repl, string, count=count)
     return result[0]
 
 

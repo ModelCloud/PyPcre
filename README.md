@@ -24,6 +24,7 @@ Fast, free-threaded Python bindings for `PCRE2` with a stable `stdlib.re`-compat
 
 
 ## Latest News 🚀
+* 10/20/2026 **[0.6.4](https://github.com/ModelCloud/PyPcre/releases/tag/v0.6.4)**: Reduced Python dispatch overhead across module-level and compiled-pattern `match`, `search`, `fullmatch`, `findall`, `finditer`, `split`, `sub`, and `subn` hot paths, with exact fallbacks for subclasses, legacy backends, and non-default arguments. 🚀⚡
 * 10/20/2026 **[0.6.3](https://github.com/ModelCloud/PyPcre/releases/tag/v0.6.3)**: Fixed free-threaded races in `Match.lastindex` replay and PCRE2 version initialization, with new concurrency and GC-cycle regression coverage. 🛡️🧵
 * 08/25/2026 **[0.6.2](https://github.com/ModelCloud/PyPcre/releases/tag/v0.6.2)**: Hardened packaging metadata and fixed FreeBSD/WSL CI failures on PCRE2 10.42 runtimes, including legacy replacement-template and JIT-fallback compatibility. 🛠️🐧🪟
 * 08/25/2026 **[0.6.1](https://github.com/ModelCloud/PyPcre/releases/tag/v0.6.1)**: Workaround for PCRE2 10.46/10.47 JIT start-optimization regressions, new verifying clobber suite, second memory/thread-safety sweep, Python 3.15 `sre_parse` removal compatibility, aligned `Pattern` `pos`/`endpos` signatures, and `setuptools` metadata fixes. 🛡️🧵🐍
