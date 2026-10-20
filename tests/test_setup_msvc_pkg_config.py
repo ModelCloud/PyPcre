@@ -25,8 +25,8 @@ def setup_module():
         "has_header": lambda include_dirs: True,
         "has_library": lambda library_dirs: True,
         "ensure_python_headers": lambda include_dirs: None,
-        "compiler_supports_flag": lambda flag, code=None: False,
-        "compiler_supports_flags": lambda flags, code=None: False,
+        "compiler_supports_flag": lambda flag, code=None: True,
+        "compiler_supports_flags": lambda flags, code=None: True,
         "augment_compile_flags": lambda flags: None,
         "is_solaris_platform": lambda: False,
     }
