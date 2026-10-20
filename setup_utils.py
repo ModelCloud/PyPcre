@@ -1466,6 +1466,7 @@ has_library = _has_library
 ensure_python_headers = _ensure_python_headers
 is_truthy_env = _is_truthy_env
 is_windows_platform = _is_windows_platform
+is_wsl_environment = _is_wsl_environment
 is_solaris_platform = _is_solaris_platform
 filter_incompatible_multiarch = _filter_incompatible_multiarch
 
@@ -1491,6 +1492,7 @@ __all__ = [
     "ensure_python_headers",
     "is_truthy_env",
     "is_windows_platform",
+    "is_wsl_environment",
     "is_solaris_platform",
     "filter_incompatible_multiarch",
 ]
