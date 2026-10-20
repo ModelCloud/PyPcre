@@ -106,13 +106,15 @@ jobs:
         with:
           copyback: false
           prepare: |
-            env ASSUME_ALWAYS_YES=yes pkg install -y python py311-pip pcre2 gcc gmake pkgconf
+            env ASSUME_ALWAYS_YES=yes pkg install -y python pcre2 gcc gmake pkgconf
+            python_pip="py$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')-pip"
+            env ASSUME_ALWAYS_YES=yes pkg install -y "$python_pip"
           run: |
             python -V
-            python -m venv venv
+            python -m venv --without-pip --system-site-packages venv
             . venv/bin/activate
-            pip install pip pytest tabulate regex setuptools build wheel -U
-            pip install -v .
+            python -m pip install pip pytest tabulate regex setuptools build wheel -U
+            python -m pip install -v .
             pytest --durations=0 tests/${{ matrix.test_script }}.py
 
   # unable to fix, disabled
