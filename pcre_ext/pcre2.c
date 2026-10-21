@@ -6440,7 +6440,7 @@ module_exec(PyObject *module)
         goto error_cache;
     }
 
-    if (PyModule_AddStringConstant(module, "__version__", "0.6.4") < 0) {
+    if (PyModule_AddStringConstant(module, "__version__", "0.6.5") < 0) {
         goto error_cache;
     }
 

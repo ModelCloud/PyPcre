@@ -314,7 +314,7 @@ EXTENSION = Extension(
 
 setup(
     name="PyPcre",
-    version="0.6.4",
+    version="0.6.5",
     packages=["pcre"],
     ext_modules=[EXTENSION],
     cmdclass={"build_ext": build_ext},
