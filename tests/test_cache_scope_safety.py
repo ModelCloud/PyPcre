@@ -137,6 +137,16 @@ def test_module_hot_cache_tracks_configured_jit_default() -> None:
     assert second.jit is toggled
 
 
+def test_public_compile_shares_default_module_hot_entry() -> None:
+    pcre.clear_cache()
+    compiled = pcre.compile("compile-module-hot")
+    assert pcre.search("compile-module-hot", "compile-module-hot").re is compiled
+
+    pcre.clear_cache()
+    replacement = pcre.compile("compile-module-hot")
+    assert replacement is not compiled
+
+
 def test_cache_limit_zero_disables_all_high_level_helper_caches() -> None:
     original = cache_mod.get_cache_limit()
     try:

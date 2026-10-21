@@ -1428,18 +1428,6 @@ def _policy_wrapper(compiled: Pattern, thread_mode: str) -> Pattern:
     return result
 
 
-def _compile_default_builtin(pattern: str | bytes) -> Pattern:
-    """Compile an exact built-in pattern through a per-thread direct cache."""
-    default_jit, default_compat = _default_config_snapshot()
-    thread_mode = _THREAD_MODE_AUTO if get_thread_default() else _THREAD_MODE_DISABLED
-    return _compile_default_snapshot(
-        pattern,
-        default_jit,
-        default_compat,
-        thread_mode,
-    )
-
-
 def _compile_default_snapshot(
     pattern: str | bytes,
     jit: bool,
@@ -1509,6 +1497,13 @@ def _compile_flagged_builtin(
 
 
 def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
+    if (
+        flags == 0
+        and type(pattern) in (str, bytes)
+        and cached_compile is _ORIGINAL_CACHED_COMPILE
+    ):
+        return _module_compile(pattern, 0)
+
     default_jit, default_compat = _default_config_snapshot()
 
     # Fast path for the dominant shape: compile(pattern) with default flags.
@@ -1523,9 +1518,6 @@ def compile(pattern: Any, flags: FlagInput = 0) -> Pattern:
             else:
                 wrapper.disable_threads()
             return wrapper
-
-        if type(pattern) in (str, bytes) and cached_compile is _ORIGINAL_CACHED_COMPILE:
-            return _compile_default_builtin(pattern)
 
         adjusted_pattern = _apply_regex_compat(pattern, default_compat)
         if isinstance(adjusted_pattern, str):

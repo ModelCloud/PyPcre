@@ -105,7 +105,8 @@ def test_local_cache_lazy_initializers_and_module_lru_clear() -> None:
     assert pcre.compile("lazy-default-cache").pattern == "lazy-default-cache"
 
     assert pcre.search("module-lru-clear", "module-lru-clear") is not None
-    assert pcre_mod._module_cache_size() == 1
+    # Public default compile and module helpers share the same bounded LRU.
+    assert pcre_mod._module_cache_size() == 2
     pcre_mod._clear_module_cache()
     assert pcre_mod._module_cache_size() == 0
 
