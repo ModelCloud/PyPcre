@@ -4640,12 +4640,7 @@ Pattern_split(PatternObject *self,
         goto error;
     }
 
-    uint32_t capture_count = 0;
-    int info_rc = pcre2_pattern_info(self->code, PCRE2_INFO_CAPTURECOUNT, &capture_count);
-    if (info_rc < 0) {
-        raise_pcre_error("pattern_info", info_rc, 0);
-        goto error;
-    }
+    uint32_t capture_count = self->capture_count;
 
     match_data = pattern_match_data_acquire(self, &match_data_from_pattern);
     if (match_data == NULL) {

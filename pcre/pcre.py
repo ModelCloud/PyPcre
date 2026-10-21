@@ -59,6 +59,7 @@ from .threads import (
     get_auto_threshold,
     get_thread_default,
     get_thread_pool_size,
+    register_thread_control,
     submit_thread_pool_tasks,
     threading_supported,
 )
@@ -101,6 +102,8 @@ _DEFAULT_COMPAT_REGEX = False
 # monkeypatch them directly.
 _DEFAULT_CONFIG: tuple[bool, bool] = (True, False)
 _DEFAULT_CONFIG_LOCK = RLock()
+_MODULE_CACHE_EPOCH_LOCK = RLock()
+_MODULE_CACHE_EPOCH = 0
 _DEFAULT_COMPILE_LOCAL = local()
 _LOCAL_CACHE_NAMES = ("cache", "flagged_cache")
 
@@ -108,6 +111,13 @@ _LOCAL_CACHE_NAMES = ("cache", "flagged_cache")
 _THREAD_MODE_DISABLED = "disabled"
 _THREAD_MODE_ENABLED = "enabled"
 _THREAD_MODE_AUTO = "auto"
+
+_MODULE_MATCH = 0
+_MODULE_SEARCH = 1
+_MODULE_FULLMATCH = 2
+_MODULE_FINDITER = 3
+_MODULE_FINDALL = 4
+_MODULE_METHOD_NAMES = ("match", "search", "fullmatch", "finditer", "findall")
 
 
 def _synchronize_local_caches() -> None:
@@ -119,12 +129,7 @@ def _synchronize_local_caches() -> None:
         if cached is not None:
             cached.cache_clear()
         setattr(_DEFAULT_COMPILE_LOCAL, name, None)
-    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_pattern = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_config = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_thread_default = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_epoch = -1
+    _DEFAULT_COMPILE_LOCAL.module_hot = None
     _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
     _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
     for name in _LOCAL_CACHE_NAMES:
@@ -152,6 +157,10 @@ def _trim_local_cache(cache: dict[Any, Any]) -> None:
 
 
 def _cache_configuration_changed() -> None:
+    global _MODULE_CACHE_EPOCH
+
+    with _MODULE_CACHE_EPOCH_LOCK:
+        _MODULE_CACHE_EPOCH += 1
     _synchronize_local_caches()
     for name in _LOCAL_CACHE_NAMES:
         _trim_local_cache(_local_cache(name))
@@ -160,18 +169,14 @@ def _cache_configuration_changed() -> None:
         if cached is not None:
             cached.cache_clear()
         setattr(_DEFAULT_COMPILE_LOCAL, name, None)
-    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_pattern = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_config = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_thread_default = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_epoch = -1
+    _DEFAULT_COMPILE_LOCAL.module_hot = None
     _DEFAULT_COMPILE_LOCAL.replacement_hot_key = None
     _DEFAULT_COMPILE_LOCAL.replacement_hot_value = None
     _DEFAULT_COMPILE_LOCAL.effective_limit = get_effective_cache_limit()
 
 
 register_cache_control(_cache_configuration_changed)
+register_thread_control(_cache_configuration_changed)
 
 
 def _can_attach_match(raw: Any) -> bool:
@@ -431,6 +436,7 @@ class Pattern:
         "_is_c_pattern",
         "_literal_findall",
         "_literal_findall_multi",
+        "_literal_replace",
         "_literal_split",
         "_pattern",
         "_thread_mode",
@@ -495,6 +501,9 @@ class Pattern:
         self._literal_split = literal_split
         self._literal_findall = literal_findall
         self._literal_findall_multi = literal_findall_multi
+        self._literal_replace = (
+            literal_split if literal_split is not None else literal_findall
+        )
 
     def __repr__(self) -> str:  # pragma: no cover - delegated to C repr
         return repr(self._pattern)
@@ -1042,6 +1051,23 @@ class Pattern:
         return parts
 
     def sub(self, repl: Any, subject: Any, count: Any = 0) -> Any:
+        literal_replace = self._literal_replace
+        if (
+            type(self) is Pattern
+            and literal_replace is not None
+            and type(subject) is type(literal_replace)
+            and type(repl) is type(subject)
+            and type(count) is int
+            and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
+            and ("$" not in repl if type(repl) is str else b"$" not in repl)
+        ):
+            if count < 0:
+                return subject
+            return subject.replace(
+                literal_replace,
+                repl,
+                -1 if count == 0 else count,
+            )
         if (
             _RAW_SUBSTITUTE_FAST is not None
             and self._is_c_pattern
@@ -1089,24 +1115,25 @@ class Pattern:
         if (
             self._is_c_pattern
             and type(self) is Pattern
-            and self._literal_split is not None
-            and type(subject) is type(self._literal_split)
+            and self._literal_replace is not None
+            and type(subject) is type(self._literal_replace)
             and type(repl) is type(subject)
             and type(count) is int
             and ("\\" not in repl if type(repl) is str else b"\\" not in repl)
             and ("$" not in repl if type(repl) is str else b"$" not in repl)
         ):
-            if subject.find(self._literal_split[:1]) < 0:
+            literal_replace = self._literal_replace
+            if subject.find(literal_replace[:1]) < 0:
                 return subject, 0
             if count < 0:
                 return subject, 0
-            matched = subject.count(self._literal_split)
+            matched = subject.count(literal_replace)
             if matched == 0:
                 return subject, 0
             if count > 0 and matched > count:
                 matched = count
             return (
-                subject.replace(self._literal_split, repl, -1 if count <= 0 else count),
+                subject.replace(literal_replace, repl, -1 if count <= 0 else count),
                 matched,
             )
 
@@ -1658,12 +1685,7 @@ def _clear_module_cache() -> None:
     if cached is not None:
         cached.cache_clear()
     _DEFAULT_COMPILE_LOCAL.module_lru = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_key = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_value = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_pattern = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_config = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_thread_default = None
-    _DEFAULT_COMPILE_LOCAL.module_hot_epoch = -1
+    _DEFAULT_COMPILE_LOCAL.module_hot = None
 
 
 def _module_cache_size() -> int:
@@ -1675,28 +1697,28 @@ _cached_module_pattern.cache_clear = _clear_module_cache  # type: ignore[attr-de
 
 
 def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
+    state = _DEFAULT_COMPILE_LOCAL
+    hot = getattr(state, "module_hot", None)
+    if (
+        hot is not None
+        and pattern is hot[0]
+        and (type(flags) is int or type(flags) is Flag)
+        and flags == 0
+        and hot[3] == _MODULE_CACHE_EPOCH
+        and hot[1] is _DEFAULT_CONFIG
+        and hot[2] is get_thread_default
+    ):
+        return hot[4]
     if (
         (type(pattern) is str or type(pattern) is bytes)
         and (type(flags) is int or type(flags) is Flag)
         and flags == 0
     ):
-        state = _DEFAULT_COMPILE_LOCAL
         thread_default = get_thread_default()
-        try:
-            if (
-                state.module_hot_pattern is pattern
-                and state.module_hot_config is _DEFAULT_CONFIG
-                and state.module_hot_thread_default == thread_default
-                and state.module_hot_epoch == get_cache_epoch()
-            ):
-                return state.module_hot_value
-        except AttributeError:
-            pass
         default_jit, default_compat = _DEFAULT_CONFIG
         thread_mode = (
             _THREAD_MODE_AUTO if thread_default else _THREAD_MODE_DISABLED
         )
-        key = (pattern, default_jit, default_compat, thread_mode)
         compiled = _cached_module_pattern(
             pattern,
             default_jit,
@@ -1704,91 +1726,93 @@ def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
             thread_mode,
         )
         if state.effective_limit > 0 and cache_input_allowed(pattern):
-            state.module_hot_key = key
-            state.module_hot_value = compiled
-            state.module_hot_pattern = pattern
-            state.module_hot_config = _DEFAULT_CONFIG
-            state.module_hot_thread_default = thread_default
-            state.module_hot_epoch = get_cache_epoch()
+            state.module_hot = (
+                pattern,
+                _DEFAULT_CONFIG,
+                get_thread_default,
+                _MODULE_CACHE_EPOCH,
+                compiled,
+            )
         return compiled
     return compile(pattern, flags=flags)
 
 
-def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: str) -> Any:
+def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: int) -> Any:
     compiled = _module_compile(pattern, flags)
     if (
-        type(pattern) in (str, bytes)
+        type(compiled) is Pattern
+        and type(compiled._pattern) is _C_PATTERN_TYPE
+        and type(pattern) in (str, bytes)
         and type(flags) in (int, Flag)
         and flags == 0
         and type(string) in (str, bytes)
-        and compiled._is_c_pattern
     ):
-        if method == "findall":
-            literal_capture = getattr(compiled, "_literal_findall", None)
+        raw_pattern = compiled._pattern
+        if method == _MODULE_FINDALL:
+            literal_capture = compiled._literal_findall
             if (
-                type(compiled) is Pattern
-                and literal_capture is not None
+                literal_capture is not None
                 and type(string) is type(literal_capture)
             ):
                 return [literal_capture] * string.count(literal_capture)
-            literal_multi = getattr(compiled, "_literal_findall_multi", None)
+            literal_multi = compiled._literal_findall_multi
             if (
-                type(compiled) is Pattern
-                and literal_multi is not None
+                literal_multi is not None
                 and type(string) is type(literal_multi[0])
             ):
                 needle, groups = literal_multi
                 return [groups] * string.count(needle)
-            literal_split = getattr(compiled, "_literal_split", None)
+            literal_split = compiled._literal_split
             if (
-                type(compiled) is Pattern
-                and literal_split is not None
+                literal_split is not None
                 and type(string) is type(literal_split)
             ):
                 return [literal_split] * string.count(literal_split)
-        raw_pattern = compiled._pattern
-        if type(raw_pattern) is _C_PATTERN_TYPE:
-            if method == "findall" and _RAW_FINDALL_FAST is not None:
-                return _RAW_FINDALL_FAST(raw_pattern, string)
-            if method == "finditer" and _RAW_FINDITER_FAST is not None:
-                return _RAW_FINDITER_FAST(raw_pattern, string, 0, -1, 0, compiled)
-            if method == "match" and _RAW_MATCH_FAST is not None:
-                return _RAW_MATCH_FAST(raw_pattern, string, compiled)
-            if method == "search" and _RAW_SEARCH_FAST is not None:
-                return _RAW_SEARCH_FAST(raw_pattern, string, compiled)
-            if method == "fullmatch" and _RAW_FULLMATCH_FAST is not None:
-                return _RAW_FULLMATCH_FAST(raw_pattern, string, compiled)
-        fast = getattr(raw_pattern, f"_{method}_fast", None)
+        if method == _MODULE_FINDALL and _RAW_FINDALL_FAST is not None:
+            return _RAW_FINDALL_FAST(raw_pattern, string)
+        if method == _MODULE_FINDITER and _RAW_FINDITER_FAST is not None:
+            return _RAW_FINDITER_FAST(raw_pattern, string, 0, -1, 0, compiled)
+        if method == _MODULE_MATCH and _RAW_MATCH_FAST is not None:
+            return _RAW_MATCH_FAST(raw_pattern, string, compiled)
+        if method == _MODULE_SEARCH and _RAW_SEARCH_FAST is not None:
+            return _RAW_SEARCH_FAST(raw_pattern, string, compiled)
+        if method == _MODULE_FULLMATCH and _RAW_FULLMATCH_FAST is not None:
+            return _RAW_FULLMATCH_FAST(raw_pattern, string, compiled)
+        fast = getattr(
+            raw_pattern,
+            f"_{_MODULE_METHOD_NAMES[method]}_fast",
+            None,
+        )
         if fast is not None:
-            if method == "findall":
+            if method == _MODULE_FINDALL:
                 return fast(string)
-            if method == "finditer":
+            if method == _MODULE_FINDITER:
                 return fast(string, 0, -1, 0, compiled)
             return fast(string, compiled)
-    return getattr(compiled, method)(string)
+    return getattr(compiled, _MODULE_METHOD_NAMES[method])(string)
 
 
 def prefixmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return _module_lookup(pattern, string, flags, "match")
+    return _module_lookup(pattern, string, flags, _MODULE_MATCH)
 
 
 match = prefixmatch
 
 
 def search(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return _module_lookup(pattern, string, flags, "search")
+    return _module_lookup(pattern, string, flags, _MODULE_SEARCH)
 
 
 def fullmatch(pattern: Any, string: Any, flags: FlagInput = 0) -> Match | None:
-    return _module_lookup(pattern, string, flags, "fullmatch")
+    return _module_lookup(pattern, string, flags, _MODULE_FULLMATCH)
 
 
 def finditer(pattern: Any, string: Any, flags: FlagInput = 0) -> Iterable[Match]:
-    return _module_lookup(pattern, string, flags, "finditer")
+    return _module_lookup(pattern, string, flags, _MODULE_FINDITER)
 
 
 def findall(pattern: Any, string: Any, flags: FlagInput = 0) -> List[Any]:
-    return _module_lookup(pattern, string, flags, "findall")
+    return _module_lookup(pattern, string, flags, _MODULE_FINDALL)
 
 
 def split(
@@ -1867,7 +1891,7 @@ def subn(
     flags: FlagInput = 0,
 ) -> tuple[Any, int]:
     compiled = _module_compile(pattern, flags)
-    literal_split = getattr(compiled, "_literal_split", None)
+    literal_replace = getattr(compiled, "_literal_replace", None)
     if (
         type(pattern) in (str, bytes)
         and type(flags) in (int, Flag)
@@ -1876,8 +1900,8 @@ def subn(
         and type(repl) is type(string)
         and type(count) is int
         and compiled._is_c_pattern
-        and literal_split is not None
-        and type(string) is type(literal_split)
+        and literal_replace is not None
+        and type(string) is type(literal_replace)
         and (
             (type(repl) is str and "\\" not in repl and "$" not in repl)
             or (type(repl) is bytes and b"\\" not in repl and b"$" not in repl)
