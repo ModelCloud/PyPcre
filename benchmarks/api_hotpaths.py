@@ -95,6 +95,7 @@ def main() -> int:
         ("module.escape.text", lambda: pcre.escape("identifier_123")),
         ("module.escape.bytes", lambda: pcre.escape(b"identifier123")),
         ("module.escape.special", lambda: pcre.escape("a+b [c]")),
+        ("module.compile.default", lambda: pcre.compile("(x)")),
         ("module.compile.reflags", lambda: pcre.compile("(x)", stdlib_flags)),
         ("module.template", lambda: pcre.template("(x)")),
         ("match.expand.numeric", lambda: captured.expand(r"[\1]")),
