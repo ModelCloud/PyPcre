@@ -425,6 +425,8 @@ def test_module_fast_dispatch_falls_back_for_legacy_backends(
             return (f"sub:{repl}:{value}", count)
 
     legacy = LegacyPattern()
+    pcre.clear_cache()
+    assert pcre.match("x", "a") is None
     monkeypatch.setattr(pcre_mod, "_module_compile", lambda *args: legacy)
     assert pcre_mod.match("x", "a") == "match:a"
     assert pcre_mod.search("x", "a") == "search:a"

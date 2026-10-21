@@ -1729,16 +1729,40 @@ def _module_compile(pattern: Any, flags: FlagInput) -> Pattern:
     return compile(pattern, flags=flags)
 
 
+_ORIGINAL_MODULE_COMPILE = _module_compile
+
+
 def _module_lookup(pattern: Any, string: Any, flags: FlagInput, method: int) -> Any:
-    compiled = _module_compile(pattern, flags)
+    state = _DEFAULT_COMPILE_LOCAL
+    hot = getattr(state, "module_hot", None)
+    fast_shape = False
     if (
-        type(compiled) is Pattern
-        and type(compiled._pattern) is _C_PATTERN_TYPE
-        and type(pattern) in (str, bytes)
-        and type(flags) in (int, Flag)
+        _module_compile is _ORIGINAL_MODULE_COMPILE
+        and hot is not None
+        and pattern is hot[0]
+        and (type(flags) is int or type(flags) is Flag)
         and flags == 0
-        and type(string) in (str, bytes)
+        and hot[3] == _MODULE_CACHE_EPOCH
+        and hot[1] is _DEFAULT_CONFIG
+        and hot[2] is get_thread_default
     ):
+        compiled = hot[4]
+        fast_shape = (
+            type(compiled) is Pattern
+            and type(compiled._pattern) is _C_PATTERN_TYPE
+            and type(string) in (str, bytes)
+        )
+    else:
+        compiled = _module_compile(pattern, flags)
+        fast_shape = (
+            type(compiled) is Pattern
+            and type(compiled._pattern) is _C_PATTERN_TYPE
+            and type(pattern) in (str, bytes)
+            and (type(flags) is int or type(flags) is Flag)
+            and flags == 0
+            and type(string) in (str, bytes)
+        )
+    if fast_shape:
         raw_pattern = compiled._pattern
         if method == _MODULE_FINDALL:
             literal_capture = compiled._literal_findall
