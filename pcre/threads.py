@@ -16,13 +16,16 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Final
+from weakref import WeakSet
 
 _POOL_NAME: Final[str] = "pcre-worker"
 _MIN_CORES_FOR_THREADS: Final[int] = 8
 _THREAD_POOL_LOCK = threading.RLock()
+_THREAD_CONTROL_LOCK = threading.RLock()
 _THREAD_POOL: ThreadPoolExecutor | None = None
 _THREAD_POOL_WORKERS: int | None = None
 _PERFORMANCE_CPU_TOTAL: int | None = None
+_THREAD_CONTROL_CALLBACKS: WeakSet[Callable[[], None]] = WeakSet()
 
 
 def _cpu_total() -> int:
@@ -265,7 +268,23 @@ def configure_threads(
         _THREADS_DEFAULT = new_enabled
         _THREAD_AUTO_THRESHOLD = new_threshold
         _THREAD_CONFIG = (new_enabled, new_threshold)
-        return new_enabled
+
+    _notify_thread_control()
+    return new_enabled
+
+
+def register_thread_control(callback: Callable[[], None]) -> None:
+    """Register a callback for process-wide threading default changes."""
+
+    with _THREAD_CONTROL_LOCK:
+        _THREAD_CONTROL_CALLBACKS.add(callback)
+
+
+def _notify_thread_control() -> None:
+    with _THREAD_CONTROL_LOCK:
+        callbacks = tuple(_THREAD_CONTROL_CALLBACKS)
+    for callback in callbacks:
+        callback()
 
 
 def get_thread_default() -> bool:
@@ -286,6 +305,7 @@ __all__ = [
     "get_auto_threshold",
     "get_thread_default",
     "get_thread_pool_size",
+    "register_thread_control",
     "shutdown_thread_pool",
     "submit_thread_pool_tasks",
     "threading_supported",

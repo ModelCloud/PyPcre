@@ -77,6 +77,66 @@ def test_module_cache_tracks_thread_default_without_mutating_old_pattern() -> No
     assert automatic.thread_mode == "auto"
 
 
+def test_module_hot_cache_tracks_thread_default_across_threads() -> None:
+    threads_mod = importlib.import_module("pcre.threads")
+    original = threads_mod.get_thread_default()
+    source = "module-cross-thread-policy"
+    ready = threading.Event()
+    proceed = threading.Event()
+    observed: list[str] = []
+    errors: list[BaseException] = []
+
+    def search_from_worker() -> None:
+        try:
+            pcre.search(source, source)
+            ready.set()
+            if not proceed.wait(timeout=5):
+                raise TimeoutError("main thread did not release worker")
+            for _ in range(200):
+                match = pcre.search(source, source)
+                assert match is not None
+                observed.append(match.re.thread_mode)
+        except BaseException as exc:
+            errors.append(exc)
+            ready.set()
+
+    pcre.clear_cache()
+    worker = threading.Thread(target=search_from_worker)
+    try:
+        worker.start()
+        assert ready.wait(timeout=5)
+        enabled = not original
+        pcre.configure_threads(enabled=enabled)
+        proceed.set()
+        worker.join(timeout=5)
+    finally:
+        proceed.set()
+        worker.join(timeout=5)
+        pcre.configure_threads(enabled=original)
+        pcre.clear_cache()
+
+    assert not errors
+    assert observed
+    assert set(observed) == {"auto" if enabled else "disabled"}
+
+
+def test_module_hot_cache_tracks_configured_jit_default() -> None:
+    original = pcre.configure()
+    source = "module-jit-policy"
+    pcre.clear_cache()
+    try:
+        first = pcre.search(source, source).re
+        toggled = pcre.configure(jit=not original)
+        second = pcre.search(source, source).re
+    finally:
+        pcre.configure(jit=original)
+        pcre.clear_cache()
+
+    assert second is not first
+    assert first.jit is original
+    assert second.jit is toggled
+
+
 def test_cache_limit_zero_disables_all_high_level_helper_caches() -> None:
     original = cache_mod.get_cache_limit()
     try:
