@@ -72,21 +72,34 @@ coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
 }
 
 /*
- * Releasing the GIL is only worthwhile when the PCRE2 call is expected to do
- * enough work to amortize the PyEval_{Save,Restore}Thread overhead.  For very
- * short matches the extra work is measurable, so only release for large inputs.
+ * On GIL builds, releasing the GIL is only worthwhile when the PCRE2 call is
+ * expected to do enough work to amortize the PyEval_{Save,Restore}Thread
+ * overhead (and the GIL hand-off it can trigger).  For very short matches the
+ * extra work is measurable, so only release for large inputs.
+ *
+ * On free-threaded builds there is no GIL to hand off: detaching is a couple
+ * of atomic state transitions, and *not* detaching means a long-running match
+ * (catastrophic backtracking on a short subject) blocks every stop-the-world
+ * pause -- including gc.collect() in unrelated threads -- for its duration.
+ * PCRE2's match limit is counted per start position, so subject length is
+ * not a bound on match time.  Always detach there.
  */
 #define PCRE2_GIL_RELEASE_THRESHOLD 262144ULL
 #define PCRE_PATTERN_CACHE_INPUT_LIMIT (64 * 1024)
 
+#if defined(Py_GIL_DISABLED)
+#  define PCRE2_SHOULD_DETACH(length) ((void)(length), 1)
+#else
+#  define PCRE2_SHOULD_DETACH(length) \
+    ((unsigned long long)(length) > PCRE2_GIL_RELEASE_THRESHOLD)
+#endif
+
 /*
  * Detach the thread state on both GIL and free-threaded builds.  On GIL
  * builds this releases the GIL; on free-threaded builds it marks the thread
- * as safe for a stop-the-world pause — without it, a thread inside a long
- * pcre2_match (huge subject, catastrophic backtracking) blocks every
- * gc.collect() in the process for the duration of the match.  The wrapped
- * calls are pure PCRE2 with exclusively-owned arguments, so running them
- * detached is safe.
+ * as safe for a stop-the-world pause.  The wrapped calls are pure PCRE2 with
+ * exclusively-owned arguments (callouts used by this module are C-only), so
+ * running them detached is safe.
  */
 #define PCRE2_CALL_RELEASE_GIL(call)          \
     do {                                      \
@@ -97,7 +110,7 @@ coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
 
 #define PCRE2_CALL_MAYBE_RELEASE_GIL(call, length)     \
     do {                                               \
-        if ((length) > PCRE2_GIL_RELEASE_THRESHOLD) { \
+        if (PCRE2_SHOULD_DETACH(length)) {             \
             PCRE2_CALL_RELEASE_GIL(call);              \
         } else {                                       \
             rc = (call);                               \
@@ -106,7 +119,7 @@ coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
 
 #define PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(call, length)       \
     do {                                                     \
-        if ((length) > PCRE2_GIL_RELEASE_THRESHOLD) {       \
+        if (PCRE2_SHOULD_DETACH(length)) {                   \
             PyThreadState *_save = PyEval_SaveThread();     \
             jit_guard_acquire();                            \
             rc = (call);                                    \
@@ -118,6 +131,74 @@ coerce_uint32_argument(PyObject *value, const char *name, uint32_t *out)
             jit_guard_release();                            \
         }                                                    \
     } while (0)
+
+/*
+ * Process-wide match resource limits (pcre2_set_match_limit and friends).
+ * A value of 0 means "use the PCRE2 build default".  They are applied to
+ * every match context handed out by pattern_match_context_acquire(), and
+ * call sites that normally run without a match context acquire one while a
+ * custom limit is configured (match_limits_custom()).
+ *
+ * Without C11 atomics the module only builds for GIL-enabled interpreters;
+ * writers (configure_match_limits) and readers (context acquisition) both run
+ * with the GIL held, so plain variables are sufficient there.
+ */
+#if defined(PCRE_EXT_HAVE_ATOMICS)
+static ATOMIC_VAR(uint32_t) match_limit_setting = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(uint32_t) depth_limit_setting = ATOMIC_VAR_INIT(0);
+static ATOMIC_VAR(uint32_t) heap_limit_setting = ATOMIC_VAR_INIT(0);
+#  define MATCH_LIMIT_LOAD(var) atomic_load_explicit(&(var), memory_order_acquire)
+#  define MATCH_LIMIT_STORE(var, value) atomic_store_explicit(&(var), (value), memory_order_release)
+#else
+static uint32_t match_limit_setting = 0;
+static uint32_t depth_limit_setting = 0;
+static uint32_t heap_limit_setting = 0;
+#  define MATCH_LIMIT_LOAD(var) (var)
+#  define MATCH_LIMIT_STORE(var, value) ((var) = (value))
+#endif
+
+static uint32_t match_limit_build_default = 10000000u;
+static uint32_t depth_limit_build_default = 10000000u;
+static uint32_t heap_limit_build_default = 20000000u;
+
+static void
+match_limits_initialize_defaults(void)
+{
+    uint32_t value = 0;
+    if (pcre2_config(PCRE2_CONFIG_MATCHLIMIT, &value) >= 0 && value != 0) {
+        match_limit_build_default = value;
+    }
+    value = 0;
+    if (pcre2_config(PCRE2_CONFIG_DEPTHLIMIT, &value) >= 0 && value != 0) {
+        depth_limit_build_default = value;
+    }
+    value = 0;
+    if (pcre2_config(PCRE2_CONFIG_HEAPLIMIT, &value) >= 0 && value != 0) {
+        heap_limit_build_default = value;
+    }
+}
+
+static inline int
+match_limits_custom(void)
+{
+    return (MATCH_LIMIT_LOAD(match_limit_setting) |
+            MATCH_LIMIT_LOAD(depth_limit_setting) |
+            MATCH_LIMIT_LOAD(heap_limit_setting)) != 0;
+}
+
+static inline void
+match_limits_apply(pcre2_match_context *context)
+{
+    if (context == NULL) {
+        return;
+    }
+    uint32_t match_limit = MATCH_LIMIT_LOAD(match_limit_setting);
+    uint32_t depth_limit = MATCH_LIMIT_LOAD(depth_limit_setting);
+    uint32_t heap_limit = MATCH_LIMIT_LOAD(heap_limit_setting);
+    (void)pcre2_set_match_limit(context, match_limit ? match_limit : match_limit_build_default);
+    (void)pcre2_set_depth_limit(context, depth_limit ? depth_limit : depth_limit_build_default);
+    (void)pcre2_set_heap_limit(context, heap_limit ? heap_limit : heap_limit_build_default);
+}
 
 static inline pcre2_match_data *
 pattern_match_data_acquire(PatternObject *pattern, int *from_pattern_cache)
@@ -181,12 +262,15 @@ pattern_match_context_acquire(PatternObject *pattern,
     );
     if (cached != NULL) {
         *from_pattern_cache = 1;
+        match_limits_apply(cached);
         return cached;
     }
 #else
     (void)pattern;
 #endif
-    return match_context_cache_acquire(use_offset_limit);
+    pcre2_match_context *context = match_context_cache_acquire(use_offset_limit);
+    match_limits_apply(context);
+    return context;
 }
 
 static inline void
@@ -887,6 +971,7 @@ match_replay_lastindex(MatchObject *self, int *lastindex_out)
         PyErr_NoMemory();
         return -1;
     }
+    match_limits_apply(match_context);
 
     LastIndexReplayState state = {0, 0};
     int ctx_rc = pcre2_set_callout(
@@ -2501,6 +2586,7 @@ retry:
                 PyErr_NoMemory();
                 return NULL;
             }
+            match_limits_apply(self->match_context);
             if (self->jit_stack == NULL) {
                 self->jit_stack = jit_stack_cache_acquire();
                 if (self->jit_stack == NULL) {
@@ -2550,6 +2636,14 @@ retry:
         uint32_t interpreter_options = options;
         if (interpreter_no_jit) {
             interpreter_options |= PCRE2_NO_JIT;
+        }
+        if (self->match_context == NULL && match_limits_custom()) {
+            self->match_context = pcre2_match_context_create(NULL);
+            if (self->match_context == NULL) {
+                PyErr_NoMemory();
+                return NULL;
+            }
+            match_limits_apply(self->match_context);
         }
         PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->pattern->code,
                                                  (PCRE2_SPTR)buffer,
@@ -3028,6 +3122,15 @@ Pattern_create_finditer(PatternObject *pattern,
         pcre2_jit_stack_assign(match_context, NULL, jit_stack);
     }
 
+    if (match_context == NULL && match_limits_custom()) {
+        match_context = pcre2_match_context_create(NULL);
+        if (match_context == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+    }
+    match_limits_apply(match_context);
+
     iter->match_context = match_context;
     iter->jit_stack = jit_stack;
     /*
@@ -3462,7 +3565,7 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
     int use_offset_limit_option = 0;
 #endif
 
-    if (use_offset_limit_option || attempt_jit) {
+    if (use_offset_limit_option || attempt_jit || match_limits_custom()) {
         match_context = pattern_match_context_acquire(
             self,
             use_offset_limit_option,
@@ -3951,7 +4054,7 @@ Pattern_findall(PatternObject *self,
 #endif
     PCRE2_SIZE offset_limit = (PCRE2_SIZE)byte_end;
 
-    if (attempt_jit || use_offset_limit) {
+    if (attempt_jit || use_offset_limit || match_limits_custom()) {
         match_context = pattern_match_context_acquire(self, use_offset_limit, &match_context_from_pattern);
         if (match_context == NULL) {
             PyErr_NoMemory();
@@ -4037,8 +4140,7 @@ Pattern_findall(PatternObject *self,
      * GIL would cost more than the matcher.  Each worker owns its match data
      * and keeps ``utf8_owner`` alive, so the PCRE2 call remains thread-safe.
      */
-    int release_gil_for_match =
-        subject_length_bytes > (Py_ssize_t)PCRE2_GIL_RELEASE_THRESHOLD;
+    int release_gil_for_match = PCRE2_SHOULD_DETACH(subject_length_bytes);
 
     while (1) {
         if (current_byte > subject_length_bytes) {
@@ -4150,7 +4252,9 @@ Pattern_findall(PatternObject *self,
         if (value == NULL) {
             goto error;
         }
+#if !defined(Py_GIL_DISABLED)
         release_gil_for_match = 0;
+#endif
         if (PyList_Append(result, value) < 0) {
             Py_DECREF(value);
             goto error;
@@ -4381,7 +4485,7 @@ Pattern_substitute(PatternObject *self,
         goto error;
     }
 
-    if (pattern_jit_get(self) || count > 1) {
+    if (pattern_jit_get(self) || count > 1 || match_limits_custom()) {
         match_context = pattern_match_context_acquire(self, 0, &match_context_from_pattern);
         if (match_context == NULL) {
             PyErr_NoMemory();
@@ -4485,6 +4589,13 @@ Pattern_substitute(PatternObject *self,
     for (int attempts = 0; attempts < 5; ++attempts) {
         limit_state.stopped = 0;
         int rc;
+        /* The substitute callout (count limit) is C-only, and the subject,
+         * replacement and output buffers are exclusively owned here, so the
+         * call can run detached like the match entry points. */
+        PyThreadState *substitute_save = NULL;
+        if (PCRE2_SHOULD_DETACH(subject_length)) {
+            substitute_save = PyEval_SaveThread();
+        }
         if (guard_jit) {
             jit_guard_acquire();
         }
@@ -4501,6 +4612,9 @@ Pattern_substitute(PatternObject *self,
                               &outlen);
         if (guard_jit) {
             jit_guard_release();
+        }
+        if (substitute_save != NULL) {
+            PyEval_RestoreThread(substitute_save);
         }
         if (rc == PCRE2_ERROR_NOMEMORY) {
             PCRE2_SIZE required = outlen;
@@ -4737,12 +4851,14 @@ Pattern_split(PatternObject *self,
     }
 
     int attempt_jit = pattern_jit_get(self);
-    if (attempt_jit) {
+    if (attempt_jit || match_limits_custom()) {
         match_context = pattern_match_context_acquire(self, 0, &match_context_from_pattern);
         if (match_context == NULL) {
             PyErr_NoMemory();
             goto error;
         }
+    }
+    if (attempt_jit) {
         jit_stack = jit_stack_cache_acquire();
         if (jit_stack == NULL) {
             PyErr_NoMemory();
@@ -4771,6 +4887,10 @@ Pattern_split(PatternObject *self,
     Py_ssize_t current_byte = 0;
     Py_ssize_t splits_done = 0;
     int retry_nonempty = 0;
+    /* Same policy as findall: detach for the (potentially long) first scan;
+     * on GIL builds stop after the first match so that patterns producing
+     * many tiny matches don't pay a GIL hand-off per match. */
+    int release_gil_for_match = PCRE2_SHOULD_DETACH(subject_length_bytes);
 
     while (1) {
         if (maxsplit < 0) {
@@ -4790,15 +4910,26 @@ Pattern_split(PatternObject *self,
         }
         int use_jit = attempt_jit && !retry_nonempty;
         if (use_jit) {
-            jit_guard_acquire();
-            rc = pcre2_jit_match(self->code,
-                                 (PCRE2_SPTR)utf8_data,
-                                 (PCRE2_SIZE)subject_length_bytes,
-                                 (PCRE2_SIZE)current_byte,
-                                 current_options,
-                                 match_data,
-                                 match_context);
-            jit_guard_release();
+            if (release_gil_for_match) {
+                PCRE2_JIT_CALL_MAYBE_RELEASE_GIL(pcre2_jit_match(self->code,
+                                                                 (PCRE2_SPTR)utf8_data,
+                                                                 (PCRE2_SIZE)subject_length_bytes,
+                                                                 (PCRE2_SIZE)current_byte,
+                                                                 current_options,
+                                                                 match_data,
+                                                                 match_context),
+                                                 subject_length_bytes);
+            } else {
+                jit_guard_acquire();
+                rc = pcre2_jit_match(self->code,
+                                     (PCRE2_SPTR)utf8_data,
+                                     (PCRE2_SIZE)subject_length_bytes,
+                                     (PCRE2_SIZE)current_byte,
+                                     current_options,
+                                     match_data,
+                                     match_context);
+                jit_guard_release();
+            }
             if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
                 pattern_jit_set(self, 0);
                 attempt_jit = 0;
@@ -4824,13 +4955,24 @@ Pattern_split(PatternObject *self,
         }
 
         if (!use_jit) {
-            rc = pcre2_match(self->code,
-                             (PCRE2_SPTR)utf8_data,
-                             (PCRE2_SIZE)subject_length_bytes,
-                             (PCRE2_SIZE)current_byte,
-                             current_options,
-                             match_data,
-                             match_context);
+            if (release_gil_for_match) {
+                PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->code,
+                                                         (PCRE2_SPTR)utf8_data,
+                                                         (PCRE2_SIZE)subject_length_bytes,
+                                                         (PCRE2_SIZE)current_byte,
+                                                         current_options,
+                                                         match_data,
+                                                         match_context),
+                                             subject_length_bytes);
+            } else {
+                rc = pcre2_match(self->code,
+                                 (PCRE2_SPTR)utf8_data,
+                                 (PCRE2_SIZE)subject_length_bytes,
+                                 (PCRE2_SIZE)current_byte,
+                                 current_options,
+                                 match_data,
+                                 match_context);
+            }
             if (rc == PCRE2_ERROR_NOMATCH) {
                 goto split_no_match;
             }
@@ -4841,6 +4983,9 @@ Pattern_split(PatternObject *self,
             }
         }
 
+#if !defined(Py_GIL_DISABLED)
+        release_gil_for_match = 0;
+#endif
         Py_ssize_t start_byte = (Py_ssize_t)ovector[0];
         Py_ssize_t end_byte = (Py_ssize_t)ovector[1];
 
@@ -6100,6 +6245,81 @@ module_configure(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
     Py_RETURN_FALSE;
 }
 
+static int
+parse_match_limit_argument(PyObject *value, const char *name, uint32_t *out)
+{
+    if (value == Py_None) {
+        return 0;
+    }
+    if (PyBool_Check(value) || !PyLong_Check(value)) {
+        PyErr_Format(PyExc_TypeError, "%s must be an int or None", name);
+        return -1;
+    }
+    int overflow = 0;
+    long long parsed = PyLong_AsLongLongAndOverflow(value, &overflow);
+    if (parsed == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+    if (overflow != 0 || parsed < 0 || (unsigned long long)parsed > UINT32_MAX) {
+        PyErr_Format(PyExc_ValueError, "%s must be between 0 and %u", name, (unsigned)UINT32_MAX);
+        return -1;
+    }
+    *out = (uint32_t)parsed;
+    return 1;
+}
+
+static PyObject *
+match_limits_snapshot(void)
+{
+    uint32_t match_limit = MATCH_LIMIT_LOAD(match_limit_setting);
+    uint32_t depth_limit = MATCH_LIMIT_LOAD(depth_limit_setting);
+    uint32_t heap_limit = MATCH_LIMIT_LOAD(heap_limit_setting);
+    return Py_BuildValue(
+        "{s:k,s:k,s:k}",
+        "match_limit", (unsigned long)(match_limit ? match_limit : match_limit_build_default),
+        "depth_limit", (unsigned long)(depth_limit ? depth_limit : depth_limit_build_default),
+        "heap_limit", (unsigned long)(heap_limit ? heap_limit : heap_limit_build_default)
+    );
+}
+
+static PyObject *
+module_configure_match_limits(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
+{
+    static char *kwlist[] = {"match_limit", "depth_limit", "heap_limit", NULL};
+    PyObject *match_obj = Py_None;
+    PyObject *depth_obj = Py_None;
+    PyObject *heap_obj = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|$OOO", kwlist,
+                                     &match_obj, &depth_obj, &heap_obj)) {
+        return NULL;
+    }
+
+    uint32_t match_limit = 0, depth_limit = 0, heap_limit = 0;
+    int set_match = parse_match_limit_argument(match_obj, "match_limit", &match_limit);
+    if (set_match < 0) {
+        return NULL;
+    }
+    int set_depth = parse_match_limit_argument(depth_obj, "depth_limit", &depth_limit);
+    if (set_depth < 0) {
+        return NULL;
+    }
+    int set_heap = parse_match_limit_argument(heap_obj, "heap_limit", &heap_limit);
+    if (set_heap < 0) {
+        return NULL;
+    }
+
+    if (set_match) {
+        MATCH_LIMIT_STORE(match_limit_setting, match_limit);
+    }
+    if (set_depth) {
+        MATCH_LIMIT_STORE(depth_limit_setting, depth_limit);
+    }
+    if (set_heap) {
+        MATCH_LIMIT_STORE(heap_limit_setting, heap_limit);
+    }
+    return match_limits_snapshot();
+}
+
 static PyObject *
 module_attach_match(PyObject *Py_UNUSED(module), PyObject *args)
 {
@@ -6141,6 +6361,7 @@ static PyMethodDef module_methods[] = {
     {"fullmatch", (PyCFunction)module_fullmatch, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Match a pattern against the entire string." )},
     {"findall", (PyCFunction)module_findall, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Return a list of all non-overlapping matches." )},
     {"configure", (PyCFunction)module_configure, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Get or set module-wide defaults (currently only 'jit')." )},
+    {"configure_match_limits", (PyCFunction)module_configure_match_limits, METH_VARARGS | METH_KEYWORDS, PyDoc_STR("Get or set process-wide PCRE2 match/depth/heap limits (0 restores the build default)." )},
     {"_attach_match", (PyCFunction)module_attach_match, METH_VARARGS, PyDoc_STR("Attach a public pattern owner to a low-level match object." )},
     {"get_match_data_cache_size", (PyCFunction)module_get_match_data_cache_size, METH_NOARGS, PyDoc_STR("Return the capacity of the reusable match-data cache." )},
     {"set_match_data_cache_size", (PyCFunction)module_set_match_data_cache_size, METH_VARARGS, PyDoc_STR("Set the capacity of the reusable match-data cache." )},
@@ -6527,6 +6748,7 @@ module_exec(PyObject *module)
     }
 
     initialize_pcre2_version();
+    match_limits_initialize_defaults();
 
     if (PyModule_AddStringConstant(module, "PCRE2_VERSION", pcre2_library_version) < 0) {
         goto error_cache;
