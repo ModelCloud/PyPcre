@@ -90,6 +90,13 @@ typedef struct {
     Py_ssize_t public_endpos;
     int subject_is_bytes;
     uint32_t replay_options;
+    /* Exact pcre2_match() call that produced this snapshot: start offset,
+     * subject length and (when PCRE2_USE_OFFSET_LIMIT is set) offset limit.
+     * lastindex/lastgroup replay must reproduce these, not re-derive them. */
+    Py_ssize_t exec_start;
+    Py_ssize_t exec_length;
+    Py_ssize_t exec_offset_limit;
+    int exec_use_offset_limit;
     int lastindex_cache;
     /* Lazily materialized immutable regs tuple; protected for GIL=0 callers. */
     PyObject *regs_cache;

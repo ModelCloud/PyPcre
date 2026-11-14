@@ -901,36 +901,27 @@ match_replay_lastindex(MatchObject *self, int *lastindex_out)
         return -1;
     }
 
-    Py_ssize_t replay_length = self->utf8_length;
-    if (self->subject_is_bytes) {
-        replay_length = self->public_endpos;
-    } else if (self->public_endpos < PyUnicode_GET_LENGTH(self->subject)) {
-        if (utf8_index_to_offset(self->subject,
-                                 self->public_endpos,
-                                 &replay_length) < 0) {
+    uint32_t replay_options = self->replay_options;
+#if defined(PCRE2_USE_OFFSET_LIMIT)
+    if (self->exec_use_offset_limit) {
+        int limit_rc = pcre2_set_offset_limit(
+            match_context,
+            (PCRE2_SIZE)self->exec_offset_limit
+        );
+        if (limit_rc < 0) {
             pcre2_match_context_free(match_context);
             pcre2_match_data_free(match_data);
+            raise_pcre_error("lastindex set_offset_limit", limit_rc, 0);
             return -1;
         }
     }
-
-    uint32_t replay_options = self->replay_options;
-#if defined(PCRE2_USE_OFFSET_LIMIT)
-    replay_options &= ~PCRE2_USE_OFFSET_LIMIT;
 #endif
-    replay_options |= PCRE2_ANCHORED;
-    if (!self->subject_is_bytes ||
-        (replay_length == self->utf8_length && self->ovector[0] == 0)) {
-        replay_options |= PCRE2_NO_UTF_CHECK;
-    } else {
-        replay_options &= ~PCRE2_NO_UTF_CHECK;
-    }
 
     int rc = pcre2_match(
         replay_code,
         (PCRE2_SPTR)self->utf8_data,
-        (PCRE2_SIZE)replay_length,
-        (PCRE2_SIZE)self->ovector[0],
+        (PCRE2_SIZE)self->exec_length,
+        (PCRE2_SIZE)self->exec_start,
         replay_options,
         match_data,
         match_context
@@ -975,6 +966,25 @@ match_replay_lastindex(MatchObject *self, int *lastindex_out)
 
     *lastindex_out = (int)state.capture_last;
     return 0;
+}
+
+/*
+ * Best-effort lastindex when the AUTO_CALLOUT replay cannot run (pattern too
+ * large for a second compile, JIT stack exhaustion, ...).  The highest
+ * participating capture is exact whenever groups close in index order, which
+ * covers the overwhelming majority of real patterns.
+ */
+static int
+match_highest_participating_group(MatchObject *self)
+{
+    for (uint32_t index = self->ovec_count; index-- > 1;) {
+        Py_ssize_t start = self->ovector[(size_t)index * 2];
+        Py_ssize_t end = self->ovector[(size_t)index * 2 + 1];
+        if (start >= 0 && end >= 0) {
+            return (int)index;
+        }
+    }
+    return -1;
 }
 
 static PyObject *
@@ -1038,12 +1048,27 @@ Match_get_lastindex(MatchObject *self, void *closure)
         Py_BEGIN_CRITICAL_SECTION(self);
         cached_lastindex = self->lastindex_cache;
         Py_END_CRITICAL_SECTION();
-        if (cached_lastindex == -2) {
-            return NULL;
+        if (cached_lastindex != -2) {
+            /* Another thread completed the replay while this one failed. */
+            PyErr_Clear();
+            lastindex = cached_lastindex;
+        } else {
+            /*
+             * The replay is best-effort.  An unrepresentable pattern (for
+             * example the AUTO_CALLOUT recompile exceeds PCRE2's pattern size
+             * limit) must not make an attribute getter raise.  Fall back to
+             * the highest participating group, which is exact for in-order
+             * captures and is the documented degradation for the rest.
+             */
+            PyErr_Clear();
+            int fallback = match_highest_participating_group(self);
+            Py_BEGIN_CRITICAL_SECTION(self);
+            if (self->lastindex_cache == -2) {
+                self->lastindex_cache = fallback;
+            }
+            lastindex = self->lastindex_cache;
+            Py_END_CRITICAL_SECTION();
         }
-        /* Another thread completed the replay while this one failed. */
-        PyErr_Clear();
-        lastindex = cached_lastindex;
     } else {
         Py_BEGIN_CRITICAL_SECTION(self);
         if (self->lastindex_cache == -2) {
@@ -2179,7 +2204,11 @@ static MatchObject *create_match_object(PatternObject *pattern,
                                         Py_ssize_t endpos,
                                         uint32_t ovec_count,
                                         PCRE2_SIZE *ovector,
-                                        uint32_t replay_options);
+                                        uint32_t replay_options,
+                                        Py_ssize_t exec_start,
+                                        Py_ssize_t exec_length,
+                                        Py_ssize_t exec_offset_limit,
+                                        int exec_use_offset_limit);
 
 
 static inline Py_ssize_t
@@ -2455,6 +2484,9 @@ retry:
     }
 
     int use_jit = pattern_jit_get(self->pattern) && !self->retry_nonempty;
+    /* Set when the JIT stack was exhausted: the interpreter retry must pass
+     * PCRE2_NO_JIT so pcre2_match() cannot re-enter the same JIT code. */
+    int interpreter_no_jit = 0;
     if (use_jit && self->subject_is_bytes &&
         (self->pattern->compile_options & PCRE2_UTF) != 0 &&
         !(self->base_options & PCRE2_NO_UTF_CHECK)) {
@@ -2497,6 +2529,12 @@ retry:
                 jit_stack_cache_release(self->jit_stack);
                 self->jit_stack = NULL;
             }
+        } else if (rc == PCRE2_ERROR_JIT_STACKLIMIT) {
+            /* The subject needs more JIT stack than the cache grants.  The
+             * interpreter has no such limit, so retry this call there
+             * instead of surfacing an error from iteration. */
+            use_jit = 0;
+            interpreter_no_jit = 1;
         } else if (rc == PCRE2_ERROR_NOMATCH) {
             goto no_match;
         } else if (rc < 0) {
@@ -2509,11 +2547,15 @@ retry:
     }
 
     if (!use_jit) {
+        uint32_t interpreter_options = options;
+        if (interpreter_no_jit) {
+            interpreter_options |= PCRE2_NO_JIT;
+        }
         PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->pattern->code,
                                                  (PCRE2_SPTR)buffer,
                                                  exec_length,
                                                  (PCRE2_SIZE)self->current_byte,
-                                                 options,
+                                                 interpreter_options,
                                                  self->match_data,
                                                  self->match_context),
                                                exec_length);
@@ -2558,7 +2600,12 @@ matched:
         self->resolved_end,
         (uint32_t)expected_pairs,
         ovector,
-        options);
+        options,
+        (Py_ssize_t)self->current_byte,
+        (Py_ssize_t)exec_length,
+        /* FindIter does not use PCRE2_USE_OFFSET_LIMIT. */
+        0,
+        0);
     if (match == NULL) {
         return NULL;
     }
@@ -2683,7 +2730,11 @@ create_match_object(PatternObject *pattern,
                     Py_ssize_t endpos,
                     uint32_t ovec_count,
                     PCRE2_SIZE *ovector,
-                    uint32_t replay_options)
+                    uint32_t replay_options,
+                    Py_ssize_t exec_start,
+                    Py_ssize_t exec_length,
+                    Py_ssize_t exec_offset_limit,
+                    int exec_use_offset_limit)
 {
     /*
      * Materialize a standalone match snapshot. The ovector is copied because
@@ -2737,6 +2788,10 @@ create_match_object(PatternObject *pattern,
     match->public_pos = pos;
     match->public_endpos = endpos;
     match->replay_options = replay_options;
+    match->exec_start = exec_start;
+    match->exec_length = exec_length;
+    match->exec_offset_limit = exec_offset_limit;
+    match->exec_use_offset_limit = exec_use_offset_limit;
     match->lastindex_cache = -2;
     match->regs_cache = NULL;
     /* Anything that isn't str (bytes, or a buffer-protocol object such as
@@ -3387,11 +3442,19 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
      * flag is still set, neither engine would run and the uninitialized
      * match_data (rc == 0) would be turned into a garbage Match. */
     int jit_produced_result = 0;
+    /* Set when JIT ran out of stack: the interpreter re-run must pass
+     * PCRE2_NO_JIT, otherwise pcre2_match() would transparently re-enter the
+     * same JIT translation and hit the identical limit. */
+    int interpreter_no_jit = 0;
     pcre2_match_context *match_context = NULL;
     int match_context_from_pattern = 0;
     int match_context_used_offset_limit = 0;
     pcre2_jit_stack *jit_stack = NULL;
     PCRE2_SIZE exec_length = (PCRE2_SIZE)subject_length_bytes;
+    /* The length actually handed to the call that produced the match.  It is
+     * exec_length for the JIT path and interpreter_length for the fullmatch
+     * end-anchor fallback. */
+    PCRE2_SIZE matched_exec_length = exec_length;
     int need_offset_limit = (offset_limit != (PCRE2_SIZE)subject_length_bytes);
 #if defined(PCRE2_USE_OFFSET_LIMIT)
     int use_offset_limit_option = need_offset_limit && offset_limit_option_enabled();
@@ -3473,6 +3536,10 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
 
         if (rc == PCRE2_ERROR_JIT_BADOPTION || rc == PCRE2_ERROR_BADOPTION) {
             pattern_jit_set(self, 0);
+        } else if (rc == PCRE2_ERROR_JIT_STACKLIMIT) {
+            /* Leave jit_produced_result clear so the interpreter block below
+             * re-runs this match without the JIT stack limit. */
+            interpreter_no_jit = 1;
         } else if (rc != PCRE2_ERROR_NOMATCH && rc < 0) {
             PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
             pattern_match_context_release(
@@ -3520,11 +3587,16 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
                 interpreter_length = (PCRE2_SIZE)byte_start;
             }
         }
+        matched_exec_length = interpreter_length;
+        uint32_t interpreter_options = match_options;
+        if (interpreter_no_jit) {
+            interpreter_options |= PCRE2_NO_JIT;
+        }
         PCRE2_CALL_MAYBE_RELEASE_GIL(pcre2_match(self->code,
                                                  (PCRE2_SPTR)buffer,
                                                  interpreter_length,
                                                  (PCRE2_SIZE)byte_start,
-                                                 match_options,
+                                                 interpreter_options,
                                                  match_data,
                                                  match_context),
                                                interpreter_length);
@@ -3586,7 +3658,11 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
         adjusted_endpos >= 0 ? adjusted_endpos : logical_length,
         (uint32_t)expected_pairs,
         ovector,
-        match_options);
+        match_options,
+        byte_start,
+        (Py_ssize_t)matched_exec_length,
+        (Py_ssize_t)offset_limit,
+        use_offset_limit_option);
 
     pattern_match_context_release(
         self,
@@ -4017,6 +4093,10 @@ Pattern_findall(PatternObject *self,
                     jit_stack_cache_release(jit_stack);
                     jit_stack = NULL;
                 }
+                use_jit = 0;
+            } else if (rc == PCRE2_ERROR_JIT_STACKLIMIT) {
+                /* Retry this position on the interpreter (no JIT stack). */
+                current_options |= PCRE2_NO_JIT;
                 use_jit = 0;
             } else if (rc == PCRE2_ERROR_NOMATCH) {
                 goto findall_no_match;
@@ -4460,6 +4540,14 @@ Pattern_substitute(PatternObject *self,
             outlen = required;
             continue;
         }
+        if (rc == PCRE2_ERROR_JIT_STACKLIMIT && !(sub_options & PCRE2_NO_JIT)) {
+            /* pcre2_substitute() runs the JIT translation whenever the code
+             * block has one.  On stack exhaustion, redo the substitution on
+             * the interpreter; every other option is unchanged. */
+            sub_options |= PCRE2_NO_JIT;
+            outlen = out_capacity;
+            continue;
+        }
         if (rc < 0) {
             PCRE2_SIZE error_offset = pcre2_get_startchar(match_data);
             PyMem_Free(out);
@@ -4721,6 +4809,10 @@ Pattern_split(PatternObject *self,
                     jit_stack_cache_release(jit_stack);
                     jit_stack = NULL;
                 }
+                use_jit = 0;
+            } else if (rc == PCRE2_ERROR_JIT_STACKLIMIT) {
+                /* Retry this position on the interpreter (no JIT stack). */
+                current_options |= PCRE2_NO_JIT;
                 use_jit = 0;
             } else if (rc == PCRE2_ERROR_NOMATCH) {
                 goto split_no_match;

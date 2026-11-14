@@ -349,6 +349,13 @@ the conversion without repeating the flag.
   `shutdown_thread_pool()`, `Flag.THREADS`, and `Flag.NO_THREADS` are available
   if you want to opt into or restrict threaded execution.
 
+## Documentation 📚
+
+- [`lastindex` replay and JIT stack fallback](docs/lastindex-and-jit-stack.md) —
+  how `Match.lastindex`/`lastgroup` are reconstructed, why the replay must use
+  the original start offset and options, and how an exhausted JIT stack falls
+  back to the interpreter instead of raising.
+
 ## Building 🏗️
 
 The extension links against an existing `libpcre2-8` installation. Install the development headers for your platform before building,
