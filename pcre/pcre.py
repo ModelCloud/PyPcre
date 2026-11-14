@@ -2185,6 +2185,37 @@ def configure(*, jit: bool | None = None, compat_regex: bool | None = None) -> b
         return bool(_DEFAULT_JIT)
 
 
+def configure_match_limits(
+    *,
+    match_limit: int | None = None,
+    depth_limit: int | None = None,
+    heap_limit: int | None = None,
+) -> dict[str, int]:
+    """Bound the work a single match may do, process-wide.
+
+    These map to PCRE2's ``pcre2_set_match_limit``, ``pcre2_set_depth_limit``
+    and ``pcre2_set_heap_limit`` (heap limit is in KiB) and apply to every
+    match, search, findall, finditer, split and sub call made after the update.
+    A match that exceeds a limit raises the corresponding PCRE2 error
+    (``MATCHLIMIT``, ``DEPTHLIMIT`` or ``HEAPLIMIT``) instead of running
+    unbounded, which is useful when matching untrusted patterns or subjects.
+
+    ``None`` leaves a limit unchanged and ``0`` restores the PCRE2 build
+    default. Returns the effective limits after applying any updates.
+
+    Note that PCRE2 counts the match limit per start position, so a search
+    over ``n`` characters may perform up to ``n * match_limit`` steps.
+    """
+
+    return dict(
+        _pcre2.configure_match_limits(
+            match_limit=match_limit,
+            depth_limit=depth_limit,
+            heap_limit=heap_limit,
+        )
+    )
+
+
 def clear_cache() -> None:
     """Clear the compiled pattern cache and release cached match-data/JIT buffers."""
 

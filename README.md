@@ -233,7 +233,8 @@ numbers = pattern.findall(b"line 1\nline 22")
 
 - Module helpers: `prefixmatch`, `match`, `search`, `fullmatch`, `finditer`,
   `findall`, `split`, `sub`, `subn`, `compile`, `escape`, `purge`,
-  `template`, `parallel_map`, `configure`, `configure_threads`,
+  `template`, `parallel_map`, `configure`, `configure_match_limits`,
+  `configure_threads`,
   `configure_thread_pool`, `shutdown_thread_pool`, `set_cache_limit`,
   `get_cache_limit`, and `clear_cache`.
 - `compile()` returns a `Pattern` object with the familiar matching helpers
@@ -345,6 +346,14 @@ the conversion without repeating the flag.
   workers' high-level helper caches on their next cache-backed call. Backend
   scratch buffers remain thread-scoped and are released when that thread exits.
   Oversized patterns and templates are not retained.
+- 🛑 `pcre.configure_match_limits(match_limit=..., depth_limit=..., heap_limit=...)`
+  bounds the work any single match may do, process-wide (PCRE2's
+  `pcre2_set_match_limit` / `depth_limit` / `heap_limit`; the heap limit is in
+  KiB). A match that exceeds a limit raises `PcreError` (`MATCHLIMIT`,
+  `DEPTHLIMIT` or `HEAPLIMIT`) instead of running unbounded, which is useful
+  for untrusted patterns or subjects. `0` restores the PCRE2 build default.
+  PCRE2 counts the match limit per start position, so a search over `n`
+  characters can still take up to `n × match_limit` steps.
 - 🧵 `pcre.configure_threads()`, `pcre.configure_thread_pool()`,
   `shutdown_thread_pool()`, `Flag.THREADS`, and `Flag.NO_THREADS` are available
   if you want to opt into or restrict threaded execution.
