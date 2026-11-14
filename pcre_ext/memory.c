@@ -136,7 +136,9 @@ pcre_memory_initialize(void)
         .free_symbol = "tc_free",
     };
 
-    const char *forced = getenv("PYPCRE_ALLOCATOR");
+    /* Py_GETENV honours -E/-I like the other PYPCRE_* toggles; this one
+     * selects a shared library to dlopen, so isolated mode must ignore it. */
+    const char *forced = Py_GETENV("PYPCRE_ALLOCATOR");
 
     if (forced == NULL || *forced == '\0' || equals_ignore_case(forced, "pymem")) {
         current_handle = NULL;

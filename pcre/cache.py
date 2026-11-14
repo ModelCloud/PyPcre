@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import os
 from enum import Enum
 from threading import RLock, local
 from typing import Any, Callable, TypeVar, cast
@@ -113,10 +112,10 @@ def _env_flag_is_true(value: str | None) -> bool:
     return value[0] not in {"0", "f", "F", "n", "N"}
 
 
-if _env_flag_is_true(os.getenv("PYPCRE_CACHE_PATTERN_GLOBAL")):
-    _CACHE_STRATEGY = _CacheStrategy.GLOBAL
-else:
-    _CACHE_STRATEGY = _CacheStrategy.THREAD_LOCAL
+# The C extension latches the strategy when it is imported (honouring -E/-I
+# and the PCRE2_CACHE_PATTERN_GLOBAL alias via Py_GETENV); mirror it rather
+# than re-reading the environment so the two layers can never disagree.
+_CACHE_STRATEGY = _CacheStrategy(_pcre2.get_cache_strategy())
 
 
 def cache_strategy(strategy: str | None = None) -> str:
