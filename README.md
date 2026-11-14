@@ -248,6 +248,12 @@ numbers = pattern.findall(b"line 1\nline 22")
   `NOFLAG`.
 - Errors are raised as `pcre.PcreError`; `error` and `PatternError` are kept as
   compatibility aliases.
+- Buffer-protocol subjects (`mmap.mmap`, `bytearray`, `array.array`,
+  `memoryview`) are accepted anywhere `bytes` is. Each call takes an immutable
+  snapshot of the buffer before matching, so concurrent writers (or another
+  process writing a shared mapping) cannot corrupt a match in progress. That
+  snapshot is a full copy: searching a 200 MB `mmap` allocates 200 MB per call.
+  For very large inputs, match over slices or chunks instead of the whole map.
 
 ### Common examples 🧪
 

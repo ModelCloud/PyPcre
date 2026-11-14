@@ -1300,7 +1300,15 @@ raise_pcre_error(const char *context, int error_code, PCRE2_SIZE error_offset)
     int rc = pcre2_get_error_message(error_code, buffer,
                                      (PCRE2_SIZE)(sizeof(buffer) / sizeof(PCRE2_UCHAR)));
     const char *message = rc >= 0 ? (const char *)buffer : "unknown PCRE2 error";
+    raise_pcre_error_message(context, error_code, error_offset, message);
+}
 
+void
+raise_pcre_error_message(const char *context,
+                         int error_code,
+                         PCRE2_SIZE error_offset,
+                         const char *message)
+{
     PyObject *exc_type = get_error_type_for_code(error_code);
     if (exc_type == NULL) {
         return;

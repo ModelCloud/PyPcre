@@ -110,6 +110,10 @@ extern PyObject *PcreError;
 int pcre_error_init(PyObject *module);
 void pcre_error_teardown(void);
 void raise_pcre_error(const char *context, int error_code, PCRE2_SIZE error_offset);
+void raise_pcre_error_message(const char *context,
+                              int error_code,
+                              PCRE2_SIZE error_offset,
+                              const char *message);
 
 /* Flags */
 int pcre_flag_add_constants(PyObject *module);
