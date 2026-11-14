@@ -7,6 +7,16 @@
 
 #include <string.h>
 
+/*
+ * Default JIT stack geometry.  The stack grows on demand up to the maximum,
+ * so a generous cap costs nothing for ordinary patterns.  1 MB used to be the
+ * cap, which a 40 KB "(a|b)*c" subject already exhausted and turned into a
+ * PcreErrorJitStacklimit; 8 MB leaves comfortable headroom for realistic
+ * backtracking while still bounding worst-case memory.
+ */
+#define PYPCRE_DEFAULT_JIT_START_STACK_SIZE (32 * 1024)
+#define PYPCRE_DEFAULT_JIT_MAX_STACK_SIZE   (8 * 1024 * 1024)
+
 typedef struct ThreadCacheState {
     pcre2_match_data *match_cached;
     uint32_t match_ovec_count;
@@ -43,8 +53,8 @@ static ATOMIC_VAR(uint32_t) global_match_capacity = ATOMIC_VAR_INIT(1);
 
 static ATOMIC_VAR(pcre2_jit_stack *) global_jit_cached = ATOMIC_VAR_INIT(NULL);
 static ATOMIC_VAR(uint32_t) global_jit_capacity = ATOMIC_VAR_INIT(1);
-static ATOMIC_VAR(size_t) global_jit_start_size = ATOMIC_VAR_INIT(32 * 1024);
-static ATOMIC_VAR(size_t) global_jit_max_size = ATOMIC_VAR_INIT(1024 * 1024);
+static ATOMIC_VAR(size_t) global_jit_start_size = ATOMIC_VAR_INIT(PYPCRE_DEFAULT_JIT_START_STACK_SIZE);
+static ATOMIC_VAR(size_t) global_jit_max_size = ATOMIC_VAR_INIT(PYPCRE_DEFAULT_JIT_MAX_STACK_SIZE);
 static PyThread_type_lock global_cache_lock = NULL;
 
 static ATOMIC_VAR(int) debug_thread_cache_count = ATOMIC_VAR_INIT(0);
@@ -133,8 +143,8 @@ thread_cache_state_get_or_create(void)
 
     state->match_capacity = 1;
     state->jit_capacity = 1;
-    state->jit_start_size = 32 * 1024;
-    state->jit_max_size = 1024 * 1024;
+    state->jit_start_size = PYPCRE_DEFAULT_JIT_START_STACK_SIZE;
+    state->jit_max_size = PYPCRE_DEFAULT_JIT_MAX_STACK_SIZE;
 
     if (PyThread_tss_set(&cache_tss, state) != 0) {
         PyMem_Free(state);
@@ -312,8 +322,8 @@ global_cache_teardown(void)
     global_jit_cache_clear();
     atomic_store_explicit(&global_match_capacity, 1, memory_order_release);
     atomic_store_explicit(&global_jit_capacity, 1, memory_order_release);
-    atomic_store_explicit(&global_jit_start_size, 32 * 1024, memory_order_release);
-    atomic_store_explicit(&global_jit_max_size, 1024 * 1024, memory_order_release);
+    atomic_store_explicit(&global_jit_start_size, PYPCRE_DEFAULT_JIT_START_STACK_SIZE, memory_order_release);
+    atomic_store_explicit(&global_jit_max_size, PYPCRE_DEFAULT_JIT_MAX_STACK_SIZE, memory_order_release);
 }
 
 static inline CacheStrategy
@@ -570,8 +580,8 @@ cache_initialize(int global_mode)
     global_jit_cache_clear();
     atomic_store_explicit(&global_match_capacity, 1, memory_order_release);
     atomic_store_explicit(&global_jit_capacity, 1, memory_order_release);
-    atomic_store_explicit(&global_jit_start_size, 32 * 1024, memory_order_release);
-    atomic_store_explicit(&global_jit_max_size, 1024 * 1024, memory_order_release);
+    atomic_store_explicit(&global_jit_start_size, PYPCRE_DEFAULT_JIT_START_STACK_SIZE, memory_order_release);
+    atomic_store_explicit(&global_jit_max_size, PYPCRE_DEFAULT_JIT_MAX_STACK_SIZE, memory_order_release);
     cache_initialized = 1;
     return 0;
 }
