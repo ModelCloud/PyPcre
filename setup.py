@@ -60,6 +60,10 @@ MODULE_SOURCES = [
 PCRE_EXT_DIR = ROOT_DIR / "pcre_ext"
 PCRE2_REPO_URL = "https://github.com/PCRE2Project/pcre2.git"
 PCRE2_TAG = "pcre2-10.46"
+# Commit the tag must resolve to; matches the pcre_ext/pcre2-10.46 submodule
+# gitlink. Tags are mutable, so a source build verifies the checkout against
+# this SHA before compiling anything from it.
+PCRE2_COMMIT = "b2bd4254b379b9d7dc9a3dda060a7e27009ccdff"
 
 # Platform-specific library naming/selection
 if os.name == "nt":
@@ -95,6 +99,7 @@ setup_utils.configure_environment(
     pcre_ext_dir=PCRE_EXT_DIR,
     repo_url=PCRE2_REPO_URL,
     repo_tag=PCRE2_TAG,
+    repo_commit=PCRE2_COMMIT,
     lib_extensions=LIB_EXTENSIONS,
     library_basename=LIBRARY_BASENAME,
     library_search_patterns=LIBRARY_SEARCH_PATTERNS,

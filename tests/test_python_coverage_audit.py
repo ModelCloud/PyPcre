@@ -491,13 +491,18 @@ def test_package_import_without_optional_simd_export() -> None:
         importlib.reload(pcre)
 
 
-def test_cache_import_honours_global_environment(
+def test_cache_import_mirrors_backend_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("PYPCRE_CACHE_PATTERN_GLOBAL", "1")
+    # The strategy is latched by the C extension at import; reloading the
+    # Python layer with a different environment must not make them disagree
+    # (subprocess coverage of the env toggle lives in test_cache_global.py).
+    backend_strategy = pcre_ext_c.get_cache_strategy()
+    flipped = "0" if backend_strategy == "global" else "1"
+    monkeypatch.setenv("PYPCRE_CACHE_PATTERN_GLOBAL", flipped)
     reloaded = importlib.reload(cache_mod)
     try:
-        assert reloaded._CACHE_STRATEGY is reloaded._CacheStrategy.GLOBAL
+        assert reloaded._CACHE_STRATEGY.value == backend_strategy
     finally:
         monkeypatch.delenv("PYPCRE_CACHE_PATTERN_GLOBAL")
         importlib.reload(cache_mod)

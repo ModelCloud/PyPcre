@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -28,6 +29,7 @@ from setuptools._distutils.sysconfig import customize_compiler
 _PCRE_EXT_DIR: Path | None = None
 _PCRE2_REPO_URL: str | None = None
 _PCRE2_TAG: str | None = None
+_PCRE2_COMMIT: str | None = None
 
 _LIB_EXTENSIONS: tuple[str, ...] = ()
 _LIBRARY_BASENAME: str | None = None
@@ -55,18 +57,20 @@ def configure_environment(
         pcre_ext_dir: Path,
         repo_url: str,
         repo_tag: str,
+        repo_commit: str | None = None,
         lib_extensions: Iterable[str],
         library_basename: str,
         library_search_patterns: Iterable[str],
 ) -> None:
     """Inject project-specific constants from setup.py."""
 
-    global _PCRE_EXT_DIR, _PCRE2_REPO_URL, _PCRE2_TAG
+    global _PCRE_EXT_DIR, _PCRE2_REPO_URL, _PCRE2_TAG, _PCRE2_COMMIT
     global _LIB_EXTENSIONS, _LIBRARY_BASENAME, _LIBRARY_SEARCH_PATTERNS
 
     _PCRE_EXT_DIR = pcre_ext_dir
     _PCRE2_REPO_URL = repo_url
     _PCRE2_TAG = repo_tag
+    _PCRE2_COMMIT = repo_commit.lower() if repo_commit else None
     _LIB_EXTENSIONS = tuple(lib_extensions)
     _LIBRARY_BASENAME = library_basename
     _LIBRARY_SEARCH_PATTERNS = tuple(library_search_patterns)
@@ -92,6 +96,41 @@ def _get_repo_url() -> str:
 
 def _get_repo_tag() -> str:
     return _require_config(_PCRE2_TAG, "PCRE2_TAG")  # type: ignore[return-value]
+
+
+def _verify_pcre2_checkout(destination: Path) -> None:
+    """Refuse to build from a PCRE2 checkout that is not the pinned commit.
+
+    ``git clone --branch <tag>`` follows whatever the tag points to at install
+    time, so the resolved commit is checked against the SHA pinned in setup.py
+    (git object IDs then cover the tree and the sljit submodule gitlink).
+    """
+
+    expected = _PCRE2_COMMIT
+    if not expected:
+        return
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD^{commit}"],
+            cwd=destination,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - git missing on build host
+        raise RuntimeError("git is required to verify the PCRE2 source checkout") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"Unable to determine the commit of the PCRE2 checkout at {destination}"
+        ) from exc
+    actual = completed.stdout.strip().lower()
+    if actual != expected:
+        raise RuntimeError(
+            f"PCRE2 checkout at {destination} is at commit {actual or '<unknown>'}, "
+            f"expected pinned commit {expected} for tag {_get_repo_tag()}. "
+            "Remove the directory and rebuild; if the upstream tag moved, update "
+            "PCRE2_COMMIT in setup.py after reviewing the change."
+        )
 
 
 def _get_lib_extensions() -> tuple[str, ...]:
@@ -576,6 +615,8 @@ def _prepare_pcre2_source() -> tuple[list[str], list[str], list[str]]:
             raise RuntimeError(
                 "Failed to clone PCRE2 source from official repository; see the output above for details"
             ) from exc
+
+    _verify_pcre2_checkout(destination)
 
     try:
         subprocess.run(
@@ -1203,12 +1244,32 @@ def _python_headers_available() -> bool:
 
 
 def _safe_extract(tar: tarfile.TarFile, destination: Path, members: Iterable[tarfile.TarInfo]) -> None:
+    """Extract only plain files and directories that stay inside ``destination``.
+
+    Symlinks, hardlinks and device/FIFO members are rejected outright: their
+    ``linkname`` is not covered by the path check, and Python < 3.14 applies no
+    extraction filter by default.
+    """
+
     destination = destination.resolve()
+    safe_members: list[tarfile.TarInfo] = []
     for member in members:
+        if not (member.isreg() or member.isdir()):
+            raise RuntimeError(
+                f"unsafe archive member {member.name!r} (links and special files are not allowed) "
+                "while extracting python headers"
+            )
+        member_path = Path(member.name)
+        if member_path.is_absolute() or ".." in member_path.parts:
+            raise RuntimeError("unsafe path detected while extracting python headers")
         target_path = (destination / member.name).resolve()
         if os.path.commonpath([str(destination), str(target_path)]) != str(destination):
             raise RuntimeError("unsafe path detected while extracting python headers")
-    tar.extractall(path=destination, members=members)
+        safe_members.append(member)
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(path=destination, members=safe_members, filter="data")
+    else:  # pragma: no cover - Python without PEP 706 extraction filters
+        tar.extractall(path=destination, members=safe_members)
 
 
 def _render_config_define(name: str, value: object) -> str | None:
@@ -1286,11 +1347,27 @@ def _download_python_include() -> Path:
     archive_path: Path | None = None
     archive_mode = "r:gz"
     last_error: Exception | None = None
+    # python.org does not publish SHA-256 digests for most source tarballs, so
+    # integrity rests on HTTPS to python.org. Builders who need a pin can set
+    # PYPCRE_PYTHON_HEADERS_SHA256 to the expected digest of the archive.
+    expected_digest = os.environ.get("PYPCRE_PYTHON_HEADERS_SHA256", "").strip().lower() or None
     for url in urls:
         try:
+            digest = hashlib.sha256()
             with urllib.request.urlopen(url) as response, tempfile.NamedTemporaryFile(delete=False) as tmp:
-                shutil.copyfileobj(response, tmp)
                 archive_path = Path(tmp.name)
+                for chunk in iter(lambda: response.read(1 << 20), b""):
+                    digest.update(chunk)
+                    tmp.write(chunk)
+            actual_digest = digest.hexdigest()
+            print(f"PyPcre: downloaded {url} (sha256 {actual_digest})")
+            if expected_digest is not None and actual_digest != expected_digest:
+                archive_path.unlink(missing_ok=True)
+                archive_path = None
+                raise RuntimeError(
+                    f"CPython header archive {url} has sha256 {actual_digest}, "
+                    f"expected {expected_digest} (PYPCRE_PYTHON_HEADERS_SHA256)"
+                )
             archive_mode = "r:xz" if url.endswith(".xz") else "r:gz"
             with tarfile.open(archive_path, archive_mode) as archive:
                 members = [
