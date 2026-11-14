@@ -1587,7 +1587,9 @@ match_expand_resolve_ascii_name(MatchObject *self,
             }
         }
     }
-    if (first_match >= 0) {
+    /* No participating group with this name: report the first one (it reads
+     * as unmatched) -- but only if the ovector actually has a slot for it. */
+    if (first_match >= 0 && (size_t)first_match < self->ovec_count) {
         *group_index = first_match;
         return 1;
     }
@@ -2997,8 +2999,13 @@ Pattern_create_finditer(PatternObject *pattern,
             iter->utf8_data = utf8_data;
         }
     } else if (PyObject_CheckBuffer(subject_obj)) {
-        /* Zero-copy path for e.g. mmap.mmap: get a pointer straight into the
-           exporter's own storage instead of copying it into a new object. */
+        /* Buffer-protocol subjects (mmap.mmap, bytearray, array.array, ...)
+           are snapshotted into an immutable bytes object by
+           buffer_bytes_from_object(): matching straight from the exporter's
+           storage is unsafe because it can be mutated concurrently (another
+           thread, or a MAP_SHARED file written by another process), which
+           would invalidate the UTF-8 validation the match relies on. The
+           snapshot costs one copy of the subject per call. */
         const char *buf_data = NULL;
         Py_ssize_t buf_length = 0;
         PyObject *buf_view = buffer_bytes_from_object(subject_obj, &buf_data, &buf_length);
@@ -3358,8 +3365,13 @@ Pattern_execute(PatternObject *self, PyObject *subject_obj, Py_ssize_t pos,
             subject_length_bytes = utf8_length;
         }
     } else if (PyObject_CheckBuffer(subject_obj)) {
-        /* Zero-copy path for e.g. mmap.mmap: get a pointer straight into the
-           exporter's own storage instead of copying it into a new object. */
+        /* Buffer-protocol subjects (mmap.mmap, bytearray, array.array, ...)
+           are snapshotted into an immutable bytes object by
+           buffer_bytes_from_object(): matching straight from the exporter's
+           storage is unsafe because it can be mutated concurrently (another
+           thread, or a MAP_SHARED file written by another process), which
+           would invalidate the UTF-8 validation the match relies on. The
+           snapshot costs one copy of the subject per call. */
         const char *buf_data = NULL;
         Py_ssize_t buf_length = 0;
         PyObject *buf_view = buffer_bytes_from_object(subject_obj, &buf_data, &buf_length);
@@ -5872,6 +5884,32 @@ Pattern_create(PyObject *pattern_obj, uint32_t options, int jit, int jit_explici
     if (code == NULL) {
         raise_pcre_error("compile", error_code, error_offset);
         Py_DECREF(pattern_bytes);
+        return NULL;
+    }
+
+    /*
+     * PCRE2 accepts up to 65535 capture groups, but a match data block holds
+     * at most 65535 ovector pairs (groups 0..65534), so the last group of a
+     * 65535-group pattern could never be reported -- and code that sized
+     * lookups from the name table instead of the ovector would read past it.
+     * Only reachable with LINK_SIZE 3/4 builds; reject it up front.
+     */
+    uint32_t compiled_capture_count = 0;
+    if (pcre2_pattern_info(code, PCRE2_INFO_CAPTURECOUNT, &compiled_capture_count) == 0 &&
+        compiled_capture_count >= UINT16_MAX) {
+        pcre2_code_free(code);
+        Py_DECREF(pattern_bytes);
+#if defined(PCRE2_ERROR_TOO_MANY_CAPTURES)
+        int too_many_code = PCRE2_ERROR_TOO_MANY_CAPTURES;
+#else
+        int too_many_code = 197;
+#endif
+        raise_pcre_error_message(
+            "compile",
+            too_many_code,
+            0,
+            "too many capturing groups (maximum 65534 supported)"
+        );
         return NULL;
     }
 
